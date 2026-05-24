@@ -2,6 +2,7 @@
 # Version: v0.1
 
 A fast, secure, capability-aware language — built for **Exploidus OS**, also runs natively on Linux/Mac/Windows.
+
 Author: .Bhuiya
 
 ## Install
