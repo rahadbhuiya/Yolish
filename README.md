@@ -17,7 +17,7 @@ sudo make install
 ## Run
 
 ```bash
-ys hello.y
+./ys hello.y
 ```
 
 ## Syntax
