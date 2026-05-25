@@ -22,7 +22,6 @@ static Token make_kw_or_ident(const char *s, int n){
     if(streq(s,n,"return")) {t.kind=TK_RETURN; return t;}
     if(streq(s,n,"struct")) {t.kind=TK_STRUCT; return t;}
     if(streq(s,n,"match"))  {t.kind=TK_MATCH;  return t;}
-    if(streq(s,n,"cap"))    {t.kind=TK_CAP;    return t;}
     if(streq(s,n,"true"))   {t.kind=TK_TRUE;   t.ival=1; return t;}
     if(streq(s,n,"false"))  {t.kind=TK_FALSE;  t.ival=0; return t;}
     t.kind=TK_IDENT; return t;
