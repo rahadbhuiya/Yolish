@@ -4,28 +4,28 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*  Platform  */
+/* ── Platform ── */
 static inline void ys_puts(const char *s){ fputs(s,stdout); fflush(stdout); }
 #define puts(s) ys_puts(s)
 static inline void ys_print(const char *s){ fputs(s,stdout); fflush(stdout); }
 static inline int strcmp_u(const char *a,const char *b){ return strcmp(a,b); }
 static inline int str_len_u(const char *s){ int n=0; while(s[n])n++; return n; }
 
-/*  Capability permissions  */
+/* ── Capability permissions ── */
 #define CAP_READ  1
 #define CAP_WRITE 2
 #define CAP_EXEC  4
 
-/*  Token types  */
+/* ── Token types ── */
 typedef enum {
     TK_EOF, TK_NL,
     TK_INT, TK_FLOAT, TK_STR, TK_IDENT, TK_BOOL,
     TK_FN, TK_LET, TK_VAR, TK_IF, TK_ELSE, TK_WHILE,
     TK_FOR, TK_IN, TK_RETURN, TK_STRUCT, TK_IMPL,
-    TK_MATCH, TK_CAP, TK_UNSAFE, TK_TRUE, TK_FALSE,
+    TK_MATCH, TK_UNSAFE, TK_TRUE, TK_FALSE, TK_IMPORT,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_GT, TK_LTE, TK_GTE,
-    TK_AND, TK_OR, TK_NOT, TK_ARROW, TK_DOTDOT, TK_DOT,
+    TK_AND, TK_OR, TK_NOT, TK_ARROW, TK_FAT_ARROW, TK_DOTDOT, TK_DOT,
     TK_AMP, TK_PIPE, TK_CARET, TK_BANG,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE,
     TK_LBRACKET, TK_RBRACKET, TK_COMMA, TK_COLON,
@@ -38,15 +38,17 @@ typedef struct {
     int         len;
     int64_t     ival;
     int64_t     fval;
+    int         line; /* source line number */
 } Token;
 
-/*  AST node types  */
+/* ── AST node types ── */
 typedef enum {
     ND_INT, ND_FLOAT, ND_STR, ND_BOOL, ND_IDENT,
     ND_BINOP, ND_UNOP, ND_ASSIGN, ND_LET, ND_VAR,
-    ND_CALL, ND_DOT, ND_INDEX,
+    ND_CALL, ND_DOT, ND_INDEX, ND_INDEX_SET,
     ND_IF, ND_WHILE, ND_FOR, ND_RETURN, ND_BLOCK,
-    ND_FN, ND_STRUCT, ND_MATCH,
+    ND_FN, ND_STRUCT, ND_STRUCT_LIT, ND_MATCH, ND_IMPORT,
+    ND_ARRAY,
 } NodeKind;
 
 typedef struct Node Node;
@@ -62,7 +64,7 @@ struct Node {
     Node     *then;
     Node     *els;
     Node     *body;
-    Node     *arg_data[8];
+    Node     *arg_data[16];
     Node    **args;
     int       argc;
     Node    **stmts;
@@ -70,27 +72,48 @@ struct Node {
     char      name[64];
     char      type[32];
     int       is_mut;
+    /* struct field names for struct literals */
+    char      field_names[8][32];
 };
 
-/*  Value types  */
-typedef enum {
-    VT_NIL, VT_INT, VT_FLOAT, VT_BOOL, VT_STR, VT_FN, VT_CAP
-} ValType;
+/* ── Value forward declaration ── */
+typedef struct Val Val;
 
-typedef struct {
-    ValType  type;
+/* ── Array storage ── */
+#define MAX_ARR 64
+struct Val {
+    int      type;
     int64_t  ival;
     int64_t  fval;
     int      bval;
-    char     sval[512];
+    char     sval[256];
     Node    *fn_node;
-    /* capability fields */
+    /* capability */
     int64_t  cap_fd;
     int      cap_perm;
-    char     cap_path[256];
-} Val;
+    char     cap_path[128];
+    /* array */
+    Val     *arr_data;
+    int      arr_len;
+    /* struct */
+    char     struct_name[32];
+    Val     *field_vals;
+    char   (*field_names)[32];
+    int      field_count;
+};
 
-/*  Environment  */
+/* ── Value type constants ── */
+#define VT_NIL  0
+#define VT_INT  1
+#define VT_FLOAT 2
+#define VT_BOOL 3
+#define VT_STR  4
+#define VT_FN   5
+#define VT_CAP  6
+#define VT_ARR  7
+#define VT_STRUCT 8
+
+/* ── Environment ── */
 #define ENV_MAX 32
 typedef struct Env Env;
 struct Env {
@@ -100,25 +123,25 @@ struct Env {
     Env  *parent;
 };
 
-/*  Lexer  */
+/* ── Lexer ── */
 typedef struct {
     const char *src;
     int         pos;
     int         len;
     Token       cur;
+    int         line; /* current line number */
 } Lexer;
 
-/*  Function prototypes  */
+/* ── Function prototypes ── */
 void  lex_init    (Lexer *l, const char *src, int len);
 Token lex_next    (Lexer *l);
-
 Node *parse_program(Lexer *l);
-
 Val   eval_program(Node *prog, Env *env);
 Val   eval_node   (Node *n,    Env *env);
-
 Env  *env_new(Env *parent);
 Val  *env_get(Env *e, const char *name);
 void  env_set(Env *e, const char *name, Val v);
 void  env_def(Env *e, const char *name, Val v);
 void  ys_print_val(Val v);
+void  ys_error(int line, const char *msg);
+extern char g_src_dir[512]; /* directory of the running .y file */

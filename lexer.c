@@ -22,6 +22,7 @@ static Token make_kw_or_ident(const char *s, int n){
     if(streq(s,n,"return")) {t.kind=TK_RETURN; return t;}
     if(streq(s,n,"struct")) {t.kind=TK_STRUCT; return t;}
     if(streq(s,n,"match"))  {t.kind=TK_MATCH;  return t;}
+    if(streq(s,n,"import")) {t.kind=TK_IMPORT; return t;}
     if(streq(s,n,"true"))   {t.kind=TK_TRUE;   t.ival=1; return t;}
     if(streq(s,n,"false"))  {t.kind=TK_FALSE;  t.ival=0; return t;}
     t.kind=TK_IDENT; return t;
@@ -29,7 +30,7 @@ static Token make_kw_or_ident(const char *s, int n){
 
 Token lex_next(Lexer *l){
     const char *s=l->src; int *p=&l->pos; int end=l->len;
-    Token t; t.ival=0; t.fval=0;
+    Token t; t.ival=0; t.fval=0; t.line=l->line;
 
     /* skip whitespace (not newline) and comments */
     while(*p<end && (s[*p]==' '||s[*p]=='\t'||s[*p]=='\r')) (*p)++;
@@ -42,13 +43,13 @@ Token lex_next(Lexer *l){
     t.start=s+*p;
 
     /* newline */
-    if(s[*p]=='\n'){t.kind=TK_NL;t.len=1;(*p)++;return t;}
+    if(s[*p]=='\n'){t.kind=TK_NL;t.len=1;(*p)++;l->line++;t.line=l->line;return t;}
 
     /* number */
     if(is_digit(s[*p])){
         int64_t v=0; int start=*p;
         while(*p<end&&is_digit(s[*p])){v=v*10+(s[*p]-'0');(*p)++;}
-        if(*p<end&&s[*p]=='.'){
+        if(*p<end&&s[*p]=='.'&&(*p+1>=end||s[*p+1]!='.')&&(*p+1<end&&s[*p+1]>='0'&&s[*p+1]<='9')){
             (*p)++; int64_t frac=0,div=1;
             int fc=0;
             while(*p<end&&is_digit(s[*p])&&fc<3){frac=frac*10+(s[*p]-'0');div*=10;(*p)++;fc++;}
@@ -93,7 +94,8 @@ Token lex_next(Lexer *l){
     /* two-char operators */
     char c=s[*p]; (*p)++;
     t.len=1;
-    if(c=='='&&*p<end&&s[*p]=='='){t.kind=TK_EQEQ;t.len=2;(*p)++;return t;}
+    if(c=='='&&*p<end&&s[*p]=='='){t.kind=TK_EQEQ;    t.len=2;(*p)++;return t;}
+    if(c=='='&&*p<end&&s[*p]=='>'){t.kind=TK_FAT_ARROW;t.len=2;(*p)++;return t;}
     if(c=='!'&&*p<end&&s[*p]=='='){t.kind=TK_NEQ; t.len=2;(*p)++;return t;}
     if(c=='<'&&*p<end&&s[*p]=='='){t.kind=TK_LTE; t.len=2;(*p)++;return t;}
     if(c=='>'&&*p<end&&s[*p]=='='){t.kind=TK_GTE; t.len=2;(*p)++;return t;}
@@ -129,7 +131,7 @@ Token lex_next(Lexer *l){
 }
 
 void lex_init(Lexer *l, const char *src, int len){
-    l->src=src; l->pos=0; l->len=len;
+    l->src=src; l->pos=0; l->len=len; l->line=1;
     l->cur=lex_next(l);
 }
 
