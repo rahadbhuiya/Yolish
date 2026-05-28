@@ -716,10 +716,10 @@ Audit output (stderr):
 ### Separating output from logs
 
 ```bash
-./ys program.y               -- both together in terminal
-./ys program.y 2>/dev/null   -- program output only
-./ys program.y 2>audit.log   -- save logs, show output
-./ys program.y >out.txt 2>audit.log  -- save both separately
+./ys examples/ann_test.y              -- both together in terminal
+./ys examples/ann_test.y 2>/dev/null   -- program output only
+./ys examples/ann_test.y 2>audit.log   -- save logs, show output
+./ys examples/ann_test.y >out.txt 2>audit.log  -- save both separately
 ```
 
 ### Notes
