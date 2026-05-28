@@ -79,6 +79,7 @@ static Node *parse_primary(Lexer *l){
                 call->arg_data[argc++]=parse_expr(l);
                 if(!match_tk(l,TK_COMMA)) break;
             }
+            if(check(l,TK_RPAREN)) eat(l);
             call->args=call->arg_data; call->argc=argc;
             return call;
         }
@@ -334,6 +335,63 @@ static Node *parse_stmt(Lexer *l){
         n->stmts=(Node**)fields; n->stmtc=fc;
         return n;
     }
+    /* @intent("arg") / @audit("arg") annotation before fn */
+    if(t.kind==TK_AT){
+        eat(l);
+        Token ann=expect(l,TK_IDENT);
+        /* annotation name into a temp buffer */
+        char ann_name[32]; int al=ann.len<31?ann.len:31;
+        for(int i=0;i<al;i++) { ann_name[i]=ann.start[i]; } ann_name[al]=0;
+        /* parse optional ("arg") */
+        char ann_arg[64]; ann_arg[0]=0;
+        if(check(l,TK_LPAREN)){
+            eat(l);
+            if(check(l,TK_STR)){
+                Token av=eat(l);
+                int vl=av.len<63?av.len:63;
+                for(int i=0;i<vl;i++) { ann_arg[i]=av.start[i]; } ann_arg[vl]=0;
+            }
+            if(check(l,TK_RPAREN)) eat(l);
+        }
+        while(check(l,TK_NL)) eat(l);
+        /* next statement must be fn */
+        if(!check(l,TK_FN)){
+            ys_print("[YS] annotation must precede fn\n");
+            return alloc_node(ND_INT);
+        }
+        eat(l); /* eat TK_FN */
+        Node *n=alloc_node(ND_FN);
+        /* copy annotation into node */
+        for(int i=0;ann_name[i]&&i<31;i++) n->type[i]=ann_name[i];
+        n->type[31]=0;
+        for(int i=0;ann_arg[i]&&i<255;i++) n->sval[i]=ann_arg[i];
+        n->sval[255]=0;
+        /* parse rest of fn (name, params, body) */
+        Token nm=expect(l,TK_IDENT);
+        int nl2=nm.len<63?nm.len:63;
+        for(int i=0;i<nl2;i++) { n->name[i]=nm.start[i]; } n->name[nl2]=0;
+        expect(l,TK_LPAREN);
+        int nparams=0;
+        while(!check(l,TK_RPAREN)&&!check(l,TK_EOF)&&nparams<8){
+            while(check(l,TK_NL)) eat(l);
+            if(check(l,TK_RPAREN)) break;
+            if(check(l,TK_IDENT)){
+                Token p=eat(l);
+                int pl=p.len<31?p.len:31;
+                for(int i=0;i<pl;i++) n->field_names[nparams][i]=p.start[i];
+                n->field_names[nparams][pl]=0;
+                nparams++;
+                if(check(l,TK_COLON)){eat(l);eat(l);}
+            } else { eat(l); }
+            if(!match_tk(l,TK_COMMA)) break;
+        }
+        n->argc=nparams;
+        expect(l,TK_RPAREN);
+        if(check(l,TK_ARROW)){eat(l);eat(l);}
+        n->body=parse_block(l);
+        return n;
+    }
+
     /* fn */
     if(t.kind==TK_FN){
         eat(l); Node *n=alloc_node(ND_FN);

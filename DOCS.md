@@ -24,6 +24,7 @@ Extension: `.y`
 14. [Import](#14-import)
 15. [Error Messages](#15-error-messages)
 16. [Comments](#16-comments)
+17. [Annotations](#17-annotations)
 
 ---
 
@@ -623,3 +624,108 @@ cap.read(f)    cap.write(f, data)    cap.close(f)
 -- import
 import "utils.y"
 ```
+
+---
+
+## 17. Annotations
+
+Annotations attach metadata to functions. They are declared on the line immediately before `fn`.
+
+### Syntax
+
+```yolish
+@annotation_name("argument")
+fn function_name(params) {
+    ...
+}
+```
+
+### @intent
+
+Signals the resource intent of a function to the Exploidus OS scheduler. The scheduler uses this hint to prioritize or manage resources before the function runs.
+
+The hint is emitted to `stderr` once per outermost call — recursive calls do not repeat it.
+
+```yolish
+@intent("io")
+fn read_config(path) {
+    let f = cap.open(path, 1)
+    let data = cap.read(f)
+    cap.close(f)
+    return data
+}
+
+@intent("compute")
+fn fibonacci(n) {
+    if n <= 1 { return n }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+@intent("network")
+fn fetch(url) {
+    -- future: network capability
+}
+```
+
+Common intent values:
+
+| Value | Meaning |
+|-------|---------|
+| `"io"` | File or device access |
+| `"compute"` | CPU-intensive work |
+| `"network"` | Network access |
+| `"memory"` | Large allocation |
+
+Scheduler output (stderr):
+```
+[scheduler] intent=compute fn=fibonacci
+```
+
+### @audit
+
+Logs every call to the function — tag, function name, and argument count. Output goes to `stderr` so it does not mix with program output.
+
+```yolish
+@audit("sensitive")
+fn get_secret() {
+    return "key-abc-123"
+}
+
+@audit("auth")
+fn login(user, pass) {
+    if user == "admin" {
+        if pass == "1234" { return true }
+    }
+    return false
+}
+
+@audit("write")
+fn save_log(msg) {
+    let f = cap.open("/var/log/app.log", 2)
+    cap.write(f, msg)
+    cap.close(f)
+}
+```
+
+Audit output (stderr):
+```
+[audit] tag=auth fn=login args=2
+[audit] tag=sensitive fn=get_secret args=0
+```
+
+### Separating output from logs
+
+```bash
+./ys program.y               -- both together in terminal
+./ys program.y 2>/dev/null   -- program output only
+./ys program.y 2>audit.log   -- save logs, show output
+./ys program.y >out.txt 2>audit.log  -- save both separately
+```
+
+### Notes
+
+- Annotation must be on the line directly before `fn`.
+- Only one annotation per function.
+- Annotation fires once per outermost call — recursive calls are suppressed.
+- Both `@intent` and `@audit` accept an optional string argument.
+- On Exploidus OS, `@intent` integrates with the kernel scheduler directly.

@@ -87,7 +87,7 @@ struct Val {
     int64_t  fval;
     int      bval;
     char     sval[256];
-    Node    *fn_node;
+    Node    *fn_node; /* ann type/arg are in fn_node->type and fn_node->sval */
     /* capability */
     int64_t  cap_fd;
     int      cap_perm;
@@ -142,6 +142,7 @@ Env  *env_new(Env *parent);
 Val  *env_get(Env *e, const char *name);
 void  env_set(Env *e, const char *name, Val v);
 void  env_def(Env *e, const char *name, Val v);
+void  env_free(Env *e);
 void  ys_print_val(Val v);
 void  ys_error(int line, const char *msg);
 extern char g_src_dir[512]; /* directory of the running .y file */

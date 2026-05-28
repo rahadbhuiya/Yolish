@@ -1,7 +1,7 @@
 #include "yolish.h"
 
 /* ── Memory pools ── */
-static Env  envpool[256];  static int envidx=0;
+static Env  envpool[4096]; static int envidx=0;
 static Val  arrpool[2048]; static int arridx=0;
 static Val  fldpool[512];  static int fldidx=0;
 static char nmpool[512][32]; static int nmidx=0;
@@ -21,10 +21,11 @@ static char (*alloc_nm(int n))[32]{
 
 /* ── Environment ── */
 Env *env_new(Env *parent){
-    if(envidx>=256) envidx=4; /* recycle from index 4, keep global envs */
+    if(envidx>=4096){ fprintf(stderr,"[YS] env stack overflow\n"); envidx=8; }
     Env *e=&envpool[envidx++];
     e->count=0; e->parent=parent; return e;
 }
+void env_free(Env *e){ (void)e; if(envidx>0) envidx--; }
 Val *env_get(Env *e,const char *name){
     for(;e;e=e->parent)
         for(int i=0;i<e->count;i++)
@@ -147,6 +148,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env);
 static int g_returning=0;
 static Val g_return_val;
 static int g_cur_line=0;  /* last known source line */
+static int g_ann_depth=0; /* annotation fire depth — suppress nested calls */
 
 /* ── Runtime error ── */
 void ys_error(int line, const char *msg){
@@ -308,8 +310,7 @@ Val eval_node(Node *n,Env *env){
                 int j=0; while(R.sval[j]&&i<254)r.sval[i++]=R.sval[j++];
                 r.sval[i]=0; return r;
             }
-            return use_f?make_float((val_float(L)+val_float(R))/1000)
-                        :make_int(val_int(L)+val_int(R));
+            return use_f?make_float((val_float(L)+val_float(R))/1000):make_int(val_int(L)+val_int(R));
         case TK_MINUS:
             return use_f?make_float((val_float(L)-val_float(R))/1000)
                         :make_int(val_int(L)-val_int(R));
@@ -320,8 +321,14 @@ Val eval_node(Node *n,Env *env){
             return use_f?make_float(val_float(L)*1000/val_float(R))
                         :make_int(d?val_int(L)/d:0);}
         case TK_PERCENT:{int64_t d=val_int(R);return make_int(d?val_int(L)%d:0);}
-        case TK_EQEQ: return make_bool(val_int(L)==val_int(R));
-        case TK_NEQ:  return make_bool(val_int(L)!=val_int(R));
+        case TK_EQEQ:
+            if(L.type==VT_STR&&R.type==VT_STR)
+                return make_bool(strcmp_u(L.sval,R.sval)==0);
+            return make_bool(val_int(L)==val_int(R));
+        case TK_NEQ:
+            if(L.type==VT_STR&&R.type==VT_STR)
+                return make_bool(strcmp_u(L.sval,R.sval)!=0);
+            return make_bool(val_int(L)!=val_int(R));
         case TK_LT:   return make_bool(use_f?val_float(L)<val_float(R):val_int(L)<val_int(R));
         case TK_GT:   return make_bool(use_f?val_float(L)>val_float(R):val_int(L)>val_int(R));
         case TK_LTE:  return make_bool(use_f?val_float(L)<=val_float(R):val_int(L)<=val_int(R));
@@ -437,6 +444,7 @@ Val eval_node(Node *n,Env *env){
 
     case ND_FN:{
         Val v=make_nil(); v.type=VT_FN; v.fn_node=n;
+        /* annotation info lives in fn_node->type and fn_node->sval */
         env_def(env,n->name,v); return v;
     }
 
@@ -472,14 +480,44 @@ Val eval_node(Node *n,Env *env){
         Val *fv=env_get(env,n->name);
         if(fv&&fv->type==VT_FN&&fv->fn_node){
             Node *fn_def=fv->fn_node;
+
+            /* reset return signal before any annotation side effects */
+            g_returning=0;
+
+            /* fire annotation only on outermost call, not recursive re-entry */
+            {
+                const char *ann_t = fn_def->type; /* annotation type from AST */
+                const char *ann_a = fn_def->sval; /* annotation arg from AST */
+                if(g_ann_depth==0 && ann_t[0]){
+                    /* ── @intent → stderr ── */
+                    if(ann_t[0]=='i'&&ann_t[1]=='n'){
+                        fputs("[scheduler] intent=",stderr);
+                        fputs(ann_a[0]?ann_a:"unspecified",stderr);
+                        fputs(" fn=",stderr); fputs(n->name,stderr); fputs("\n",stderr);
+                        fflush(stderr);
+                    }
+                    /* ── @audit → stderr ── */
+                    else if(ann_t[0]=='a'&&ann_t[1]=='u'){
+                        fputs("[audit] tag=",stderr);
+                        fputs(ann_a[0]?ann_a:"untagged",stderr);
+                        fputs(" fn=",stderr); fputs(n->name,stderr);
+                        fputs(" args=",stderr);
+                        char ac[2]; ac[0]=(char)('0'+(n->argc<9?n->argc:9)); ac[1]=0;
+                        fputs(ac,stderr); fputs("\n",stderr);
+                        fflush(stderr);
+                    }
+                }
+            }
+
             Env *fe=env_new(env);
-            /* bind arguments to parameter names */
             for(int i=0;i<fn_def->argc&&i<n->argc;i++){
                 Val arg=eval_node(n->args[i],env);
                 env_def(fe,fn_def->field_names[i],arg);
             }
             g_returning=0;
+            if(fn_def->type[0]) g_ann_depth++;
             Val result=eval_block(fn_def->body,fe);
+            if(fn_def->type[0]) g_ann_depth--;
             g_returning=0;
             return result;
         }
