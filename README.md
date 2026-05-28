@@ -139,9 +139,9 @@ make debug
 Annotation output (`@intent`, `@audit`) goes to `stderr` — separate from program output:
 
 ```bash
-./ys program.y               -- both in terminal
-./ys program.y 2>/dev/null   -- program output only
-./ys program.y 2>audit.log   -- save logs separately
+./ys examples/ann_test.y               -- both in terminal
+./ys examples/ann_test.y 2>/dev/null   -- program output only
+./ys examples/ann_test.y 2>audit.log   -- save logs separately
 ```
 
 ---
