@@ -1,16 +1,42 @@
 #include "yolish.h"
 #include <unistd.h>
+#include <unistd.h>
 
 static char src[65536];
 char g_src_dir[512] = {0}; /* set from argv[1] */
 
+
+/*  REPL  */
+static void run_repl(void){
+    char line[4096];
+    Env *env=env_new(NULL);
+    fprintf(stdout,"Yolish v0.5 REPL  (type 'exit' to quit)\n");
+    fflush(stdout);
+    while(1){
+        fprintf(stdout,"ys> "); fflush(stdout);
+        if(!fgets(line,sizeof(line),stdin)) break;
+        /* trim newline */
+        int ln=0; while(line[ln]&&line[ln]!='\n')ln++;
+        line[ln]=0;
+        if(ln==0) continue;
+        if(line[0]=='e'&&line[1]=='x'&&line[2]=='i'&&line[3]=='t'&&line[4]==0) break;
+        Lexer l; lex_init(&l,line,ln);
+        Node *prog=parse_program(&l);
+        Val result=eval_program(prog,env);
+        /* print result if not nil */
+        if(result.type!=0){
+            ys_print_val(result);
+            fprintf(stdout,"\n");
+        }
+        fflush(stdout);
+    }
+    fprintf(stdout,"\nBye!\n");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Yolish — the official programming language of Exploidus OS\n");
-        fprintf(stderr, "Author  : .Bhuiya\n");
-        fprintf(stderr, "Version : v0.3\n");
-        fprintf(stderr, "Usage   : ys <file.y>\n");
-        return 1;
+        run_repl();
+        return 0;
     }
     FILE *f = fopen(argv[1], "r");
     if (!f) { fprintf(stderr, "ys: cannot open '%s'\n", argv[1]); return 1; }

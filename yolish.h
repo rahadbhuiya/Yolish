@@ -4,25 +4,26 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Platform ── */
+/*  Platform  */
 static inline void ys_puts(const char *s){ fputs(s,stdout); fflush(stdout); }
 #define puts(s) ys_puts(s)
 static inline void ys_print(const char *s){ fputs(s,stdout); fflush(stdout); }
 static inline int strcmp_u(const char *a,const char *b){ return strcmp(a,b); }
 static inline int str_len_u(const char *s){ int n=0; while(s[n])n++; return n; }
 
-/* ── Capability permissions ── */
+/*  Capability permissions  */
 #define CAP_READ  1
 #define CAP_WRITE 2
 #define CAP_EXEC  4
 
-/* ── Token types ── */
+/*  Token types  */
 typedef enum {
     TK_EOF, TK_NL,
     TK_INT, TK_FLOAT, TK_STR, TK_IDENT, TK_BOOL,
     TK_FN, TK_LET, TK_VAR, TK_IF, TK_ELSE, TK_WHILE,
     TK_FOR, TK_IN, TK_RETURN, TK_STRUCT, TK_IMPL,
     TK_MATCH, TK_UNSAFE, TK_TRUE, TK_FALSE, TK_IMPORT,
+    TK_TRY, TK_CATCH, TK_THROW,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_GT, TK_LTE, TK_GTE,
     TK_AND, TK_OR, TK_NOT, TK_ARROW, TK_FAT_ARROW, TK_DOTDOT, TK_DOT,
@@ -41,13 +42,14 @@ typedef struct {
     int         line; /* source line number */
 } Token;
 
-/* ── AST node types ── */
+/*  AST node types  */
 typedef enum {
     ND_INT, ND_FLOAT, ND_STR, ND_BOOL, ND_IDENT,
     ND_BINOP, ND_UNOP, ND_ASSIGN, ND_LET, ND_VAR,
     ND_CALL, ND_DOT, ND_INDEX, ND_INDEX_SET,
     ND_IF, ND_WHILE, ND_FOR, ND_RETURN, ND_BLOCK,
-    ND_FN, ND_STRUCT, ND_STRUCT_LIT, ND_MATCH, ND_IMPORT,
+    ND_FN, ND_FN_LIT, ND_STRUCT, ND_STRUCT_LIT, ND_MATCH, ND_IMPORT,
+    ND_TRY, ND_THROW,
     ND_ARRAY,
 } NodeKind;
 
@@ -76,10 +78,10 @@ struct Node {
     char      field_names[8][32];
 };
 
-/* ── Value forward declaration ── */
+/*  Value forward declaration  */
 typedef struct Val Val;
 
-/* ── Array storage ── */
+/*  Array storage  */
 #define MAX_ARR 64
 struct Val {
     int      type;
@@ -88,6 +90,7 @@ struct Val {
     int      bval;
     char     sval[256];
     Node    *fn_node; /* ann type/arg are in fn_node->type and fn_node->sval */
+    void    *fn_env;  /* captured Env* for closures (NULL = use call-site env) */
     /* capability */
     int64_t  cap_fd;
     int      cap_perm;
@@ -102,7 +105,7 @@ struct Val {
     int      field_count;
 };
 
-/* ── Value type constants ── */
+/*  Value type constants  */
 #define VT_NIL  0
 #define VT_INT  1
 #define VT_FLOAT 2
@@ -112,8 +115,9 @@ struct Val {
 #define VT_CAP  6
 #define VT_ARR  7
 #define VT_STRUCT 8
+#define VT_ERR    9
 
-/* ── Environment ── */
+/*  Environment  */
 #define ENV_MAX 32
 typedef struct Env Env;
 struct Env {
@@ -123,7 +127,7 @@ struct Env {
     Env  *parent;
 };
 
-/* ── Lexer ── */
+/*  Lexer  */
 typedef struct {
     const char *src;
     int         pos;
@@ -132,7 +136,7 @@ typedef struct {
     int         line; /* current line number */
 } Lexer;
 
-/* ── Function prototypes ── */
+/*  Function prototypes  */
 void  lex_init    (Lexer *l, const char *src, int len);
 Token lex_next    (Lexer *l);
 Node *parse_program(Lexer *l);

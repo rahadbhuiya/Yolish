@@ -1,6 +1,6 @@
 #include "yolish.h"
 
-/* ── Memory pools ── */
+/*  Memory pools  */
 static Env  envpool[4096]; static int envidx=0;
 static Val  arrpool[2048]; static int arridx=0;
 static Val  fldpool[512];  static int fldidx=0;
@@ -19,7 +19,7 @@ static char (*alloc_nm(int n))[32]{
     char (*p)[32]=&nmpool[nmidx]; nmidx+=n; return p;
 }
 
-/* ── Environment ── */
+/*  Environment  */
 Env *env_new(Env *parent){
     if(envidx>=4096){ fprintf(stderr,"[YS] env stack overflow\n"); envidx=8; }
     Env *e=&envpool[envidx++];
@@ -45,7 +45,7 @@ void env_def(Env *e,const char *name,Val v){
     e->vals[e->count++]=v;
 }
 
-/* ── Value constructors ── */
+/*  Value constructors  */
 static Val make_nil(void){
     Val r; r.type=VT_NIL; r.ival=0; r.fval=0; r.bval=0;
     r.sval[0]=0; r.fn_node=0; r.cap_fd=-1; r.cap_perm=0;
@@ -56,6 +56,11 @@ static Val make_nil(void){
 static Val make_int(int64_t v){Val r=make_nil();r.type=VT_INT;r.ival=v;return r;}
 static Val make_float(int64_t v){Val r=make_nil();r.type=VT_FLOAT;r.fval=v;return r;}
 static Val make_bool(int v){Val r=make_nil();r.type=VT_BOOL;r.bval=v;r.ival=v;return r;}
+static Val make_err(const char *msg){
+    Val r=make_nil(); r.type=VT_ERR;
+    int i=0; while(msg[i]&&i<254){r.sval[i]=msg[i];i++;} r.sval[i]=0;
+    return r;
+}
 static Val make_str(const char *s){
     Val r=make_nil(); r.type=VT_STR;
     int i=0; while(s[i]&&i<255){r.sval[i]=s[i];i++;} r.sval[i]=0;
@@ -68,7 +73,7 @@ static Val make_cap(const char *path,int perm,int64_t fd){
     return r;
 }
 
-/* ── Value helpers ── */
+/*  Value helpers  */
 static int64_t val_int(Val v){
     if(v.type==VT_INT)   return v.ival;
     if(v.type==VT_FLOAT) return v.fval/1000;
@@ -99,7 +104,7 @@ static void int_to_str(int64_t n,char *buf){
     while(i>0) { buf[j++]=tmp[--i]; } buf[j]=0;
 }
 
-/* ── Print value ── */
+/*  Print value  */
 void ys_print_val(Val v){
     if(v.type==VT_INT){
         char b[24]; int_to_str(v.ival,b); puts(b);
@@ -140,17 +145,20 @@ void ys_print_val(Val v){
     }
 }
 
-/* ── Forward ── */
+/*  Forward  */
 static Val eval_block(Node *b,Env *parent);
 static Val call_builtin(const char *name,Node **args,int argc,Env *env);
 
-/* ── Return signal ── */
+/*  Return signal  */
 static int g_returning=0;
 static Val g_return_val;
 static int g_cur_line=0;  /* last known source line */
 static int g_ann_depth=0; /* annotation fire depth — suppress nested calls */
+static int g_throwing=0;     /* throw signal */
+static char g_throw_msg[512]; /* thrown message */
+static Val g_throw_val;       /* thrown value — use g_throw_msg for str content */
 
-/* ── Runtime error ── */
+/*  Runtime error  */
 void ys_error(int line, const char *msg){
     char buf[256]; int n=0;
     const char *pre="[YS] error";
@@ -169,7 +177,7 @@ void ys_error(int line, const char *msg){
     ys_print(buf);
 }
 
-/* ── struct registry ── */
+/*  struct registry  */
 #define MAX_STRUCTS 16
 static struct {
     char name[32];
@@ -178,7 +186,7 @@ static struct {
 } structs[MAX_STRUCTS];
 static int nstructs=0;
 
-/* ── eval_node ── */
+/*  eval_node  */
 Val eval_node(Node *n,Env *env){
     if(!n) return make_nil();
     switch(n->kind){
@@ -205,7 +213,7 @@ Val eval_node(Node *n,Env *env){
         return v;
     }
 
-    /* ── Array literal ── */
+    /*  Array literal  */
     case ND_ARRAY:{
         Val v=make_nil(); v.type=VT_ARR;
         v.arr_len=n->argc;
@@ -215,7 +223,7 @@ Val eval_node(Node *n,Env *env){
         return v;
     }
 
-    /* ── Array index read ── */
+    /*  Array index read  */
     /* struct field access: point.x */
     case ND_DOT:{
         Val obj=eval_node(n->left,env);
@@ -248,7 +256,7 @@ Val eval_node(Node *n,Env *env){
         return arr.arr_data[i];
     }
 
-    /* ── Array index write ── */
+    /*  Array index write  */
     case ND_INDEX_SET:{
         Val arr=eval_node(n->left->left,env);
         Val idx=eval_node(n->left->right,env);
@@ -261,7 +269,7 @@ Val eval_node(Node *n,Env *env){
         return val;
     }
 
-    /* ── Struct definition ── */
+    /*  Struct definition  */
     case ND_STRUCT:{
         if(nstructs<MAX_STRUCTS){
             int si=nstructs++;
@@ -279,7 +287,7 @@ Val eval_node(Node *n,Env *env){
         return make_nil();
     }
 
-    /* ── Struct literal ── */
+    /*  Struct literal  */
     case ND_STRUCT_LIT:{
         Val v=make_nil(); v.type=VT_STRUCT;
         int ni=0;
@@ -440,7 +448,52 @@ Val eval_node(Node *n,Env *env){
         return make_nil(); /* no arm matched */
     }
 
+    case ND_THROW:{
+        Val thrown = n->right ? eval_node(n->right,env) : make_nil();
+        /* store message in stable global string */
+        if(thrown.type==VT_STR||thrown.type==VT_ERR){
+            int ci=0; while(thrown.sval[ci]&&ci<510){g_throw_msg[ci]=thrown.sval[ci];ci++;}
+            g_throw_msg[ci]=0;
+        } else if(thrown.type==VT_INT){
+            /* convert int to string */
+            int64_t v=thrown.ival; int neg=v<0; if(neg)v=-v;
+            char tb[32]; int ti=0;
+            do{tb[ti++]=(char)('0'+(v%10));v/=10;}while(v>0);
+            int ci=0; if(neg)g_throw_msg[ci++]='-';
+            while(ti>0&&ci<510) g_throw_msg[ci++]=tb[--ti];
+            g_throw_msg[ci]=0;
+        } else {
+            g_throw_msg[0]='e';g_throw_msg[1]='r';g_throw_msg[2]='r';g_throw_msg[3]=0;
+        }
+        g_throw_val=make_err(g_throw_msg);
+        g_throwing=1;
+        return g_throw_val;
+    }
+
+    case ND_TRY:{
+        /* run try body; catch any throw */
+        g_throwing=0;
+        Val result=eval_block(n->then,env);
+        if(g_throwing){
+            g_throwing=0;
+            if(n->els){
+                Env *ce=env_new(env);
+                if(n->name[0]) env_def(ce,n->name,make_str(g_throw_msg));
+                int saved=envidx;
+                result=eval_block(n->els,ce);
+                envidx=saved;
+            }
+        }
+        return result;
+    }
+
     case ND_BLOCK: return eval_block(n,env);
+
+    case ND_FN_LIT:{
+        Val v=make_nil(); v.type=VT_FN; v.fn_node=n;
+        v.fn_env=(void*)env; /* capture current environment */
+        return v;
+    }
 
     case ND_FN:{
         Val v=make_nil(); v.type=VT_FN; v.fn_node=n;
@@ -480,6 +533,8 @@ Val eval_node(Node *n,Env *env){
         Val *fv=env_get(env,n->name);
         if(fv&&fv->type==VT_FN&&fv->fn_node){
             Node *fn_def=fv->fn_node;
+            /* use captured env for closures, call-site env for named fns */
+            Env *closure_env=(fv->fn_env)?((Env*)fv->fn_env):env;
 
             /* reset return signal before any annotation side effects */
             g_returning=0;
@@ -509,16 +564,17 @@ Val eval_node(Node *n,Env *env){
                 }
             }
 
-            Env *fe=env_new(env);
+            Env *fe=env_new(closure_env);
             for(int i=0;i<fn_def->argc&&i<n->argc;i++){
                 Val arg=eval_node(n->args[i],env);
                 env_def(fe,fn_def->field_names[i],arg);
             }
             g_returning=0;
+            /* don't reset g_throwing — let it propagate to try/catch */
             if(fn_def->type[0]) g_ann_depth++;
             Val result=eval_block(fn_def->body,fe);
             if(fn_def->type[0]) g_ann_depth--;
-            g_returning=0;
+            if(!g_throwing) g_returning=0; /* preserve throw signal */
             return result;
         }
         return make_nil();
@@ -556,24 +612,33 @@ static Val eval_block(Node *b,Env *parent){
     Val last=make_nil();
     for(int i=0;i<b->stmtc;i++){
         last=eval_node(b->stmts[i],e);
-        if(g_returning) break;
+        if(g_returning||g_throwing) break;
     }
     return last;
 }
 
-/* ── Builtins ── */
+/*  Builtins  */
 static Val call_builtin(const char *name,Node **args,int argc,Env *env){
+    if(g_throwing) return make_nil();
 
     /* y.print */
     if(strcmp_u(name,"y.print")==0||strcmp_u(name,"print")==0){
         int s=(argc>1)?1:0;
-        for(int i=s;i<argc;i++) ys_print_val(eval_node(args[i],env));
+        for(int i=s;i<argc;i++){
+            Val _pv=eval_node(args[i],env);
+            if(g_throwing) return make_nil();
+            ys_print_val(_pv);
+        }
         return make_nil();
     }
     /* y.println */
     if(strcmp_u(name,"y.println")==0||strcmp_u(name,"println")==0){
         int s=(argc>1)?1:0;
-        for(int i=s;i<argc;i++) ys_print_val(eval_node(args[i],env));
+        for(int i=s;i<argc;i++){
+            Val _pv=eval_node(args[i],env);
+            if(g_throwing) return make_nil();
+            ys_print_val(_pv);
+        }
         puts("\n"); return make_nil();
     }
     /* y.input */
@@ -759,6 +824,118 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_str(buf);
     }
 
+    /* y.map(arr, fn) → new array */
+    if(strcmp_u(name,"y.map")==0||strcmp_u(name,"map")==0){
+        int s0=(argc>2)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val fn =eval_node(args[s0+1],env);
+        Val result=make_nil(); result.type=VT_ARR;
+        result.arr_data=alloc_arr(arr.arr_len+1);
+        result.arr_len=arr.arr_len;
+        if(fn.type==VT_FN&&fn.fn_node){
+            Node *fd=fn.fn_node;
+            Env *ce=(fn.fn_env)?((Env*)fn.fn_env):env;
+            for(int i=0;i<arr.arr_len;i++){
+                Env *fe=env_new(ce);
+                if(fd->argc>0) env_def(fe,fd->field_names[0],arr.arr_data[i]);
+                g_returning=0;
+                int saved=envidx;
+                result.arr_data[i]=eval_block(fd->body,fe);
+                envidx=saved; g_returning=0;
+            }
+        }
+        return result;
+    }
+    /* y.filter(arr, fn) → filtered array */
+    if(strcmp_u(name,"y.filter")==0||strcmp_u(name,"filter")==0){
+        int s0=(argc>2)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val fn =eval_node(args[s0+1],env);
+        Val result=make_nil(); result.type=VT_ARR;
+        result.arr_data=alloc_arr(arr.arr_len+1);
+        result.arr_len=0;
+        if(fn.type==VT_FN&&fn.fn_node){
+            Node *fd=fn.fn_node;
+            Env *ce=(fn.fn_env)?((Env*)fn.fn_env):env;
+            for(int i=0;i<arr.arr_len;i++){
+                Env *fe=env_new(ce);
+                if(fd->argc>0) env_def(fe,fd->field_names[0],arr.arr_data[i]);
+                g_returning=0;
+                int saved=envidx;
+                Val r=eval_block(fd->body,fe);
+                envidx=saved; g_returning=0;
+                if(val_bool(r)) result.arr_data[result.arr_len++]=arr.arr_data[i];
+            }
+        }
+        return result;
+    }
+    /* y.reduce(arr, fn, init) → single value */
+    if(strcmp_u(name,"y.reduce")==0||strcmp_u(name,"reduce")==0){
+        int s0=(argc>3)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val fn =eval_node(args[s0+1],env);
+        Val acc=eval_node(args[s0+2],env);
+        if(fn.type==VT_FN&&fn.fn_node){
+            Node *fd=fn.fn_node;
+            Env *ce=(fn.fn_env)?((Env*)fn.fn_env):env;
+            for(int i=0;i<arr.arr_len;i++){
+                Env *fe=env_new(ce);
+                if(fd->argc>0) env_def(fe,fd->field_names[0],acc);
+                if(fd->argc>1) env_def(fe,fd->field_names[1],arr.arr_data[i]);
+                g_returning=0;
+                int saved=envidx;
+                acc=eval_block(fd->body,fe);
+                envidx=saved; g_returning=0;
+            }
+        }
+        return acc;
+    }
+    /* y.each(arr, fn) → run fn for side effects */
+    if(strcmp_u(name,"y.each")==0||strcmp_u(name,"each")==0){
+        int s0=(argc>2)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val fn =eval_node(args[s0+1],env);
+        if(fn.type==VT_FN&&fn.fn_node){
+            Node *fd=fn.fn_node;
+            Env *ce=(fn.fn_env)?((Env*)fn.fn_env):env;
+            for(int i=0;i<arr.arr_len;i++){
+                Env *fe=env_new(ce);
+                if(fd->argc>0) env_def(fe,fd->field_names[0],arr.arr_data[i]);
+                g_returning=0;
+                int saved=envidx;
+                eval_block(fd->body,fe);
+                envidx=saved; g_returning=0;
+            }
+        }
+        return make_nil();
+    }
+
+    /* y.typeof(val) → "int","float","str","bool","array","struct","fn","err","nil" */
+    if(strcmp_u(name,"y.typeof")==0||strcmp_u(name,"typeof")==0){
+        int s0=(argc>1)?1:0;
+        Val v=eval_node(args[s0],env);
+        const char *t="nil";
+        if(v.type==VT_INT)    t="int";
+        else if(v.type==VT_FLOAT)  t="float";
+        else if(v.type==VT_STR)    t="str";
+        else if(v.type==VT_BOOL)   t="bool";
+        else if(v.type==VT_ARR)    t="array";
+        else if(v.type==VT_STRUCT) t="struct";
+        else if(v.type==VT_FN)     t="fn";
+        else if(v.type==VT_CAP)    t="cap";
+        else if(v.type==VT_ERR)    t="err";
+        return make_str(t);
+    }
+    /* y.is_int / y.is_str / y.is_float / y.is_bool / y.is_array / y.is_fn / y.is_nil */
+    if(strcmp_u(name,"y.is_int")==0)  { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_INT); }
+    if(strcmp_u(name,"y.is_float")==0){ int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_FLOAT); }
+    if(strcmp_u(name,"y.is_str")==0)  { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_STR); }
+    if(strcmp_u(name,"y.is_bool")==0) { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_BOOL); }
+    if(strcmp_u(name,"y.is_array")==0){ int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_ARR); }
+    if(strcmp_u(name,"y.is_fn")==0)   { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_FN); }
+    if(strcmp_u(name,"y.is_nil")==0)  { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_NIL); }
+    if(strcmp_u(name,"y.is_err")==0)  { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_ERR); }
+
     /* y.push(arr, val) */
     if(strcmp_u(name,"y.push")==0||strcmp_u(name,"push")==0){
         int s=(argc>2)?1:0;
@@ -789,7 +966,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         exit(code);
     }
 
-    /* ── Capability ── */
+    /*  Capability  */
     if(strcmp_u(name,"cap.open")==0||strcmp_u(name,"open")==0){
         int s=(argc>1)?1:0;
         Val path_v=eval_node(args[s],env);

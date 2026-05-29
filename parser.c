@@ -3,6 +3,8 @@
 /* Forward declarations */
 static Node *parse_expr(Lexer *l);
 static Node *parse_stmt(Lexer *l);
+static Node *parse_block(Lexer *l);
+static Node *parse_binop(Lexer *l, int min_prec);
 
 /* simple allocator using stack-like bump */
 static Node pool[512];
@@ -169,6 +171,33 @@ static Node *parse_primary(Lexer *l){
         arr->args=arr->arg_data; arr->argc=cnt;
         return arr;
     }
+    /* anonymous fn literal: fn(params) { body } */
+    if(t.kind==TK_FN){
+        eat(l);
+        Node *n=alloc_node(ND_FN_LIT);
+        n->name[0]=0; /* anonymous */
+        expect(l,TK_LPAREN);
+        int nparams=0;
+        while(!check(l,TK_RPAREN)&&!check(l,TK_EOF)&&nparams<8){
+            while(check(l,TK_NL)) eat(l);
+            if(check(l,TK_RPAREN)) break;
+            if(check(l,TK_IDENT)){
+                Token p=eat(l);
+                int pl=p.len<31?p.len:31;
+                for(int i=0;i<pl;i++) { n->field_names[nparams][i]=p.start[i]; }
+                n->field_names[nparams][pl]=0;
+                nparams++;
+                if(check(l,TK_COLON)){eat(l);eat(l);}
+            } else { eat(l); }
+            if(!match_tk(l,TK_COMMA)) break;
+        }
+        if(check(l,TK_RPAREN)) eat(l);
+        if(check(l,TK_ARROW)){eat(l);eat(l);}
+        n->argc=nparams;
+        n->body=parse_block(l);
+        return n;
+    }
+
     /* @builtin call */
     if(t.kind==TK_AT){
         eat(l); Token nm=expect(l,TK_IDENT);
@@ -457,6 +486,38 @@ static Node *parse_stmt(Lexer *l){
         expect(l,TK_RBRACE);
         n->args=n->arg_data;
         n->argc=arms;
+        return n;
+    }
+
+    /* throw expr */
+    if(t.kind==TK_THROW){
+        eat(l);
+        Node *n=alloc_node(ND_THROW);
+        n->right=parse_expr(l);
+        return n;
+    }
+
+    /* try { } catch(e) { } */
+    if(t.kind==TK_TRY){
+        eat(l);
+        Node *n=alloc_node(ND_TRY);
+        n->then=parse_block(l);   /* try body */
+        n->name[0]=0;
+        if(check(l,TK_CATCH)){
+            eat(l);
+            /* optional (varname) */
+            if(check(l,TK_LPAREN)){
+                eat(l);
+                if(check(l,TK_IDENT)){
+                    Token vt=eat(l);
+                    int vl=vt.len<63?vt.len:63;
+                    for(int i=0;i<vl;i++) { n->name[i]=vt.start[i]; }
+                    n->name[vl]=0;
+                }
+                if(check(l,TK_RPAREN)) eat(l);
+            }
+            n->els=parse_block(l); /* catch body */
+        }
         return n;
     }
 
