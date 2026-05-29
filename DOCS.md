@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-Version: v0.3  
+Version: v0.5  
 Interpreter: `ys`  
 Extension: `.y`
 
@@ -25,6 +25,10 @@ Extension: `.y`
 15. [Error Messages](#15-error-messages)
 16. [Comments](#16-comments)
 17. [Annotations](#17-annotations)
+18. [Error Handling](#18-error-handling)
+19. [Type System](#19-type-system)
+20. [Closures and First-Class Functions](#20-closures-and-first-class-functions)
+21. [REPL](#21-repl)
 
 ---
 
@@ -623,6 +627,23 @@ cap.read(f)    cap.write(f, data)    cap.close(f)
 
 -- import
 import "utils.y"
+
+-- try / catch / throw
+try { throw "oops" } catch(e) { y.println(e) }
+
+-- types
+y.typeof(42)         -- "int"
+y.is_str("hi")       -- true
+
+-- closures
+let f = fn(x) { return x * 2 }
+let add5 = make_adder(5)
+
+-- higher-order
+y.map(arr, fn(x) { return x * 2 })
+y.filter(arr, fn(x) { return x % 2 == 0 })
+y.reduce(arr, fn(acc, x) { return acc + x }, 0)
+y.each(arr, fn(x) { y.print(x) })
 ```
 
 ---
@@ -716,10 +737,10 @@ Audit output (stderr):
 ### Separating output from logs
 
 ```bash
-./ys examples/ann_test.y              -- both together in terminal
-./ys examples/ann_test.y 2>/dev/null   -- program output only
-./ys examples/ann_test.y 2>audit.log   -- save logs, show output
-./ys examples/ann_test.y >out.txt 2>audit.log  -- save both separately
+./ys program.y               -- both together in terminal
+./ys program.y 2>/dev/null   -- program output only
+./ys program.y 2>audit.log   -- save logs, show output
+./ys program.y >out.txt 2>audit.log  -- save both separately
 ```
 
 ### Notes
@@ -729,3 +750,176 @@ Audit output (stderr):
 - Annotation fires once per outermost call — recursive calls are suppressed.
 - Both `@intent` and `@audit` accept an optional string argument.
 - On Exploidus OS, `@intent` integrates with the kernel scheduler directly.
+
+---
+
+## 18. Error Handling
+
+Yolish has a `try/catch/throw` system for runtime error handling.
+
+### throw
+
+Raises an error. Execution stops at the throw point and unwinds to the nearest `catch`.
+
+```yolish
+throw "division by zero"
+throw "invalid input"
+```
+
+### try / catch
+
+```yolish
+try {
+    -- code that might throw
+} catch(e) {
+    -- e contains the error message as a string
+    y.print("error: ") y.println(e)
+}
+```
+
+### Example
+
+```yolish
+fn divide(a, b) {
+    if b == 0 { throw "division by zero" }
+    return a / b
+}
+
+fn safe_divide(a, b) {
+    try {
+        return divide(a, b)
+    } catch(e) {
+        y.print("caught: ") y.println(e)
+        return -1
+    }
+}
+
+fn main() {
+    y.println(safe_divide(10, 2))   -- 5
+    y.println(safe_divide(10, 0))   -- caught: division by zero / -1
+}
+```
+
+### Notes
+
+- `throw` accepts any value (string, int, etc.) and converts it to an error message.
+- `catch(e)` binds the error message to `e` as a string.
+- `catch` without a variable is also valid: `catch { ... }`.
+- Uncaught throws propagate up through function calls.
+
+---
+
+## 19. Type System
+
+### y.typeof
+
+Returns the type of a value as a string.
+
+```yolish
+y.typeof(42)              -- "int"
+y.typeof(3.14)            -- "float"
+y.typeof("hello")         -- "str"
+y.typeof(true)            -- "bool"
+y.typeof([1,2,3])         -- "array"
+y.typeof(fn(x){return x}) -- "fn"
+y.typeof(nil)             -- "nil"
+```
+
+### Type check predicates
+
+| Function | Returns |
+|----------|---------|
+| `y.is_int(v)` | true if int |
+| `y.is_float(v)` | true if float |
+| `y.is_str(v)` | true if str |
+| `y.is_bool(v)` | true if bool |
+| `y.is_array(v)` | true if array |
+| `y.is_fn(v)` | true if function |
+| `y.is_nil(v)` | true if nil |
+| `y.is_err(v)` | true if error value |
+
+### Example
+
+```yolish
+fn print_typed(v) {
+    match y.typeof(v) {
+        "int"   => { y.print("int: ")   y.println(v) }
+        "str"   => { y.print("str: ")   y.println(v) }
+        "array" => { y.print("array: ") y.println(v) }
+        _       => { y.print("other: ") y.println(v) }
+    }
+}
+```
+
+---
+
+## 20. Closures and First-Class Functions
+
+Functions are first-class values in Yolish — they can be stored in variables, passed as arguments, and returned from other functions.
+
+### Anonymous functions
+
+```yolish
+let double = fn(x) { return x * 2 }
+y.println(double(5))   -- 10
+```
+
+### Pass as argument
+
+```yolish
+fn apply(f, x) { return f(x) }
+y.println(apply(double, 7))   -- 14
+```
+
+### Closures — capture environment
+
+```yolish
+fn make_adder(n) {
+    return fn(x) { return x + n }  -- captures n
+}
+
+let add5  = make_adder(5)
+let add10 = make_adder(10)
+y.println(add5(3))    -- 8
+y.println(add10(3))   -- 13
+```
+
+### Higher-order builtins
+
+| Function | Description |
+|----------|-------------|
+| `y.map(arr, fn)` | Apply fn to each element, return new array |
+| `y.filter(arr, fn)` | Keep elements where fn returns true |
+| `y.reduce(arr, fn, init)` | Fold array to single value |
+| `y.each(arr, fn)` | Run fn for side effects |
+
+```yolish
+let nums = [1, 2, 3, 4, 5]
+
+y.map(nums, fn(x) { return x * 2 })         -- [2, 4, 6, 8, 10]
+y.filter(nums, fn(x) { return x % 2 == 0 }) -- [2, 4]
+y.reduce(nums, fn(acc, x) { return acc + x }, 0) -- 15
+y.each(nums, fn(x) { y.print(x) y.print(" ") })
+```
+
+---
+
+## 21. REPL
+
+Running `ys` without arguments starts an interactive REPL session.
+
+```
+$ ys
+Yolish v0.5 REPL  (type 'exit' to quit)
+ys> let x = 10
+ys> let y2 = 20
+ys> x + y2
+30
+ys> fn double(n) { return n * 2 }
+ys> double(21)
+42
+ys> exit
+Bye!
+```
+
+The REPL shares a persistent environment across lines — variables and functions defined on one line are available on the next.
