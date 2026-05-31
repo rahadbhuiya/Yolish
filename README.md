@@ -4,7 +4,7 @@ The official programming language of Exploidus OS.
 Fast, secure, capability-aware — runs natively on Linux, macOS, and Windows (WSL).
 
 Author: .Bhuiya
-Version: v0.5
+Version: v0.6
 
 ---
 
@@ -44,6 +44,8 @@ fn main() {
 
 **Error handling** — `try/catch/throw` with full propagation through function calls.
 
+**Standard library** — `y.math.*`, `y.string.*`, `y.array.*` namespaced builtins, plus string interpolation and a module system.
+
 ---
 
 ## Feature overview
@@ -69,10 +71,13 @@ fn main() {
 | try / catch / throw | done |
 | Type system (y.typeof, y.is_*) | done |
 | REPL mode | done |
+| String interpolation (`"Hello {name}!"`) | done |
+| Error objects (y.error, message/code fields) | done |
+| Module system (import as namespace) | done |
+| Standard library (y.math, y.string, y.array) | done |
 | Native ELF compiler | planned v1.0 |
 
 ---
-
 
 
 ---
@@ -80,9 +85,9 @@ fn main() {
 ## Annotation logs
 
 ```bash
-./ys program.y               -- both in terminal
-./ys program.y 2>/dev/null   -- program output only
-./ys program.y 2>audit.log   -- save annotation logs separately
+./ys examples/ann_test.y               -- both in terminal
+./ys examples/ann_test.y 2>/dev/null   -- program output only
+./ys examples/ann_test.y 2>audit.log   -- save annotation logs separately
 ```
 
 ---
@@ -114,7 +119,17 @@ make debug
 - [x] v0.3 — Arrays, structs, match, for-in, string builtins, import, y.format
 - [x] v0.4 — @intent and @audit annotations
 - [x] v0.5 — Closures, try/catch/throw, type system, REPL
-- [ ] v0.6 — Match guards and binding
+- [x] v0.6 — String interpolation, error objects, module system, standard library (y.math/y.string/y.array)
+- [ ] v0.7 — Match guards and binding
 - [ ] v1.0 — Native ELF compiler
+
+## Known Limitations (v0.6)
+
+- `match` as an assigned expression returns `nil` — use a wrapper function instead.
+- Recursive functions inside `import ... as` modules return wrong values — use loops instead.
+
+Both will be fixed in v0.7. See [DOCS.md](DOCS.md) for workarounds.
+
+---
 
 Full language reference: [DOCS.md](DOCS.md)

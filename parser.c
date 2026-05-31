@@ -123,27 +123,33 @@ static Node *parse_primary(Lexer *l){
             }
             return idx;
         }
-        /* dot access */
+        /* dot access — handles chained dots: y.math.sqrt(x) */
         if(check(l,TK_DOT)){
-            eat(l);
-            Token m=expect(l,TK_IDENT);
-            Node *dot=alloc_node(ND_DOT);
-            dot->left=n;
-            int ml=m.len<63?m.len:63;
-            for(int i=0;i<ml;i++) dot->name[i]=m.start[i];
-            dot->name[ml]=0;
-            /* method call */
-            if(check(l,TK_LPAREN)){
-                eat(l); dot->kind=ND_CALL;
-                dot->arg_data[0]=n; int argc=1;
-                while(!check(l,TK_RPAREN)&&!check(l,TK_EOF)&&argc<8){
-                    dot->arg_data[argc++]=parse_expr(l);
-                    if(!match_tk(l,TK_COMMA)) break;
+            Node *cur2=n;
+            while(check(l,TK_DOT)){
+                eat(l);
+                Token m=expect(l,TK_IDENT);
+                Node *dot=alloc_node(ND_DOT);
+                dot->left=cur2;
+                int ml=m.len<63?m.len:63;
+                for(int i=0;i<ml;i++) { dot->name[i]=m.start[i]; }
+                dot->name[ml]=0;
+                /* method call */
+                if(check(l,TK_LPAREN)){
+                    eat(l); dot->kind=ND_CALL;
+                    /* arg_data[0] reserved for obj in method calls */
+                    dot->arg_data[0]=cur2; int argc2=1;
+                    while(!check(l,TK_RPAREN)&&!check(l,TK_EOF)&&argc2<8){
+                        dot->arg_data[argc2++]=parse_expr(l);
+                        if(!match_tk(l,TK_COMMA)) break;
+                    }
+                    if(check(l,TK_RPAREN)) eat(l);
+                    dot->args=dot->arg_data; dot->argc=argc2;
+                    return dot;
                 }
-                expect(l,TK_RPAREN);
-                dot->args=dot->arg_data; dot->argc=argc;
+                cur2=dot;
             }
-            return dot;
+            return cur2;
         }
         return n;
     }
@@ -521,7 +527,7 @@ static Node *parse_stmt(Lexer *l){
         return n;
     }
 
-    /* import "file.y" */
+    /* import "file.y" [as name] */
     if(t.kind==TK_IMPORT){
         eat(l);
         Node *n=alloc_node(ND_IMPORT);
@@ -530,6 +536,15 @@ static Node *parse_stmt(Lexer *l){
             int pl=pt.len<255?pt.len:255;
             for(int i=0;i<pl;i++) n->sval[i]=pt.start[i];
             n->sval[pl]=0;
+        }
+        /* optional: as namespace_name → ND_MODULE */
+        if(check(l,TK_AS)){
+            eat(l);
+            Token nm=expect(l,TK_IDENT);
+            n->kind=ND_MODULE;
+            int nl=nm.len<63?nm.len:63;
+            for(int i=0;i<nl;i++) n->name[i]=nm.start[i];
+            n->name[nl]=0;
         }
         return n;
     }

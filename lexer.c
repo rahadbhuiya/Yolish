@@ -26,6 +26,7 @@ static Token make_kw_or_ident(const char *s, int n){
     if(streq(s,n,"try"))    {t.kind=TK_TRY;    return t;}
     if(streq(s,n,"catch"))  {t.kind=TK_CATCH;  return t;}
     if(streq(s,n,"throw"))  {t.kind=TK_THROW;  return t;}
+    if(streq(s,n,"as"))     {t.kind=TK_AS;     return t;}
     if(streq(s,n,"true"))   {t.kind=TK_TRUE;   t.ival=1; return t;}
     if(streq(s,n,"false"))  {t.kind=TK_FALSE;  t.ival=0; return t;}
     t.kind=TK_IDENT; return t;

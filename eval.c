@@ -1,4 +1,5 @@
 #include "yolish.h"
+#include <string.h>
 
 /*  Memory pools  */
 static Env  envpool[4096]; static int envidx=0;
@@ -149,6 +150,9 @@ void ys_print_val(Val v){
 static Val eval_block(Node *b,Env *parent);
 static Val call_builtin(const char *name,Node **args,int argc,Env *env);
 
+/*  Safe eval: always reads g_return_val after eval_node  */
+#define EVAL_SAFE(n, env, dest) do {     eval_node((n),(env));     memcpy(&(dest), &g_return_val, sizeof(Val)); } while(0)
+
 /*  Return signal  */
 static int g_returning=0;
 static Val g_return_val;
@@ -187,14 +191,123 @@ static struct {
 static int nstructs=0;
 
 /*  eval_node  */
-Val eval_node(Node *n,Env *env){
+
+/*  String interpolation: "Hello {name}!"  */
+static Val eval_interp_str(const char *s, Env *env){
+    char out[512]; int oi=0;
+    int i=0;
+    while(s[i]&&oi<510){
+        if(s[i]=='{'){
+            i++;
+            /* collect expression source until matching } */
+            char expr[128]; int ei=0;
+            int depth=1;
+            while(s[i]&&ei<126){
+                if(s[i]=='{') depth++;
+                if(s[i]=='}'){depth--;if(depth==0){i++;break;}}
+                expr[ei++]=s[i++];
+            }
+            expr[ei]=0;
+            if(ei==0) continue;
+            /* parse and eval the expression */
+            Lexer el; lex_init(&el,expr,ei);
+            Node *en=parse_program(&el);
+            /* eval: just eval first statement */
+            Val rv=make_nil();
+            if(en&&en->stmtc>0) rv=eval_node(en->stmts[0],env);
+            /* convert to string */
+            char tmp[128]; int ti=0;
+            if(rv.type==VT_INT){
+                int64_t v=rv.ival; int neg=v<0; if(neg)v=-v;
+                char tb[32]; int tbi=0;
+                do{tb[tbi++]=(char)('0'+(v%10));v/=10;}while(v>0);
+                if(neg&&oi<509) out[oi++]='-';
+                while(tbi>0&&oi<510) out[oi++]=tb[--tbi];
+            } else if(rv.type==VT_FLOAT){
+                int64_t w=rv.fval/1000,f2=rv.fval%1000;
+                if(f2<0)f2=-f2;
+                int neg=w<0; if(neg)w=-w;
+                char tb[32]; int tbi=0;
+                do{tb[tbi++]=(char)('0'+(w%10));w/=10;}while(w>0);
+                if(neg&&oi<509)out[oi++]='-';
+                while(tbi>0&&oi<510)out[oi++]=tb[--tbi];
+                out[oi++]='.';
+                char fb[4]; int fi=0;
+                int64_t fr=f2;
+                do{fb[fi++]=(char)('0'+(fr%10));fr/=10;}while(fi<3);
+                while(fi>0&&oi<510)out[oi++]=fb[--fi];
+            } else if(rv.type==VT_STR){
+                int si2=0; while(rv.sval[si2]&&oi<510)out[oi++]=rv.sval[si2++];
+            } else if(rv.type==VT_ARR){
+                out[oi++]='[';
+                for(int _ai=0;_ai<rv.arr_len&&oi<505;_ai++){
+                    Val _el=rv.arr_data[_ai];
+                    if(_el.type==VT_INT){
+                        int64_t v=_el.ival; int neg=v<0; if(neg)v=-v;
+                        char tb[24]; int ti=0;
+                        do{tb[ti++]=(char)('0'+(v%10));v/=10;}while(v>0);
+                        if(neg&&oi<509)out[oi++]='-';
+                        while(ti>0&&oi<510)out[oi++]=tb[--ti];
+                    } else if(_el.type==VT_STR){
+                        int _si=0; while(_el.sval[_si]&&oi<508)out[oi++]=_el.sval[_si++];
+                    } else {
+                        out[oi++]='?';
+                    }
+                    if(_ai<rv.arr_len-1&&oi<508){out[oi++]=','; out[oi++]=' ';}
+                }
+                out[oi++]=']';
+            } else if(rv.type==VT_BOOL){
+                const char *bs2=rv.bval?"true":"false"; while(*bs2&&oi<510)out[oi++]=*bs2++;
+            } else if(rv.type==VT_NIL){
+                const char *ns="nil"; while(*ns&&oi<510)out[oi++]=*ns++;
+            }
+            (void)tmp; (void)ti;
+        } else if(s[i]=='\\' && s[i+1]=='{'){
+            /* escaped brace \{ → literal { */
+            out[oi++]='{'; i+=2;
+        } else {
+            out[oi++]=s[i++];
+        }
+    }
+    out[oi]=0;
+    return make_str(out);
+}
+
+/*  Module function call — in separate fn to reduce eval_node stack frame  */
+__attribute__((noinline))
+static Val call_module_fn(Val *fv2, Node *n, Env *env){
+    Node *fd=fv2->fn_node;
+    Env *ce=(fv2->fn_env)?((Env*)fv2->fn_env):env;
+    Env *fe=env_new(ce);
+    int arg_start=(n->argc>fd->argc)?1:0;
+    for(int i=0;i<fd->argc&&(i+arg_start)<n->argc;i++){
+        Val arg=eval_node(n->args[i+arg_start],env);
+        env_def(fe,fd->field_names[i],arg);
+    }
+    g_returning=0;
+    int saved=envidx;
+    static Val _mod_result;
+    { Val _tmp=eval_block(fd->body,fe);
+      memcpy(&_mod_result,&_tmp,sizeof(Val)); }
+    envidx=saved;
+    if(g_returning){ memcpy(&_mod_result,&g_return_val,sizeof(Val)); }
+    g_returning=0;
+    return _mod_result;
+}
+__attribute__((noinline)) Val eval_node(Node *n,Env *env){
     if(!n) return make_nil();
     switch(n->kind){
 
     case ND_INT:   return make_int(n->ival);
     case ND_FLOAT: return make_float(n->fval);
     case ND_BOOL:  return make_bool((int)n->ival);
-    case ND_STR:   return make_str(n->sval);
+    case ND_STR:{
+        /* check for {expr} interpolation */
+        int _has_interp=0;
+        for(int _i=0;n->sval[_i];_i++) if(n->sval[_i]=='{'){_has_interp=1;break;}
+        if(_has_interp) return eval_interp_str(n->sval,env);
+        return make_str(n->sval);
+    }
 
     case ND_IDENT:{
         Val *v=env_get(env,n->name);
@@ -202,7 +315,23 @@ Val eval_node(Node *n,Env *env){
     }
 
     case ND_LET: case ND_VAR:{
-        Val v=n->right?eval_node(n->right,env):make_nil();
+        Val v=make_nil();
+        if(n->right){
+            /* Write result to g_return_val first, then read from it */
+            Val _tmp=eval_node(n->right,env);
+            if(g_returning==2){
+                /* match result */
+                memcpy(&v,&g_return_val,sizeof(Val));
+                g_returning=0;
+            } else if(g_returning==1){
+                /* function return propagates up */
+                memcpy(&v,&g_return_val,sizeof(Val));
+            } else {
+                memcpy(&v,&_tmp,sizeof(Val));
+                if(v.type==VT_NIL && g_return_val.type!=VT_NIL)
+                    memcpy(&v,&g_return_val,sizeof(Val));
+            }
+        }
         env_def(env,n->name,v); return v;
     }
 
@@ -368,8 +497,10 @@ Val eval_node(Node *n,Env *env){
 
     case ND_WHILE:{
         Val last=make_nil();
-        while(val_bool(eval_node(n->cond,env)))
+        while(val_bool(eval_node(n->cond,env))){
             last=eval_block(n->body,env);
+            if((g_returning&&g_returning!=2)||g_throwing) break;
+        }
         return last;
     }
 
@@ -440,9 +571,14 @@ Val eval_node(Node *n,Env *env){
             }
 
             if(matched){
-                /* body is block or expression */
-                if(body->kind==ND_BLOCK) return eval_block(body,env);
-                return eval_node(body,env);
+                Val _mv;
+                if(body->kind==ND_BLOCK) _mv=eval_block(body,env);
+                else _mv=eval_node(body,env);
+                if(!g_returning){
+                    memcpy(&g_return_val,&_mv,sizeof(Val));
+                    g_returning=2; /* 2 = match result, not a function return */
+                }
+                return g_return_val;
             }
         }
         return make_nil(); /* no arm matched */
@@ -451,7 +587,18 @@ Val eval_node(Node *n,Env *env){
     case ND_THROW:{
         Val thrown = n->right ? eval_node(n->right,env) : make_nil();
         /* store message in stable global string */
-        if(thrown.type==VT_STR||thrown.type==VT_ERR){
+        if(thrown.type==VT_STRUCT){
+            /* Error struct — extract .message field */
+            for(int _fi=0;_fi<thrown.field_count;_fi++){
+                if(thrown.field_names[_fi][0]=='m'&&thrown.field_names[_fi][1]=='e'){
+                    Val _mv=thrown.field_vals[_fi];
+                    int ci=0; while(_mv.sval[ci]&&ci<510){g_throw_msg[ci]=_mv.sval[ci];ci++;}
+                    g_throw_msg[ci]=0; break;
+                }
+            }
+            g_throw_val=thrown; /* keep struct for catch */
+            g_throwing=1; return g_throw_val;
+        } else if(thrown.type==VT_STR||thrown.type==VT_ERR){
             int ci=0; while(thrown.sval[ci]&&ci<510){g_throw_msg[ci]=thrown.sval[ci];ci++;}
             g_throw_msg[ci]=0;
         } else if(thrown.type==VT_INT){
@@ -478,7 +625,13 @@ Val eval_node(Node *n,Env *env){
             g_throwing=0;
             if(n->els){
                 Env *ce=env_new(env);
-                if(n->name[0]) env_def(ce,n->name,make_str(g_throw_msg));
+                if(n->name[0]){
+                    /* pass struct error directly, else wrap as string */
+                    if(g_throw_val.type==VT_STRUCT)
+                        env_def(ce,n->name,g_throw_val);
+                    else
+                        env_def(ce,n->name,make_str(g_throw_msg));
+                }
                 int saved=envidx;
                 result=eval_block(n->els,ce);
                 envidx=saved;
@@ -515,17 +668,45 @@ Val eval_node(Node *n,Env *env){
             ||strcmp_u(n->name,"y.exit")==0   ||strcmp_u(n->name,"exit")==0)
             return call_builtin(n->name,n->args,n->argc,env);
 
-        /* dot calls — build qualified name */
+        /* dot calls — build fully qualified name (handles y.math.sqrt etc) */
         if(n->left){
             static char qname[128];
+            /* walk left chain to build prefix */
+            Node *chain[8]; int depth=0;
+            Node *cur2=n->left;
+            while(cur2&&depth<8){
+                chain[depth++]=cur2;
+                if(cur2->kind==ND_DOT) cur2=cur2->left;
+                else break;
+            }
             int qi=0;
-            const char *obj=n->left->name;
-            while(obj[qi]&&qi<60){qname[qi]=obj[qi];qi++;}
-            qname[qi++]='.';
+            /* build from outermost to innermost */
+            for(int ci=depth-1;ci>=0;ci--){
+                const char *seg=chain[ci]->name;
+                int si=0; while(seg[si]&&qi<120){qname[qi++]=seg[si++];}
+                qname[qi++]='.';
+            }
             const char *mth=n->name;
-            int mi=0;
-            while(mth[mi]&&qi<126){qname[qi++]=mth[mi++];}
+            int mi=0; while(mth[mi]&&qi<126){qname[qi++]=mth[mi++];}
             qname[qi]=0;
+            /* first try as builtin */
+            if(strncmp(qname,"y.",2)==0||qname[0]=='@')
+                return call_builtin(qname,n->args,n->argc,env);
+            /* else check if left is a module (struct) with this method */
+            static Val _obj_val_static;
+            { Val _obj_tmp=eval_node(n->left,env); memcpy(&_obj_val_static,&_obj_tmp,sizeof(Val)); }
+            Val obj_val=_obj_val_static;
+            if(obj_val.type==VT_STRUCT){
+                for(int fi=0;fi<obj_val.field_count;fi++){
+                    if(strcmp_u(obj_val.field_names[fi],n->name)==0){
+                        Val fv2=obj_val.field_vals[fi];
+                        if(fv2.type==VT_FN&&fv2.fn_node){
+                            return call_module_fn(&fv2,n,env);
+                        }
+                        return obj_val.field_vals[fi];
+                    }
+                }
+            }
             return call_builtin(qname,n->args,n->argc,env);
         }
 
@@ -544,14 +725,14 @@ Val eval_node(Node *n,Env *env){
                 const char *ann_t = fn_def->type; /* annotation type from AST */
                 const char *ann_a = fn_def->sval; /* annotation arg from AST */
                 if(g_ann_depth==0 && ann_t[0]){
-                    /* ── @intent → stderr ── */
+                    /*  @intent → stderr  */
                     if(ann_t[0]=='i'&&ann_t[1]=='n'){
                         fputs("[scheduler] intent=",stderr);
                         fputs(ann_a[0]?ann_a:"unspecified",stderr);
                         fputs(" fn=",stderr); fputs(n->name,stderr); fputs("\n",stderr);
                         fflush(stderr);
                     }
-                    /* ── @audit → stderr ── */
+                    /*  @audit → stderr  */
                     else if(ann_t[0]=='a'&&ann_t[1]=='u'){
                         fputs("[audit] tag=",stderr);
                         fputs(ann_a[0]?ann_a:"untagged",stderr);
@@ -580,6 +761,40 @@ Val eval_node(Node *n,Env *env){
         return make_nil();
     }
 
+    case ND_MODULE:{
+        /* import "file.y" as name — run file, collect fns into namespace struct */
+        static char mod_src[65536];
+        FILE *mf=fopen(n->sval,"r");
+        if(!mf){
+            /* try relative to source dir */
+            char rel[640]; int di=0;
+            while(g_src_dir[di]&&di<510){rel[di]=g_src_dir[di];di++;}
+            int si=0; while(n->sval[si]&&di<638){rel[di++]=n->sval[si++];} rel[di]=0;
+            mf=fopen(rel,"r");
+        }
+        if(!mf){ ys_error(g_cur_line,"cannot open module file"); return make_nil(); }
+        int msz=(int)fread(mod_src,1,sizeof(mod_src)-1,mf);
+        fclose(mf); mod_src[msz]=0;
+        /* parse and eval in isolated env */
+        Lexer ml; lex_init(&ml,mod_src,msz);
+        Node *mprog=parse_program(&ml);
+        Env *menv=env_new(NULL); /* isolated namespace */
+        for(int i=0;i<mprog->stmtc;i++) eval_node(mprog->stmts[i],menv);
+        /* collect all definitions into a module Val (VT_STRUCT) */
+        Val mod=make_nil(); mod.type=VT_STRUCT;
+        int nl2=str_len_u(n->name)<31?str_len_u(n->name):31;
+        for(int i=0;i<nl2;i++) { mod.struct_name[i]=n->name[i]; } mod.struct_name[nl2]=0;
+        mod.field_count=menv->count;
+        mod.field_vals=alloc_fld(menv->count+1);
+        mod.field_names=alloc_nm(menv->count+1);
+        for(int i=0;i<menv->count;i++){
+            for(int j=0;j<64;j++) mod.field_names[i][j]=menv->names[i][j];
+            mod.field_vals[i]=menv->vals[i];
+        }
+        env_def(env,n->name,mod);
+        return mod;
+    }
+
     case ND_IMPORT:{
         /* load and eval another .y file */
         /* path is relative to source dir — chdir in main.c handles resolution */
@@ -597,10 +812,16 @@ Val eval_node(Node *n,Env *env){
         return make_nil();
     }
 
-    case ND_RETURN:
-        g_return_val=n->right?eval_node(n->right,env):make_nil();
+    case ND_RETURN:{
+        if(n->right){
+            Val _rv=eval_node(n->right,env);
+            memcpy(&g_return_val,&_rv,sizeof(Val));
+        } else {
+            memset(&g_return_val,0,sizeof(Val));
+        }
         g_returning=1;
         return g_return_val;
+    }
 
     default: return make_nil();
     }
@@ -612,7 +833,8 @@ static Val eval_block(Node *b,Env *parent){
     Val last=make_nil();
     for(int i=0;i<b->stmtc;i++){
         last=eval_node(b->stmts[i],e);
-        if(g_returning||g_throwing) break;
+        if(g_returning==2){ memcpy(&last,&g_return_val,sizeof(Val)); g_returning=0; }
+        if((g_returning&&g_returning!=2)||g_throwing) break;
     }
     return last;
 }
@@ -935,6 +1157,259 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     if(strcmp_u(name,"y.is_fn")==0)   { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_FN); }
     if(strcmp_u(name,"y.is_nil")==0)  { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_NIL); }
     if(strcmp_u(name,"y.is_err")==0)  { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==VT_ERR); }
+
+    /* y.error(message, code) → Error struct */
+    if(strcmp_u(name,"y.error")==0||strcmp_u(name,"error")==0){
+        int s0=(argc>1)?1:0;
+        Val msg=eval_node(args[s0],env);
+        Val code=make_int(0);
+        if(argc>s0+1) code=eval_node(args[s0+1],env);
+        /* build Error struct */
+        Val v=make_nil(); v.type=VT_STRUCT;
+        v.struct_name[0]='E';v.struct_name[1]='r';v.struct_name[2]='r';
+        v.struct_name[3]='o';v.struct_name[4]='r';v.struct_name[5]=0;
+        v.field_vals=alloc_fld(2); v.field_names=alloc_nm(2); v.field_count=2;
+        /* field 0: message */
+        const char *f0="message";
+        for(int i=0;f0[i];i++) { v.field_names[0][i]=f0[i]; } v.field_names[0][7]=0;
+        v.field_vals[0]=msg;
+        /* field 1: code */
+        const char *f1="code";
+        for(int i=0;f1[i];i++) { v.field_names[1][i]=f1[i]; } v.field_names[1][4]=0;
+        v.field_vals[1]=code;
+        return v;
+    }
+
+    /*  y.math  */
+    if(strcmp_u(name,"y.math.sqrt")==0){
+        int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
+        /* integer sqrt via Newton's method */
+        int64_t n2=val_int(v); if(n2<0){ys_error(0,"sqrt of negative");return make_nil();}
+        if(n2==0) return make_int(0);
+        int64_t x=n2,y2=1; while(x>y2){x=(x+y2)/2;y2=n2/x;}
+        return make_int(x);
+    }
+    if(strcmp_u(name,"y.math.pow")==0){
+        int s0=(argc>1)?1:0;
+        int64_t base=val_int(eval_node(args[s0],env));
+        int64_t exp2=val_int(eval_node(args[s0+1],env));
+        int64_t result=1; for(int64_t i=0;i<exp2;i++) result*=base;
+        return make_int(result);
+    }
+    if(strcmp_u(name,"y.math.abs")==0){
+        int s0=(argc>1)?1:0; int64_t v=val_int(eval_node(args[s0],env));
+        return make_int(v<0?-v:v);
+    }
+    if(strcmp_u(name,"y.math.min")==0){
+        int s0=(argc>1)?1:0;
+        int64_t a=val_int(eval_node(args[s0],env));
+        int64_t b=val_int(eval_node(args[s0+1],env));
+        return make_int(a<b?a:b);
+    }
+    if(strcmp_u(name,"y.math.max")==0){
+        int s0=(argc>1)?1:0;
+        int64_t a=val_int(eval_node(args[s0],env));
+        int64_t b=val_int(eval_node(args[s0+1],env));
+        return make_int(a>b?a:b);
+    }
+    if(strcmp_u(name,"y.math.clamp")==0){
+        int s0=(argc>1)?1:0;
+        int64_t v=val_int(eval_node(args[s0],env));
+        int64_t lo=val_int(eval_node(args[s0+1],env));
+        int64_t hi=val_int(eval_node(args[s0+2],env));
+        return make_int(v<lo?lo:v>hi?hi:v);
+    }
+    if(strcmp_u(name,"y.math.floor")==0){
+        int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
+        return make_int(v.type==VT_FLOAT?v.fval/1000:v.ival);
+    }
+    if(strcmp_u(name,"y.math.ceil")==0){
+        int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
+        if(v.type==VT_FLOAT){
+            int64_t w=v.fval/1000, r=v.fval%1000;
+            return make_int(r>0?w+1:w);
+        }
+        return make_int(v.ival);
+    }
+    if(strcmp_u(name,"y.math.sign")==0){
+        int s0=(argc>1)?1:0; int64_t v=val_int(eval_node(args[s0],env));
+        return make_int(v>0?1:v<0?-1:0);
+    }
+
+    /*  y.string  */
+    if(strcmp_u(name,"y.string.repeat")==0){
+        int s0=(argc>1)?1:0;
+        Val sv=eval_node(args[s0],env);
+        int n2=(int)val_int(eval_node(args[s0+1],env));
+        char buf[512]; int bi=0, slen=str_len_u(sv.sval);
+        for(int i=0;i<n2&&bi<510;i++)
+            for(int j=0;j<slen&&bi<510;j++) buf[bi++]=sv.sval[j];
+        buf[bi]=0; return make_str(buf);
+    }
+    if(strcmp_u(name,"y.string.starts_with")==0){
+        int s0=(argc>1)?1:0;
+        Val sv=eval_node(args[s0],env);
+        Val pv=eval_node(args[s0+1],env);
+        int pl=str_len_u(pv.sval);
+        int match=1; for(int i=0;i<pl;i++) if(sv.sval[i]!=pv.sval[i]){match=0;break;}
+        return make_bool(match);
+    }
+    if(strcmp_u(name,"y.string.ends_with")==0){
+        int s0=(argc>1)?1:0;
+        Val sv=eval_node(args[s0],env);
+        Val pv=eval_node(args[s0+1],env);
+        int sl=str_len_u(sv.sval), pl=str_len_u(pv.sval);
+        if(pl>sl) return make_bool(0);
+        int match=1;
+        for(int i=0;i<pl;i++) if(sv.sval[sl-pl+i]!=pv.sval[i]){match=0;break;}
+        return make_bool(match);
+    }
+    if(strcmp_u(name,"y.string.replace")==0){
+        int s0=(argc>1)?1:0;
+        Val sv=eval_node(args[s0],env);
+        Val from=eval_node(args[s0+1],env);
+        Val to=eval_node(args[s0+2],env);
+        int fl=str_len_u(from.sval), tl=str_len_u(to.sval);
+        char buf[512]; int bi=0, si=0, slen=str_len_u(sv.sval);
+        while(si<slen&&bi<510){
+            int match=(fl>0);
+            for(int i=0;i<fl&&match;i++) if(sv.sval[si+i]!=from.sval[i]) match=0;
+            if(match&&fl>0){
+                for(int i=0;i<tl&&bi<510;i++) buf[bi++]=to.sval[i];
+                si+=fl;
+            } else { buf[bi++]=sv.sval[si++]; }
+        }
+        buf[bi]=0; return make_str(buf);
+    }
+    if(strcmp_u(name,"y.string.pad_left")==0){
+        int s0=(argc>1)?1:0;
+        Val sv=eval_node(args[s0],env);
+        int width=(int)val_int(eval_node(args[s0+1],env));
+        int sl=str_len_u(sv.sval);
+        char buf[256]; int bi=0;
+        for(int i=sl;i<width&&bi<254;i++) buf[bi++]=' ';
+        for(int i=0;sv.sval[i]&&bi<254;i++) buf[bi++]=sv.sval[i];
+        buf[bi]=0; return make_str(buf);
+    }
+    if(strcmp_u(name,"y.string.pad_right")==0){
+        int s0=(argc>1)?1:0;
+        Val sv=eval_node(args[s0],env);
+        int width=(int)val_int(eval_node(args[s0+1],env));
+        int sl=str_len_u(sv.sval);
+        char buf[256]; int bi=0;
+        for(int i=0;sv.sval[i]&&bi<254;i++) buf[bi++]=sv.sval[i];
+        for(int i=sl;i<width&&bi<254;i++) buf[bi++]=' ';
+        buf[bi]=0; return make_str(buf);
+    }
+    if(strcmp_u(name,"y.string.reverse")==0){
+        int s0=(argc>1)?1:0;
+        Val sv=eval_node(args[s0],env);
+        int sl=str_len_u(sv.sval);
+        char buf[256]; 
+        for(int i=0;i<sl&&i<254;i++) buf[i]=sv.sval[sl-1-i];
+        buf[sl<254?sl:254]=0; return make_str(buf);
+    }
+
+    /*  y.array  */
+    if(strcmp_u(name,"y.array.reverse")==0){
+        int s0=(argc>1)?1:0; Val arr=eval_node(args[s0],env);
+        Val result=make_nil(); result.type=VT_ARR;
+        result.arr_data=alloc_arr(arr.arr_len+1); result.arr_len=arr.arr_len;
+        for(int i=0;i<arr.arr_len;i++) result.arr_data[i]=arr.arr_data[arr.arr_len-1-i];
+        return result;
+    }
+    if(strcmp_u(name,"y.array.join")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val sep=make_str(""); if(argc>s0+1) sep=eval_node(args[s0+1],env);
+        char buf[512]; int bi=0;
+        for(int i=0;i<arr.arr_len;i++){
+            /* print element */
+            Val el=arr.arr_data[i];
+            if(el.type==VT_STR){ int j=0; while(el.sval[j]&&bi<510) buf[bi++]=el.sval[j++]; }
+            else if(el.type==VT_INT){
+                int64_t v=el.ival; int neg=v<0; if(neg)v=-v;
+                char tb[24]; int ti=0;
+                do{tb[ti++]=(char)('0'+(v%10));v/=10;}while(v>0);
+                if(neg&&bi<509) buf[bi++]='-';
+                while(ti>0&&bi<510) buf[bi++]=tb[--ti];
+            }
+            if(i<arr.arr_len-1){ int j=0; while(sep.sval[j]&&bi<510) buf[bi++]=sep.sval[j++]; }
+        }
+        buf[bi]=0; return make_str(buf);
+    }
+    if(strcmp_u(name,"y.array.slice")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        int start=(int)val_int(eval_node(args[s0+1],env));
+        int end2=(argc>s0+2)?(int)val_int(eval_node(args[s0+2],env)):arr.arr_len;
+        if(start<0){start=0;} if(end2>arr.arr_len){end2=arr.arr_len;}
+        Val result=make_nil(); result.type=VT_ARR;
+        int len=end2-start; if(len<0)len=0;
+        result.arr_data=alloc_arr(len+1); result.arr_len=len;
+        for(int i=0;i<len;i++) result.arr_data[i]=arr.arr_data[start+i];
+        return result;
+    }
+    if(strcmp_u(name,"y.array.find")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val fn=eval_node(args[s0+1],env);
+        if(fn.type==VT_FN&&fn.fn_node){
+            Node *fd=fn.fn_node;
+            Env *ce=(fn.fn_env)?((Env*)fn.fn_env):env;
+            for(int i=0;i<arr.arr_len;i++){
+                Env *fe=env_new(ce);
+                if(fd->argc>0) env_def(fe,fd->field_names[0],arr.arr_data[i]);
+                g_returning=0; int saved=envidx;
+                Val r=eval_block(fd->body,fe);
+                envidx=saved; g_returning=0;
+                if(val_bool(r)) return arr.arr_data[i];
+            }
+        }
+        return make_nil();
+    }
+    if(strcmp_u(name,"y.array.index_of")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val target=eval_node(args[s0+1],env);
+        for(int i=0;i<arr.arr_len;i++){
+            Val el=arr.arr_data[i];
+            if(el.type==target.type){
+                if(el.type==VT_INT&&el.ival==target.ival) return make_int(i);
+                if(el.type==VT_STR&&strcmp_u(el.sval,target.sval)==0) return make_int(i);
+                if(el.type==VT_BOOL&&el.bval==target.bval) return make_int(i);
+            }
+        }
+        return make_int(-1);
+    }
+    if(strcmp_u(name,"y.array.contains")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val target=eval_node(args[s0+1],env);
+        for(int i=0;i<arr.arr_len;i++){
+            Val el=arr.arr_data[i];
+            if(el.type==target.type){
+                if(el.type==VT_INT&&el.ival==target.ival) return make_bool(1);
+                if(el.type==VT_STR&&strcmp_u(el.sval,target.sval)==0) return make_bool(1);
+            }
+        }
+        return make_bool(0);
+    }
+    if(strcmp_u(name,"y.array.sort")==0){
+        /* simple insertion sort */
+        int s0=(argc>1)?1:0; Val arr=eval_node(args[s0],env);
+        Val result=make_nil(); result.type=VT_ARR;
+        result.arr_data=alloc_arr(arr.arr_len+1); result.arr_len=arr.arr_len;
+        for(int i=0;i<arr.arr_len;i++) result.arr_data[i]=arr.arr_data[i];
+        for(int i=1;i<result.arr_len;i++){
+            Val key=result.arr_data[i]; int j=i-1;
+            while(j>=0&&val_int(result.arr_data[j])>val_int(key)){
+                result.arr_data[j+1]=result.arr_data[j]; j--;
+            }
+            result.arr_data[j+1]=key;
+        }
+        return result;
+    }
 
     /* y.push(arr, val) */
     if(strcmp_u(name,"y.push")==0||strcmp_u(name,"push")==0){

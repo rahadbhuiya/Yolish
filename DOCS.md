@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-Version: v0.5  
+Version: v0.6  
 Interpreter: `ys`  
 Extension: `.y`
 
@@ -29,6 +29,10 @@ Extension: `.y`
 19. [Type System](#19-type-system)
 20. [Closures and First-Class Functions](#20-closures-and-first-class-functions)
 21. [REPL](#21-repl)
+22. [String Interpolation](#22-string-interpolation)
+23. [Error Objects](#23-error-objects)
+24. [Module System](#24-module-system)
+25. [Standard Library](#25-standard-library)
 
 ---
 
@@ -737,10 +741,10 @@ Audit output (stderr):
 ### Separating output from logs
 
 ```bash
-./ys program.y               -- both together in terminal
-./ys program.y 2>/dev/null   -- program output only
-./ys program.y 2>audit.log   -- save logs, show output
-./ys program.y >out.txt 2>audit.log  -- save both separately
+./ys examples/ann_test.y               -- both together in terminal
+./ys examples/ann_test.y 2>/dev/null   -- program output only
+./ys examples/ann_test.y 2>audit.log   -- save logs, show output
+./ys examples/ann_test.y >out.txt 2>audit.log  -- save both separately
 ```
 
 ### Notes
@@ -923,3 +927,208 @@ Bye!
 ```
 
 The REPL shares a persistent environment across lines — variables and functions defined on one line are available on the next.
+
+---
+
+## 22. String Interpolation
+
+Embed expressions directly inside string literals using `{expr}` syntax.
+
+```yolish
+let name = "Diaz"
+let age  = 22
+y.println("Hello {name}!")                      -- Hello Diaz!
+y.println("You are {age} years old.")           -- You are 22 years old.
+y.println("Next year: {age + 1}")               -- Next year: 23
+y.println("Array has {y.len(arr)} elements.")
+y.println("Upper: {y.upper(name)}")             -- Upper: DIAZ
+```
+
+Any valid Yolish expression works inside `{}`. Use `\{` for a literal brace.
+
+---
+
+## 23. Error Objects
+
+`y.error(message, code)` creates a structured error value with `.message` and `.code` fields.
+
+```yolish
+fn divide(a, b) {
+    if b == 0 {
+        throw y.error("division by zero", 400)
+    }
+    return a / b
+}
+
+fn main() {
+    try {
+        y.println(divide(10, 0))
+    } catch(e) {
+        y.print("message : ") y.println(e.message)   -- division by zero
+        y.print("code    : ") y.println(e.code)       -- 400
+    }
+}
+```
+
+You can also throw plain strings — catch will receive them as a string:
+```yolish
+throw "something went wrong"   -- catch(e): e is a string
+throw y.error("msg", 500)      -- catch(e): e is a struct
+```
+
+---
+
+## 24. Module System
+
+`import "file.y" as name` runs the file in an isolated environment and exposes all its definitions as a namespace.
+
+```yolish
+-- utils.y
+fn greet(name) { return "Hello, {name}!" }
+fn double(n)   { return n * 2 }
+```
+
+```yolish
+-- main.y
+import "utils.y" as util
+
+fn main() {
+    y.println(util.greet("Diaz"))   -- Hello, Diaz!
+    y.println(util.double(21))      -- 42
+}
+```
+
+### Notes
+
+- The imported file runs in its own env — its globals do not pollute the caller.
+- All top-level `fn` and `let`/`var` definitions become fields of the namespace.
+- Path is relative to the importing file's directory.
+- `import "file.y"` (without `as`) still works and shares the caller's env.
+
+---
+
+## 25. Standard Library
+
+### y.math
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `y.math.sqrt(n)` | Integer square root | `y.math.sqrt(144)` → `12` |
+| `y.math.pow(base, exp)` | Power | `y.math.pow(2, 10)` → `1024` |
+| `y.math.abs(n)` | Absolute value | `y.math.abs(-42)` → `42` |
+| `y.math.min(a, b)` | Minimum | `y.math.min(3, 5)` → `3` |
+| `y.math.max(a, b)` | Maximum | `y.math.max(3, 5)` → `5` |
+| `y.math.clamp(v, lo, hi)` | Clamp to range | `y.math.clamp(15, 0, 10)` → `10` |
+| `y.math.floor(n)` | Floor (float → int) | `y.math.floor(3.7)` → `3` |
+| `y.math.ceil(n)` | Ceiling (float → int) | `y.math.ceil(3.2)` → `4` |
+| `y.math.sign(n)` | Sign (-1, 0, 1) | `y.math.sign(-5)` → `-1` |
+
+### y.string
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `y.string.repeat(s, n)` | Repeat string | `y.string.repeat("ha", 3)` → `"hahaha"` |
+| `y.string.starts_with(s, p)` | Prefix check | `y.string.starts_with("Yolish", "Yo")` → `true` |
+| `y.string.ends_with(s, p)` | Suffix check | `y.string.ends_with("Yolish", "ish")` → `true` |
+| `y.string.replace(s, from, to)` | Replace first match | `y.string.replace("Hi World", "World", "Yolish")` → `"Hi Yolish"` |
+| `y.string.reverse(s)` | Reverse string | `y.string.reverse("Yolish")` → `"hsiloY"` |
+| `y.string.pad_left(s, width)` | Left-pad with spaces | `y.string.pad_left("42", 6)` → `"    42"` |
+| `y.string.pad_right(s, width)` | Right-pad with spaces | `y.string.pad_right("42", 6)` → `"42    "` |
+
+### y.array
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `y.array.sort(arr)` | Sort ascending (returns new array) | `y.array.sort([3,1,2])` → `[1,2,3]` |
+| `y.array.reverse(arr)` | Reverse (returns new array) | `y.array.reverse([1,2,3])` → `[3,2,1]` |
+| `y.array.slice(arr, start, end)` | Slice | `y.array.slice(arr, 1, 3)` → elements 1–2 |
+| `y.array.join(arr, sep)` | Join to string | `y.array.join([1,2,3], ", ")` → `"1, 2, 3"` |
+| `y.array.find(arr, fn)` | First matching element | `y.array.find(arr, fn(x){return x>5})` |
+| `y.array.index_of(arr, val)` | Index of value (-1 if not found) | `y.array.index_of(arr, 4)` → `2` |
+| `y.array.contains(arr, val)` | Check membership | `y.array.contains(arr, 9)` → `true` |
+
+---
+
+## Updated Quick Reference
+
+```yolish
+-- String interpolation
+let msg = "Hello {name}, age {age}!"
+
+-- Error objects
+throw y.error("not found", 404)
+try { ... } catch(e) { y.println(e.message)  y.println(e.code) }
+
+-- Module system
+import "utils.y" as util
+util.greet("Diaz")
+
+-- y.math
+y.math.sqrt(144)          y.math.pow(2,10)
+y.math.min(a,b)           y.math.max(a,b)
+y.math.clamp(v,lo,hi)     y.math.abs(n)
+
+-- y.string
+y.string.repeat(s,n)      y.string.replace(s,from,to)
+y.string.starts_with(s,p) y.string.ends_with(s,p)
+y.string.reverse(s)       y.string.pad_left(s,w)
+
+-- y.array
+y.array.sort(arr)         y.array.reverse(arr)
+y.array.slice(arr,s,e)    y.array.join(arr,sep)
+y.array.find(arr,fn)      y.array.contains(arr,v)
+y.array.index_of(arr,v)
+```
+
+---
+
+## Known Limitations (v0.6)
+
+### 1. Match as expression
+
+`match` works correctly as a **statement** (result discarded or used inside a function body). Assigning a match result directly to a variable returns `nil`:
+
+```yolish
+-- works:
+fn grade(score) {
+    match score {
+        90..100 => "A"
+        80..90  => "B"
+        _       => "F"
+    }
+}
+let g = grade(85)   -- "B" ✓
+
+-- does not work yet:
+let label = match x {
+    404 => "Not Found"
+    _   => "Unknown"
+}   -- label = nil ✗
+```
+
+**Workaround:** wrap the match in a function and call it.
+
+### 2. Recursive functions inside modules
+
+Functions imported via `import "file.y" as name` do not correctly propagate return values through recursive calls:
+
+```yolish
+-- mathlib.y
+fn factorial(n) {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)   -- recursive: broken in module context
+}
+```
+
+**Workaround:** use loops instead of recursion inside module functions:
+
+```yolish
+fn factorial(n) {
+    var result = 1
+    var i = 1
+    while i <= n { result = result * i  i = i + 1 }
+    return result
+}
+```
+
+Both issues share the same root cause: GCC's large struct return ABI at certain call depths corrupts the `ival` field of the 512-byte `Val` struct. This will be fixed in v0.7 by refactoring `eval_node` to use output pointers instead of return-by-value.

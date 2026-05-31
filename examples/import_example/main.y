@@ -1,13 +1,34 @@
--- main.y
--- Demonstrates import: uses mathlib.y
-
-import "mathlib.y"
+import "mathlib.y"  as math
+import "strutils.y" as str
 
 fn main() {
-    y.println(y.format("square(7)        = {0}", square(7)))
-    y.println(y.format("cube(4)          = {0}", cube(4)))
-    y.println(y.format("max(10, 25)      = {0}", max(10, 25)))
-    y.println(y.format("min(10, 25)      = {0}", min(10, 25)))
-    y.println(y.format("abs_val(-42)     = {0}", abs_val(-42)))
-    y.println(y.format("clamp(150, 0,100)= {0}", clamp(150, 0, 100)))
+    y.print("=== math module ===
+")
+    y.println("square(7)      = {math.square(7)}")
+    y.println("cube(4)        = {math.cube(4)}")
+    y.println("factorial(6)   = {math.factorial(6)}")
+    y.println("fib(10)        = {math.fib(10)}")
+    y.println("clamp(15,0,10) = {math.clamp(15, 0, 10)}")
+    y.println("abs_val(-42)   = {math.abs_val(-42)}")
+
+    y.print("
+=== primes up to 20 ===
+")
+    y.print("  ")
+    for i in 2..21 {
+        if math.is_prime(i) { y.print("{i} ") }
+    }
+    y.print("
+")
+
+    y.print("
+=== string utils module ===
+")
+    let s = "hello world from yolish"
+    y.println("original   : {s}")
+    y.println("word_count : {str.word_count(s)}")
+    y.println("capitalize : {str.capitalize(s)}")
+    y.println("words      : {str.words(s)}")
+    y.println("is_empty   : {str.is_empty(s)}")
+    y.println("is_empty ''  : {str.is_empty("")}")
 }
