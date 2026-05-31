@@ -149,4 +149,6 @@ void  env_def(Env *e, const char *name, Val v);
 void  env_free(Env *e);
 void  ys_print_val(Val v);
 void  ys_error(int line, const char *msg);
+void  parser_pool_save(void);
+void  parser_pool_restore(void);
 extern char g_src_dir[512]; /* directory of the running .y file */

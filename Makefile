@@ -7,7 +7,7 @@ OBJS   = $(SRCS:.c=.o)
 all: ys
 
 ys: $(OBJS)
-	$(CC) -o ys $(OBJS)
+	$(CC) $(CFLAGS) -o ys $(OBJS)
 	@echo "Built: ./ys"
 
 %.o: %.c yolish.h

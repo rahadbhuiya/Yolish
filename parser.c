@@ -571,3 +571,14 @@ Node *parse_program(Lexer *l){
     prog->stmts=stmts; prog->stmtc=cnt;
     return prog;
 }
+/* Pool checkpoint for sub-parses (e.g. string interpolation) */
+static int pool_save_idx=0;
+static int stmt_pool_save_idx=0;
+void parser_pool_save(void){
+    pool_save_idx=pool_idx;
+    stmt_pool_save_idx=stmt_pool_idx;
+}
+void parser_pool_restore(void){
+    pool_idx=pool_save_idx;
+    stmt_pool_idx=stmt_pool_save_idx;
+}

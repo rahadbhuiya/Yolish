@@ -120,15 +120,17 @@ make debug
 - [x] v0.4 — @intent and @audit annotations
 - [x] v0.5 — Closures, try/catch/throw, type system, REPL
 - [x] v0.6 — String interpolation, error objects, module system, standard library (y.math/y.string/y.array)
+- [x] v0.6.1 — Bug fixes: `y.format` positional placeholders, segfault on recursive functions, `throw` not propagating through `for` loops, duplicate `#include`, AST pool corruption in string interpolation, REPL version string
 - [ ] v0.7 — Match guards and binding
 - [ ] v1.0 — Native ELF compiler
 
 ## Known Limitations (v0.6)
 
-- `match` as an assigned expression returns `nil` — use a wrapper function instead.
-- Recursive functions inside `import ... as` modules return wrong values — use loops instead.
+- `match` as a **direct top-level assignment** returns `nil` — use a wrapper function instead. `match` works correctly as a return value inside a function body.
+- Strings are capped at 255 characters; arrays at 64 elements at creation.
+- Floats are fixed-point ×1000 (3 decimal places).
 
-Both will be fixed in v0.7. See [DOCS.md](DOCS.md) for workarounds.
+See [DOCS.md](DOCS.md) for full details and workarounds.
 
 ---
 

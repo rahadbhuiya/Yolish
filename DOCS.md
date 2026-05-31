@@ -1084,9 +1084,9 @@ y.array.index_of(arr,v)
 
 ## Known Limitations (v0.6)
 
-### 1. Match as expression
+### 1. Match as direct expression (assignment target)
 
-`match` works correctly as a **statement** (result discarded or used inside a function body). Assigning a match result directly to a variable returns `nil`:
+`match` works correctly as a **return value inside a function**, but cannot be assigned directly to a variable at the statement level:
 
 ```yolish
 -- works:
@@ -1099,7 +1099,16 @@ fn grade(score) {
 }
 let g = grade(85)   -- "B" ✓
 
--- does not work yet:
+-- also works (inside function body):
+fn describe(x) {
+    let label = match x {
+        404 => "Not Found"
+        _   => "Unknown"
+    }
+    return label
+}
+
+-- does not work (top-level direct assignment):
 let label = match x {
     404 => "Not Found"
     _   => "Unknown"
@@ -1108,27 +1117,19 @@ let label = match x {
 
 **Workaround:** wrap the match in a function and call it.
 
-### 2. Recursive functions inside modules
+### 2. String and array limits
 
-Functions imported via `import "file.y" as name` do not correctly propagate return values through recursive calls:
+- Strings: max 255 characters
+- String interpolation expressions: max 127 characters
+- Arrays: max 64 elements at creation, max 2048 total across the whole program
+- Functions: max 8 parameters
+- Structs: max 8 fields
+- Match arms: max 8 per expression
+
+### 3. Float precision
+
+Floats are stored as fixed-point integers ×1000 (3 decimal places). Very large or very small floats may lose precision.
 
 ```yolish
--- mathlib.y
-fn factorial(n) {
-    if n <= 1 { return 1 }
-    return n * factorial(n - 1)   -- recursive: broken in module context
-}
+let pi = 3.14159   -- stored as 3.141
 ```
-
-**Workaround:** use loops instead of recursion inside module functions:
-
-```yolish
-fn factorial(n) {
-    var result = 1
-    var i = 1
-    while i <= n { result = result * i  i = i + 1 }
-    return result
-}
-```
-
-Both issues share the same root cause: GCC's large struct return ABI at certain call depths corrupts the `ival` field of the 512-byte `Val` struct. This will be fixed in v0.7 by refactoring `eval_node` to use output pointers instead of return-by-value.

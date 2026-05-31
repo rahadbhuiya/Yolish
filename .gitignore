@@ -2,4 +2,6 @@ ys
 ys_debug
 *.o
 *.out
-.DS_Store
+.DS_Storeys
+ys_o2
+

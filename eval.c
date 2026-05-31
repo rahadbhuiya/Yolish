@@ -209,12 +209,28 @@ static Val eval_interp_str(const char *s, Env *env){
             }
             expr[ei]=0;
             if(ei==0) continue;
+            /* {0}, {1}, {2}... are positional placeholders for y.format — pass through literally.
+               Yolish identifiers cannot start with a digit, so all-digit content is never a
+               variable name; emitting it as-is lets y.format do the substitution later. */
+            {
+                int all_digits=1;
+                for(int _di=0;_di<ei;_di++) if(expr[_di]<'0'||expr[_di]>'9'){all_digits=0;break;}
+                if(all_digits){
+                    if(oi<508){ out[oi++]='{';
+                        for(int _di=0;_di<ei&&oi<509;_di++) out[oi++]=expr[_di];
+                        out[oi++]='}';
+                    }
+                    continue;
+                }
+            }
             /* parse and eval the expression */
             Lexer el; lex_init(&el,expr,ei);
+            parser_pool_save();
             Node *en=parse_program(&el);
             /* eval: just eval first statement */
             Val rv=make_nil();
             if(en&&en->stmtc>0) rv=eval_node(en->stmts[0],env);
+            parser_pool_restore();
             /* convert to string */
             char tmp[128]; int ti=0;
             if(rv.type==VT_INT){
@@ -515,7 +531,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                 Env *fe=env_new(env);
                 env_def(fe,n->name,make_int(idx));
                 last=eval_block(n->body,fe);
-                if(g_returning) break;
+                if(g_returning||g_throwing) break;
             }
         } else {
             Val iter=eval_node(n->cond,env);
@@ -524,7 +540,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                     Env *fe=env_new(env);
                     env_def(fe,n->name,iter.arr_data[idx]);
                     last=eval_block(n->body,fe);
-                    if(g_returning) break;
+                    if(g_returning||g_throwing) break;
                 }
             } else if(iter.type==VT_STR){
                 int slen=str_len_u(iter.sval);
@@ -533,7 +549,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                     Env *fe=env_new(env);
                     env_def(fe,n->name,make_str(ch));
                     last=eval_block(n->body,fe);
-                    if(g_returning) break;
+                    if(g_returning||g_throwing) break;
                 }
             }
         }
