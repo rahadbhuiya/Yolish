@@ -21,12 +21,15 @@ static Token make_kw_or_ident(const char *s, int n){
     if(streq(s,n,"in"))     {t.kind=TK_IN;     return t;}
     if(streq(s,n,"return")) {t.kind=TK_RETURN; return t;}
     if(streq(s,n,"struct")) {t.kind=TK_STRUCT; return t;}
+    if(streq(s,n,"impl"))   {t.kind=TK_IMPL;   return t;}
     if(streq(s,n,"match"))  {t.kind=TK_MATCH;  return t;}
     if(streq(s,n,"import")) {t.kind=TK_IMPORT; return t;}
     if(streq(s,n,"try"))    {t.kind=TK_TRY;    return t;}
     if(streq(s,n,"catch"))  {t.kind=TK_CATCH;  return t;}
     if(streq(s,n,"throw"))  {t.kind=TK_THROW;  return t;}
     if(streq(s,n,"as"))     {t.kind=TK_AS;     return t;}
+    if(streq(s,n,"break"))  {t.kind=TK_BREAK;  return t;}
+    if(streq(s,n,"continue")){t.kind=TK_CONTINUE;return t;}
     if(streq(s,n,"true"))   {t.kind=TK_TRUE;   t.ival=1; return t;}
     if(streq(s,n,"false"))  {t.kind=TK_FALSE;  t.ival=0; return t;}
     t.kind=TK_IDENT; return t;
@@ -54,35 +57,70 @@ Token lex_next(Lexer *l){
         int64_t v=0; int start=*p;
         while(*p<end&&is_digit(s[*p])){v=v*10+(s[*p]-'0');(*p)++;}
         if(*p<end&&s[*p]=='.'&&(*p+1>=end||s[*p+1]!='.')&&(*p+1<end&&s[*p+1]>='0'&&s[*p+1]<='9')){
-            (*p)++; int64_t frac=0,div=1;
-            int fc=0;
-            while(*p<end&&is_digit(s[*p])&&fc<3){frac=frac*10+(s[*p]-'0');div*=10;(*p)++;fc++;}
-            while(*p<end&&is_digit(s[*p]))(*p)++;
-            /* store as int*1000 */
-            t.kind=TK_FLOAT; t.fval=v*1000 + frac*1000/div;
+            (*p)++; double frac=0.0, div=1.0;
+            while(*p<end&&is_digit(s[*p])){frac=frac*10+(s[*p]-'0');div*=10;(*p)++;}
+            t.kind=TK_FLOAT; t.fval=(double)v + frac/div;
         } else { t.kind=TK_INT; t.ival=v; }
         t.len=*p-start; return t;
     }
 
-    /* string */
+    /* string: "..." with escape sequences and {expr} interpolation */
     if(s[*p]=='"'){
         (*p)++;
-        static char strbuf[512];
+        static char strbuf[8192];
         int slen=0;
         while(*p<end&&s[*p]!='"'){
+            if(s[*p]=='\n') l->line++;
             if(s[*p]=='\\'&&*p+1<end){
                 (*p)++;
-                if(s[*p]=='n')      strbuf[slen++]='\n';
-                else if(s[*p]=='t') strbuf[slen++]='\t';
-                else if(s[*p]=='r') strbuf[slen++]='\r';
-                else                strbuf[slen++]=s[*p];
+                if(slen<8189){
+                    if(s[*p]=='n')      strbuf[slen++]='\n';
+                    else if(s[*p]=='t') strbuf[slen++]='\t';
+                    else if(s[*p]=='r') strbuf[slen++]='\r';
+                    else                strbuf[slen++]=s[*p];
+                }
             } else {
-                strbuf[slen++]=s[*p];
+                if(slen<8190) strbuf[slen++]=s[*p];
             }
             (*p)++;
         }
         strbuf[slen]=0;
         t.kind=TK_STR; t.start=strbuf; t.len=slen;
+        if(*p<end)(*p)++;
+        return t;
+    }
+
+    /* raw string: r"..." — no escape processing, no interpolation
+       stored with a leading '\x01' sentinel so eval_node skips interpolation */
+    if(s[*p]=='r' && *p+1<end && s[*p+1]=='"'){
+        (*p)+=2;
+        static char rawbuf[8193];
+        int rlen=0;
+        rawbuf[rlen++]='\x01'; /* sentinel: raw string, skip interpolation */
+        while(*p<end&&s[*p]!='"'){
+            if(s[*p]=='\n') l->line++;
+            if(rlen<8191) rawbuf[rlen++]=s[*p];
+            (*p)++;
+        }
+        rawbuf[rlen]=0;
+        t.kind=TK_STR; t.start=rawbuf; t.len=rlen;
+        if(*p<end)(*p)++;
+        return t;
+    }
+
+    /* multiline string: `...` — newlines literal, {expr} interpolation works,
+       no \n \t escape sequences (what you type is what you get) */
+    if(s[*p]=='`'){
+        (*p)++;
+        static char mlbuf[8192];
+        int mlen=0;
+        while(*p<end&&s[*p]!='`'){
+            if(s[*p]=='\n') l->line++;
+            if(mlen<8190) mlbuf[mlen++]=s[*p];
+            (*p)++;
+        }
+        mlbuf[mlen]=0;
+        t.kind=TK_STR; t.start=mlbuf; t.len=mlen;
         if(*p<end)(*p)++;
         return t;
     }

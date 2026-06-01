@@ -9,7 +9,7 @@ char g_src_dir[512] = {0}; /* set from argv[1] */
 static void run_repl(void){
     char line[4096];
     Env *env=env_new(NULL);
-    fprintf(stdout,"Yolish v0.6 REPL  (type 'exit' to quit)\n");
+    fprintf(stdout,"Yolish v0.7.5 REPL  (type 'exit' to quit)\n");
     fflush(stdout);
     while(1){
         fprintf(stdout,"ys> "); fflush(stdout);

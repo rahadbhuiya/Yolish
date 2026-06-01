@@ -38,6 +38,10 @@ fn junaeid() {
     y.print("Junaeid\n")
 }
 
+fn ariyan() {
+    y.print("hi, ")
+    y.print("Ariyan\n")
+}
 
 
 

@@ -4,7 +4,7 @@ The official programming language of Exploidus OS.
 Fast, secure, capability-aware — runs natively on Linux, macOS, and Windows (WSL).
 
 Author: .Bhuiya
-Version: v0.6
+Version: v0.7.5
 
 ---
 
@@ -121,16 +121,18 @@ make debug
 - [x] v0.5 — Closures, try/catch/throw, type system, REPL
 - [x] v0.6 — String interpolation, error objects, module system, standard library (y.math/y.string/y.array)
 - [x] v0.6.1 — Bug fixes: `y.format` positional placeholders, segfault on recursive functions, `throw` not propagating through `for` loops, duplicate `#include`, AST pool corruption in string interpolation, REPL version string
+- [x] v0.6.2 — `break` and `continue` in `while`, `for-range`, and `for-array` loops
+- [x] v0.6.3 — Multiline strings (backtick) and raw strings (`r"..."`)
+- [x] v0.7.0 — `impl` struct methods with `self`, method chaining
+- [x] v0.7.1 — `y.input(prompt)`, `y.input_int`, `y.input_float`; fixed `y.str`, `y.int`, `y.float`, `y.bool` conversions; fixed float arithmetic
+- [x] v0.7.2 — `y.sort`, `y.range`, `y.zip`, `y.map`, `y.filter`, `y.reduce`, `y.each`, `y.sum`, `y.flatten`; fixed map/filter/reduce return values
+- [x] v0.7.3 — `match` is now a full expression: `let x = match val { ... }`, works in any value context
+- [x] v0.7.4 — Removed fixed-size limitations: strings 255→1023, arrays 64→512, float ×1000→double (IEEE 754)
+- [x] v0.7.5 — No more hard limits: strings and arrays are fully dynamic (malloc-based), string buffer 8KB
 - [ ] v0.7 — Match guards and binding
 - [ ] v1.0 — Native ELF compiler
 
-## Known Limitations (v0.6)
-
-- `match` as a **direct top-level assignment** returns `nil` — use a wrapper function instead. `match` works correctly as a return value inside a function body.
-- Strings are capped at 255 characters; arrays at 64 elements at creation.
-- Floats are fixed-point ×1000 (3 decimal places).
-
-See [DOCS.md](DOCS.md) for full details and workarounds.
+See [DOCS.md](DOCS.md) for full language reference.
 
 ---
 
