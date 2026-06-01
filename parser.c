@@ -60,7 +60,7 @@ static Node *parse_primary(Lexer *l){
         eat(l); Node*n=alloc_node(ND_BOOL);n->ival=t.ival;return n;}
     if(t.kind==TK_STR){
         Node*n=alloc_node(ND_STR);
-        int len=t.len<255?t.len:255;
+        int len=t.len<8191?t.len:8191;
         for(int i=0;i<len;i++) n->sval[i]=t.start[i];
         n->sval[len]=0;
         eat(l);
@@ -123,7 +123,7 @@ static Node *parse_primary(Lexer *l){
             }
             return idx;
         }
-        /* dot access — handles chained dots: y.math.sqrt(x) */
+        /* dot access — handles chained dots and method calls: a.b().c().d */
         if(check(l,TK_DOT)){
             Node *cur2=n;
             while(check(l,TK_DOT)){
@@ -145,7 +145,9 @@ static Node *parse_primary(Lexer *l){
                     }
                     if(check(l,TK_RPAREN)) eat(l);
                     dot->args=dot->arg_data; dot->argc=argc2;
-                    return dot;
+                    /* keep looping — next dot starts a new chained call */
+                    cur2=dot;
+                    continue;
                 }
                 cur2=dot;
             }
@@ -221,6 +223,38 @@ static Node *parse_primary(Lexer *l){
         expect(l,TK_RPAREN);
         n->args=(Node**)args; n->argc=argc; return n;
     }
+    /* match as expression — allows: let x = match val { ... } */
+    if(t.kind==TK_MATCH){
+        eat(l);
+        Node *n=alloc_node(ND_MATCH);
+        n->cond=parse_expr(l);
+        expect(l,TK_LBRACE);
+        int arms=0;
+        while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)&&arms<8){
+            while(check(l,TK_NL)||check(l,TK_SEMICOLON)) eat(l);
+            if(check(l,TK_RBRACE)) break;
+            Node *pat=NULL;
+            if(check(l,TK_IDENT)&&l->cur.len==1&&l->cur.start[0]=='_'){
+                eat(l); pat=alloc_node(ND_IDENT);
+                pat->name[0]='_'; pat->name[1]=0;
+            } else {
+                pat=parse_binop(l,0);
+            }
+            if(check(l,TK_FAT_ARROW)) eat(l);
+            Node *body=NULL;
+            if(check(l,TK_LBRACE)) body=parse_block(l);
+            else body=parse_expr(l);
+            n->arg_data[arms*2  ]=pat;
+            n->arg_data[arms*2+1]=body;
+            arms++;
+            while(check(l,TK_NL)||check(l,TK_SEMICOLON)||check(l,TK_COMMA)) eat(l);
+        }
+        expect(l,TK_RBRACE);
+        n->args=n->arg_data;
+        n->argc=arms;
+        return n;
+    }
+
     eat(l);
     return alloc_node(ND_INT); /* fallback */
 }
@@ -399,8 +433,8 @@ static Node *parse_stmt(Lexer *l){
         /* copy annotation into node */
         for(int i=0;ann_name[i]&&i<31;i++) n->type[i]=ann_name[i];
         n->type[31]=0;
-        for(int i=0;ann_arg[i]&&i<255;i++) n->sval[i]=ann_arg[i];
-        n->sval[255]=0;
+        for(int i=0;ann_arg[i]&&i<8191;i++) n->sval[i]=ann_arg[i];
+        n->sval[8191]=0;
         /* parse rest of fn (name, params, body) */
         Token nm=expect(l,TK_IDENT);
         int nl2=nm.len<63?nm.len:63;
@@ -495,12 +529,48 @@ static Node *parse_stmt(Lexer *l){
         return n;
     }
 
+    /* impl StructName { fn method(self, ...) { } } */
+    if(t.kind==TK_IMPL){
+        eat(l);
+        Node *n=alloc_node(ND_IMPL);
+        Token nm=expect(l,TK_IDENT);
+        int nl=nm.len<63?nm.len:63;
+        for(int i=0;i<nl;i++) n->name[i]=nm.start[i];
+        n->name[nl]=0;
+        expect(l,TK_LBRACE);
+        /* parse methods into stmt_pool */
+        Node *tmp[32]; int cnt=0;
+        while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)){
+            while(check(l,TK_NL)||check(l,TK_SEMICOLON)) eat(l);
+            if(check(l,TK_RBRACE)) break;
+            if(cnt<32) tmp[cnt++]=parse_stmt(l);
+            while(check(l,TK_NL)||check(l,TK_SEMICOLON)) eat(l);
+        }
+        expect(l,TK_RBRACE);
+        Node **stmts=&stmt_pool[stmt_pool_idx];
+        for(int i=0;i<cnt&&stmt_pool_idx<4095;i++) stmt_pool[stmt_pool_idx++]=tmp[i];
+        n->stmts=stmts; n->stmtc=cnt;
+        return n;
+    }
+
     /* throw expr */
     if(t.kind==TK_THROW){
         eat(l);
         Node *n=alloc_node(ND_THROW);
         n->right=parse_expr(l);
         return n;
+    }
+
+    /* break */
+    if(t.kind==TK_BREAK){
+        eat(l);
+        return alloc_node(ND_BREAK);
+    }
+
+    /* continue */
+    if(t.kind==TK_CONTINUE){
+        eat(l);
+        return alloc_node(ND_CONTINUE);
     }
 
     /* try { } catch(e) { } */

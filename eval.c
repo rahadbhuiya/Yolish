@@ -3,17 +3,18 @@
 
 /*  Memory pools  */
 static Env  envpool[4096]; static int envidx=0;
-static Val  arrpool[2048]; static int arridx=0;
-static Val  fldpool[512];  static int fldidx=0;
+/* No static arrpool — fully dynamic */
 static char nmpool[512][32]; static int nmidx=0;
 
 static Val *alloc_arr(int n){
-    if(arridx+n>=2048) return arrpool;
-    Val *p=&arrpool[arridx]; arridx+=n; return p;
+    if(n<=0) n=1;
+    Val *p=(Val*)calloc(n,sizeof(Val));
+    return p ? p : (Val*)calloc(1,sizeof(Val));
 }
 static Val *alloc_fld(int n){
-    if(fldidx+n>=512) return fldpool;
-    Val *p=&fldpool[fldidx]; fldidx+=n; return p;
+    if(n<=0) n=1;
+    Val *p=(Val*)calloc(n,sizeof(Val));
+    return p ? p : (Val*)calloc(1,sizeof(Val));
 }
 static char (*alloc_nm(int n))[32]{
     if(nmidx+n>=512) return nmpool;
@@ -55,7 +56,7 @@ static Val make_nil(void){
     return r;
 }
 static Val make_int(int64_t v){Val r=make_nil();r.type=VT_INT;r.ival=v;return r;}
-static Val make_float(int64_t v){Val r=make_nil();r.type=VT_FLOAT;r.fval=v;return r;}
+static Val make_float(double v){Val r=make_nil();r.type=VT_FLOAT;r.fval=v;return r;}
 static Val make_bool(int v){Val r=make_nil();r.type=VT_BOOL;r.bval=v;r.ival=v;return r;}
 static Val make_err(const char *msg){
     Val r=make_nil(); r.type=VT_ERR;
@@ -64,7 +65,7 @@ static Val make_err(const char *msg){
 }
 static Val make_str(const char *s){
     Val r=make_nil(); r.type=VT_STR;
-    int i=0; while(s[i]&&i<255){r.sval[i]=s[i];i++;} r.sval[i]=0;
+    int i=0; while(s[i]&&i<8191){r.sval[i]=s[i];i++;} r.sval[i]=0;
     return r;
 }
 static Val make_cap(const char *path,int perm,int64_t fd){
@@ -77,15 +78,15 @@ static Val make_cap(const char *path,int perm,int64_t fd){
 /*  Value helpers  */
 static int64_t val_int(Val v){
     if(v.type==VT_INT)   return v.ival;
-    if(v.type==VT_FLOAT) return v.fval/1000;
+    if(v.type==VT_FLOAT) return (int64_t)v.fval;
     if(v.type==VT_BOOL)  return v.bval;
     if(v.type==VT_CAP)   return v.cap_fd;
     if(v.type==VT_ARR)   return v.arr_len;
     return 0;
 }
-static int64_t val_float(Val v){
+static double val_float(Val v){
     if(v.type==VT_FLOAT) return v.fval;
-    return val_int(v)*1000;
+    return (double)val_int(v);
 }
 static int val_bool(Val v){
     if(v.type==VT_BOOL) return v.bval;
@@ -110,16 +111,16 @@ void ys_print_val(Val v){
     if(v.type==VT_INT){
         char b[24]; int_to_str(v.ival,b); puts(b);
     } else if(v.type==VT_FLOAT){
-        char b[32];
-        int64_t ip=v.fval/1000,fp=v.fval%1000;
-        if(fp<0)fp=-fp;
-        int_to_str(ip,b);
-        int i=0; while(b[i])i++;
-        b[i++]='.';
-        b[i++]=(char)('0'+(fp/100)%10);
-        b[i++]=(char)('0'+(fp/10)%10);
-        b[i++]=(char)('0'+fp%10);
-        b[i]=0; puts(b);
+        char b[64];
+        /* print with up to 6 significant decimal places, strip trailing zeros */
+        snprintf(b,sizeof(b),"%.6f",v.fval);
+        int dot=-1,last=0;
+        for(int i=0;b[i];i++){ if(b[i]=='.') dot=i; last=i; }
+        if(dot>=0){
+            while(last>dot+1 && b[last]=='0') last--;
+        }
+        b[last+1]=0;
+        puts(b);
     } else if(v.type==VT_BOOL){
         puts(v.bval?"true":"false");
     } else if(v.type==VT_STR){
@@ -161,6 +162,8 @@ static int g_ann_depth=0; /* annotation fire depth — suppress nested calls */
 static int g_throwing=0;     /* throw signal */
 static char g_throw_msg[512]; /* thrown message */
 static Val g_throw_val;       /* thrown value — use g_throw_msg for str content */
+static int g_breaking=0;   /* break signal — exit innermost loop */
+static int g_continuing=0; /* continue signal — skip to next iteration */
 
 /*  Runtime error  */
 void ys_error(int line, const char *msg){
@@ -190,13 +193,22 @@ static struct {
 } structs[MAX_STRUCTS];
 static int nstructs=0;
 
+/*  impl method registry  */
+#define MAX_METHODS 64
+static struct {
+    char struct_name[32];
+    char method_name[32];
+    Node *fn_node;
+} methods[MAX_METHODS];
+static int nmethods=0;
+
 /*  eval_node  */
 
 /*  String interpolation: "Hello {name}!"  */
 static Val eval_interp_str(const char *s, Env *env){
-    char out[512]; int oi=0;
+    char out[8192]; int oi=0;
     int i=0;
-    while(s[i]&&oi<510){
+    while(s[i]&&oi<8190){
         if(s[i]=='{'){
             i++;
             /* collect expression source until matching } */
@@ -216,8 +228,8 @@ static Val eval_interp_str(const char *s, Env *env){
                 int all_digits=1;
                 for(int _di=0;_di<ei;_di++) if(expr[_di]<'0'||expr[_di]>'9'){all_digits=0;break;}
                 if(all_digits){
-                    if(oi<508){ out[oi++]='{';
-                        for(int _di=0;_di<ei&&oi<509;_di++) out[oi++]=expr[_di];
+                    if(oi<8188){ out[oi++]='{';
+                        for(int _di=0;_di<ei&&oi<8188;_di++) out[oi++]=expr[_di];
                         out[oi++]='}';
                     }
                     continue;
@@ -237,45 +249,40 @@ static Val eval_interp_str(const char *s, Env *env){
                 int64_t v=rv.ival; int neg=v<0; if(neg)v=-v;
                 char tb[32]; int tbi=0;
                 do{tb[tbi++]=(char)('0'+(v%10));v/=10;}while(v>0);
-                if(neg&&oi<509) out[oi++]='-';
-                while(tbi>0&&oi<510) out[oi++]=tb[--tbi];
+                if(neg&&oi<8188) out[oi++]='-';
+                while(tbi>0&&oi<8188) out[oi++]=tb[--tbi];
             } else if(rv.type==VT_FLOAT){
-                int64_t w=rv.fval/1000,f2=rv.fval%1000;
-                if(f2<0)f2=-f2;
-                int neg=w<0; if(neg)w=-w;
-                char tb[32]; int tbi=0;
-                do{tb[tbi++]=(char)('0'+(w%10));w/=10;}while(w>0);
-                if(neg&&oi<509)out[oi++]='-';
-                while(tbi>0&&oi<510)out[oi++]=tb[--tbi];
-                out[oi++]='.';
-                char fb[4]; int fi=0;
-                int64_t fr=f2;
-                do{fb[fi++]=(char)('0'+(fr%10));fr/=10;}while(fi<3);
-                while(fi>0&&oi<510)out[oi++]=fb[--fi];
+                char tb[64];
+                snprintf(tb,sizeof(tb),"%.6f",rv.fval);
+                int dot=-1,last2=0;
+                for(int _i=0;tb[_i];_i++){if(tb[_i]=='.')dot=_i;last2=_i;}
+                if(dot>=0){while(last2>dot+1&&tb[last2]=='0')last2--;}
+                tb[last2+1]=0;
+                for(int _i=0;tb[_i]&&oi<8188;_i++) out[oi++]=tb[_i];
             } else if(rv.type==VT_STR){
-                int si2=0; while(rv.sval[si2]&&oi<510)out[oi++]=rv.sval[si2++];
+                int si2=0; while(rv.sval[si2]&&oi<8188)out[oi++]=rv.sval[si2++];
             } else if(rv.type==VT_ARR){
                 out[oi++]='[';
-                for(int _ai=0;_ai<rv.arr_len&&oi<505;_ai++){
+                for(int _ai=0;_ai<rv.arr_len&&oi<8188;_ai++){
                     Val _el=rv.arr_data[_ai];
                     if(_el.type==VT_INT){
                         int64_t v=_el.ival; int neg=v<0; if(neg)v=-v;
                         char tb[24]; int ti=0;
                         do{tb[ti++]=(char)('0'+(v%10));v/=10;}while(v>0);
-                        if(neg&&oi<509)out[oi++]='-';
-                        while(ti>0&&oi<510)out[oi++]=tb[--ti];
+                        if(neg&&oi<8188)out[oi++]='-';
+                        while(ti>0&&oi<8188)out[oi++]=tb[--ti];
                     } else if(_el.type==VT_STR){
-                        int _si=0; while(_el.sval[_si]&&oi<508)out[oi++]=_el.sval[_si++];
+                        int _si=0; while(_el.sval[_si]&&oi<8188)out[oi++]=_el.sval[_si++];
                     } else {
                         out[oi++]='?';
                     }
-                    if(_ai<rv.arr_len-1&&oi<508){out[oi++]=','; out[oi++]=' ';}
+                    if(_ai<rv.arr_len-1&&oi<8188){out[oi++]=','; out[oi++]=' ';}
                 }
                 out[oi++]=']';
             } else if(rv.type==VT_BOOL){
-                const char *bs2=rv.bval?"true":"false"; while(*bs2&&oi<510)out[oi++]=*bs2++;
+                const char *bs2=rv.bval?"true":"false"; while(*bs2&&oi<8188)out[oi++]=*bs2++;
             } else if(rv.type==VT_NIL){
-                const char *ns="nil"; while(*ns&&oi<510)out[oi++]=*ns++;
+                const char *ns="nil"; while(*ns&&oi<8188)out[oi++]=*ns++;
             }
             (void)tmp; (void)ti;
         } else if(s[i]=='\\' && s[i+1]=='{'){
@@ -318,6 +325,8 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     case ND_FLOAT: return make_float(n->fval);
     case ND_BOOL:  return make_bool((int)n->ival);
     case ND_STR:{
+        /* raw string: sentinel \x01 prefix — skip interpolation, return content after sentinel */
+        if(n->sval[0]=='\x01') return make_str(n->sval+1);
         /* check for {expr} interpolation */
         int _has_interp=0;
         for(int _i=0;n->sval[_i];_i++) if(n->sval[_i]=='{'){_has_interp=1;break;}
@@ -451,6 +460,26 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         return v;
     }
 
+    /*  impl block — register methods for a struct  */
+    case ND_IMPL:{
+        for(int i=0;i<n->stmtc;i++){
+            Node *fn=n->stmts[i];
+            if(fn&&fn->kind==ND_FN&&nmethods<MAX_METHODS){
+                int si=nmethods++;
+                /* struct name */
+                int ni=0;
+                while(n->name[ni]&&ni<31){methods[si].struct_name[ni]=n->name[ni];ni++;}
+                methods[si].struct_name[ni]=0;
+                /* method name */
+                int mi=0;
+                while(fn->name[mi]&&mi<31){methods[si].method_name[mi]=fn->name[mi];mi++;}
+                methods[si].method_name[mi]=0;
+                methods[si].fn_node=fn;
+            }
+        }
+        return make_nil();
+    }
+
     case ND_BINOP:{
         Val L=eval_node(n->left,env);
         Val R=eval_node(n->right,env);
@@ -460,18 +489,18 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
             if(L.type==VT_STR){
                 Val r=make_str(L.sval);
                 int i=0; while(r.sval[i])i++;
-                int j=0; while(R.sval[j]&&i<254)r.sval[i++]=R.sval[j++];
+                int j=0; while(R.sval[j]&&i<8190)r.sval[i++]=R.sval[j++];
                 r.sval[i]=0; return r;
             }
-            return use_f?make_float((val_float(L)+val_float(R))/1000):make_int(val_int(L)+val_int(R));
+            return use_f?make_float(val_float(L)+val_float(R)):make_int(val_int(L)+val_int(R));
         case TK_MINUS:
-            return use_f?make_float((val_float(L)-val_float(R))/1000)
+            return use_f?make_float(val_float(L)-val_float(R))
                         :make_int(val_int(L)-val_int(R));
         case TK_STAR:
-            return use_f?make_float(val_float(L)*val_float(R)/1000000)
+            return use_f?make_float(val_float(L)*val_float(R))
                         :make_int(val_int(L)*val_int(R));
         case TK_SLASH:{int64_t d=val_int(R);
-            return use_f?make_float(val_float(L)*1000/val_float(R))
+            return use_f?make_float(val_float(R)!=0.0?val_float(L)/val_float(R):0.0)
                         :make_int(d?val_int(L)/d:0);}
         case TK_PERCENT:{int64_t d=val_int(R);return make_int(d?val_int(L)%d:0);}
         case TK_EQEQ:
@@ -515,6 +544,8 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         Val last=make_nil();
         while(val_bool(eval_node(n->cond,env))){
             last=eval_block(n->body,env);
+            if(g_continuing){ g_continuing=0; continue; }
+            if(g_breaking)  { g_breaking=0;   break; }
             if((g_returning&&g_returning!=2)||g_throwing) break;
         }
         return last;
@@ -531,6 +562,8 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                 Env *fe=env_new(env);
                 env_def(fe,n->name,make_int(idx));
                 last=eval_block(n->body,fe);
+                if(g_continuing){ g_continuing=0; continue; }
+                if(g_breaking)  { g_breaking=0;   break; }
                 if(g_returning||g_throwing) break;
             }
         } else {
@@ -540,6 +573,8 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                     Env *fe=env_new(env);
                     env_def(fe,n->name,iter.arr_data[idx]);
                     last=eval_block(n->body,fe);
+                    if(g_continuing){ g_continuing=0; continue; }
+                    if(g_breaking)  { g_breaking=0;   break; }
                     if(g_returning||g_throwing) break;
                 }
             } else if(iter.type==VT_STR){
@@ -549,6 +584,8 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                     Env *fe=env_new(env);
                     env_def(fe,n->name,make_str(ch));
                     last=eval_block(n->body,fe);
+                    if(g_continuing){ g_continuing=0; continue; }
+                    if(g_breaking)  { g_breaking=0;   break; }
                     if(g_returning||g_throwing) break;
                 }
             }
@@ -582,7 +619,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                 else if(subject.type==VT_FLOAT && pv.type==VT_FLOAT) matched=(subject.fval==pv.fval);
                 else if(subject.type==VT_BOOL  && pv.type==VT_BOOL)  matched=(subject.bval==pv.bval);
                 else if(subject.type==VT_STR   && pv.type==VT_STR)   matched=(strcmp_u(subject.sval,pv.sval)==0);
-                else if(subject.type==VT_INT   && pv.type==VT_FLOAT) matched=(subject.ival*1000==pv.fval);
+                else if(subject.type==VT_INT   && pv.type==VT_FLOAT) matched=((double)subject.ival==pv.fval);
                 else matched=0;
             }
 
@@ -590,11 +627,15 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                 Val _mv;
                 if(body->kind==ND_BLOCK) _mv=eval_block(body,env);
                 else _mv=eval_node(body,env);
-                if(!g_returning){
-                    memcpy(&g_return_val,&_mv,sizeof(Val));
-                    g_returning=2; /* 2 = match result, not a function return */
+                /* if eval_block itself set g_returning (e.g. body had a return stmt),
+                   use g_return_val; otherwise use _mv directly */
+                if(g_returning==1){
+                    /* actual return inside match body — propagate upward */
+                    return g_return_val;
                 }
-                return g_return_val;
+                /* clear any leftover match signal from nested match */
+                if(g_returning==2){ memcpy(&_mv,&g_return_val,sizeof(Val)); g_returning=0; }
+                return _mv;
             }
         }
         return make_nil(); /* no arm matched */
@@ -675,12 +716,26 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
             ||strcmp_u(n->name,"y.print")==0 ||strcmp_u(n->name,"print")==0
             ||strcmp_u(n->name,"y.println")==0||strcmp_u(n->name,"println")==0
             ||strcmp_u(n->name,"y.input")==0  ||strcmp_u(n->name,"input")==0
+            ||strcmp_u(n->name,"y.input_int")==0
+            ||strcmp_u(n->name,"y.input_float")==0
             ||strcmp_u(n->name,"y.len")==0    ||strcmp_u(n->name,"len")==0
             ||strcmp_u(n->name,"y.abs")==0    ||strcmp_u(n->name,"abs")==0
             ||strcmp_u(n->name,"y.str")==0    ||strcmp_u(n->name,"str")==0
             ||strcmp_u(n->name,"y.int")==0    ||strcmp_u(n->name,"int")==0
+            ||strcmp_u(n->name,"y.float")==0  ||strcmp_u(n->name,"float")==0
+            ||strcmp_u(n->name,"y.bool")==0   ||strcmp_u(n->name,"bool")==0
             ||strcmp_u(n->name,"y.push")==0   ||strcmp_u(n->name,"push")==0
             ||strcmp_u(n->name,"y.pop")==0    ||strcmp_u(n->name,"pop")==0
+            ||strcmp_u(n->name,"y.sort")==0   ||strcmp_u(n->name,"sort")==0
+            ||strcmp_u(n->name,"y.range")==0  ||strcmp_u(n->name,"range")==0
+            ||strcmp_u(n->name,"y.zip")==0    ||strcmp_u(n->name,"zip")==0
+            ||strcmp_u(n->name,"y.flatten")==0||strcmp_u(n->name,"flatten")==0
+            ||strcmp_u(n->name,"y.sum")==0    ||strcmp_u(n->name,"sum")==0
+            ||strcmp_u(n->name,"y.map")==0    ||strcmp_u(n->name,"map")==0
+            ||strcmp_u(n->name,"y.filter")==0 ||strcmp_u(n->name,"filter")==0
+            ||strcmp_u(n->name,"y.reduce")==0 ||strcmp_u(n->name,"reduce")==0
+            ||strcmp_u(n->name,"y.each")==0   ||strcmp_u(n->name,"each")==0
+            ||strcmp_u(n->name,"y.min_arr")==0||strcmp_u(n->name,"y.max_arr")==0
             ||strcmp_u(n->name,"y.exit")==0   ||strcmp_u(n->name,"exit")==0)
             return call_builtin(n->name,n->args,n->argc,env);
 
@@ -708,11 +763,43 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
             /* first try as builtin */
             if(strncmp(qname,"y.",2)==0||qname[0]=='@')
                 return call_builtin(qname,n->args,n->argc,env);
-            /* else check if left is a module (struct) with this method */
+            /* eval the object — works for identifiers AND chained calls */
             static Val _obj_val_static;
             { Val _obj_tmp=eval_node(n->left,env); memcpy(&_obj_val_static,&_obj_tmp,sizeof(Val)); }
             Val obj_val=_obj_val_static;
+            /* impl method call: look up method in registry */
             if(obj_val.type==VT_STRUCT){
+                for(int mi2=0;mi2<nmethods;mi2++){
+                    if(strcmp_u(methods[mi2].struct_name,obj_val.struct_name)==0
+                    && strcmp_u(methods[mi2].method_name,n->name)==0){
+                        Node *fd=methods[mi2].fn_node;
+                        Env *fe=env_new(env);
+                        /* in a dot call: args[0]=obj, args[1..]=explicit args
+                           fn params: field_names[0]="self", field_names[1..]=rest */
+                        if(fd->argc>0 && strcmp_u(fd->field_names[0],"self")==0){
+                            env_def(fe,"self",obj_val);
+                            /* explicit args start at n->args[1] (args[0] is obj) */
+                            for(int pi=1;pi<fd->argc&&pi<n->argc;pi++){
+                                Val arg=eval_node(n->args[pi],env);
+                                env_def(fe,fd->field_names[pi],arg);
+                            }
+                        } else {
+                            /* no self param — bind explicit args starting at args[1] */
+                            for(int pi=0;pi<fd->argc&&(pi+1)<n->argc;pi++){
+                                Val arg=eval_node(n->args[pi+1],env);
+                                env_def(fe,fd->field_names[pi],arg);
+                            }
+                        }
+                        g_returning=0; g_breaking=0; g_continuing=0;
+                        int saved=envidx;
+                        Val result=eval_block(fd->body,fe);
+                        envidx=saved;
+                        if(g_returning){ memcpy(&result,&g_return_val,sizeof(Val)); }
+                        g_returning=0;
+                        return result;
+                    }
+                }
+                /* field access or field fn call */
                 for(int fi=0;fi<obj_val.field_count;fi++){
                     if(strcmp_u(obj_val.field_names[fi],n->name)==0){
                         Val fv2=obj_val.field_vals[fi];
@@ -767,6 +854,8 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                 env_def(fe,fn_def->field_names[i],arg);
             }
             g_returning=0;
+            g_breaking=0;   /* break/continue must not leak out of a function call */
+            g_continuing=0;
             /* don't reset g_throwing — let it propagate to try/catch */
             if(fn_def->type[0]) g_ann_depth++;
             Val result=eval_block(fn_def->body,fe);
@@ -839,6 +928,14 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         return g_return_val;
     }
 
+    case ND_BREAK:
+        g_breaking=1;
+        return make_nil();
+
+    case ND_CONTINUE:
+        g_continuing=1;
+        return make_nil();
+
     default: return make_nil();
     }
 }
@@ -850,7 +947,7 @@ static Val eval_block(Node *b,Env *parent){
     for(int i=0;i<b->stmtc;i++){
         last=eval_node(b->stmts[i],e);
         if(g_returning==2){ memcpy(&last,&g_return_val,sizeof(Val)); g_returning=0; }
-        if((g_returning&&g_returning!=2)||g_throwing) break;
+        if((g_returning&&g_returning!=2)||g_throwing||g_breaking||g_continuing) break;
     }
     return last;
 }
@@ -879,11 +976,47 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         }
         puts("\n"); return make_nil();
     }
-    /* y.input */
+    /* y.input(prompt?) — print optional prompt then read a line from stdin */
     if(strcmp_u(name,"y.input")==0||strcmp_u(name,"input")==0){
+        int s=(argc>1)?1:0;
+        /* print prompt if given */
+        if(argc>s){
+            Val prompt=eval_node(args[s],env);
+            if(prompt.type==VT_STR&&prompt.sval[0]){
+                fputs(prompt.sval,stdout); fflush(stdout);
+            }
+        }
         static char ibuf[256]; int i=0; char c=0;
         while(i<255){if(fread(&c,1,1,stdin)!=1)break;if(c=='\n'||c=='\r')break;ibuf[i++]=c;}
         ibuf[i]=0; return make_str(ibuf);
+    }
+    /* y.input_int(prompt?) — read line and parse as int */
+    if(strcmp_u(name,"y.input_int")==0){
+        int s=(argc>1)?1:0;
+        if(argc>s){
+            Val prompt=eval_node(args[s],env);
+            if(prompt.type==VT_STR&&prompt.sval[0]){fputs(prompt.sval,stdout);fflush(stdout);}
+        }
+        static char ibuf2[64]; int i=0; char c=0;
+        while(i<63){if(fread(&c,1,1,stdin)!=1)break;if(c=='\n'||c=='\r')break;ibuf2[i++]=c;}
+        ibuf2[i]=0;
+        /* parse integer (handles negative) */
+        int64_t v=0; int neg=0; int j=0;
+        if(ibuf2[j]=='-'){neg=1;j++;}
+        for(;ibuf2[j]>='0'&&ibuf2[j]<='9';j++) v=v*10+(ibuf2[j]-'0');
+        return make_int(neg?-v:v);
+    }
+    /* y.input_float(prompt?) — read line and parse as float */
+    if(strcmp_u(name,"y.input_float")==0){
+        int s=(argc>1)?1:0;
+        if(argc>s){
+            Val prompt=eval_node(args[s],env);
+            if(prompt.type==VT_STR&&prompt.sval[0]){fputs(prompt.sval,stdout);fflush(stdout);}
+        }
+        static char ibuf3[64]; int i=0; char c=0;
+        while(i<63){if(fread(&c,1,1,stdin)!=1)break;if(c=='\n'||c=='\r')break;ibuf3[i++]=c;}
+        ibuf3[i]=0;
+        return make_float(strtod(ibuf3,NULL));
     }
     /* y.len */
     if(strcmp_u(name,"y.len")==0||strcmp_u(name,"len")==0){
@@ -896,21 +1029,79 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     if(strcmp_u(name,"y.abs")==0||strcmp_u(name,"abs")==0){
         int s=(argc>1)?1:0;
         Val v=eval_node(args[s],env);
-        if(v.type==VT_FLOAT) return make_float(v.fval<0?-v.fval:v.fval);
+        if(v.type==VT_FLOAT) return make_float(v.fval<0.0?-v.fval:v.fval);
         return make_int(v.ival<0?-v.ival:v.ival);
     }
-    /* y.str */
+    /* y.str — convert any value to string */
     if(strcmp_u(name,"y.str")==0||strcmp_u(name,"str")==0){
         int s=(argc>1)?1:0;
         Val v=eval_node(args[s],env);
-        char b[64]; int_to_str(val_int(v),b);
-        return make_str(b);
+        static char b[8192];
+        if(v.type==VT_STR)  return v;
+        if(v.type==VT_FLOAT){
+            snprintf(b,sizeof(b),"%.6f",v.fval);
+            int dot=-1,last=0;
+            for(int i=0;b[i];i++){if(b[i]=='.')dot=i;last=i;}
+            if(dot>=0){while(last>dot+1&&b[last]=='0')last--;}
+            b[last+1]=0;
+            return make_str(b);
+        }
+        if(v.type==VT_BOOL) return make_str(v.ival?"true":"false");
+        if(v.type==VT_NIL)  return make_str("nil");
+        if(v.type==VT_ARR){
+            int bi=0; b[bi++]='[';
+            for(int i=0;i<v.arr_len&&bi<250;i++){
+                if(i>0){b[bi++]=',';b[bi++]=' ';}
+                Val item=v.arr_data[i];
+                char tmp[64];
+                if(item.type==VT_STR){ snprintf(tmp,sizeof(tmp),"%.62s",item.sval); }
+                else { int_to_str(val_int(item),tmp); }
+                int tl=(int)strlen(tmp);
+                if(bi+tl<250){memcpy(b+bi,tmp,tl);bi+=tl;}
+            }
+            if(bi<254) b[bi++]=']';
+            b[bi]=0; return make_str(b);
+        }
+        /* int / anything else */
+        int_to_str(val_int(v),b); return make_str(b);
     }
-    /* y.int */
+    /* y.int — parse string to int, or truncate float */
     if(strcmp_u(name,"y.int")==0||strcmp_u(name,"int")==0){
         int s=(argc>1)?1:0;
         Val v=eval_node(args[s],env);
+        if(v.type==VT_STR){
+            int neg=0; int j=0;
+            if(v.sval[j]=='-'){neg=1;j++;}
+            int64_t r=0;
+            for(;v.sval[j]>='0'&&v.sval[j]<='9';j++) r=r*10+(v.sval[j]-'0');
+            return make_int(neg?-r:r);
+        }
+        if(v.type==VT_FLOAT) return make_int((int64_t)v.fval);
+        if(v.type==VT_BOOL)  return make_int(v.ival?1:0);
         return make_int(val_int(v));
+    }
+    /* y.float — parse string to float, or convert int */
+    if(strcmp_u(name,"y.float")==0||strcmp_u(name,"float")==0){
+        int s=(argc>1)?1:0;
+        Val v=eval_node(args[s],env);
+        if(v.type==VT_FLOAT) return v;
+        if(v.type==VT_STR){
+            return make_float(strtod(v.sval,NULL));
+        }
+        return make_float((double)val_int(v));
+    }
+    /* y.bool — parse string/int to bool */
+    if(strcmp_u(name,"y.bool")==0||strcmp_u(name,"bool")==0){
+        int s=(argc>1)?1:0;
+        Val v=eval_node(args[s],env);
+        if(v.type==VT_BOOL) return v;
+        if(v.type==VT_STR){
+            int b2=(strcmp_u(v.sval,"true")==0
+                  ||strcmp_u(v.sval,"1")==0
+                  ||strcmp_u(v.sval,"yes")==0);
+            return make_bool(b2);
+        }
+        return make_bool(val_int(v)!=0);
     }
     /* y.substr(s, start, len) */
     if(strcmp_u(name,"y.substr")==0||strcmp_u(name,"substr")==0){
@@ -1015,8 +1206,8 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         int s0=(argc>1)?1:0;
         Val fmt=eval_node(args[s0],env);
         const char *f=fmt.sval;
-        char buf[512]; int bi=0;
-        while(*f && bi<510){
+        char buf[8192]; int bi=0;
+        while(*f && bi<8190){
             if(*f=='{'){
                 f++;
                 /* parse index digit(s) */
@@ -1031,27 +1222,21 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
                         if(v<0){neg=1;v=-v;}
                         char tb[32]; int ti=0;
                         do{tb[ti++]=(char)('0'+(v%10));v/=10;}while(v>0);
-                        if(neg&&bi<509) buf[bi++]='-';
-                        while(ti>0&&bi<510) buf[bi++]=tb[--ti];
+                        if(neg&&bi<8188) buf[bi++]='-';
+                        while(ti>0&&bi<8188) buf[bi++]=tb[--ti];
                     } else if(av.type==VT_STR){
-                        for(int i=0;av.sval[i]&&bi<510;i++) buf[bi++]=av.sval[i];
+                        for(int i=0;av.sval[i]&&bi<8188;i++) buf[bi++]=av.sval[i];
                     } else if(av.type==VT_BOOL){
                         const char *bs=av.bval?"true":"false";
-                        for(int i=0;bs[i]&&bi<510;i++) buf[bi++]=bs[i];
+                        for(int i=0;bs[i]&&bi<8188;i++) buf[bi++]=bs[i];
                     } else if(av.type==VT_FLOAT){
-                        int64_t whole=av.fval/1000, frac=av.fval%1000;
-                        if(frac<0)frac=-frac;
-                        int64_t w2=whole; int neg=0;
-                        if(w2<0){neg=1;w2=-w2;}
-                        char tb[32]; int ti=0;
-                        do{tb[ti++]=(char)('0'+(w2%10));w2/=10;}while(w2>0);
-                        if(neg&&bi<509) buf[bi++]='-';
-                        while(ti>0&&bi<510) buf[bi++]=tb[--ti];
-                        buf[bi++]='.';
-                        char fb[8]; int fi=0;
-                        int64_t fr=frac;
-                        do{fb[fi++]=(char)('0'+(fr%10));fr/=10;}while(fi<3);
-                        while(fi>0&&bi<510) buf[bi++]=fb[--fi];
+                        char fb2[64];
+                        snprintf(fb2,sizeof(fb2),"%.6f",av.fval);
+                        int dot2=-1,last2=0;
+                        for(int i=0;fb2[i];i++){if(fb2[i]=='.')dot2=i;last2=i;}
+                        if(dot2>=0){while(last2>dot2+1&&fb2[last2]=='0')last2--;}
+                        fb2[last2+1]=0;
+                        for(int i=0;fb2[i]&&bi<8188;i++) buf[bi++]=fb2[i];
                     }
                 }
             } else {
@@ -1076,10 +1261,13 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
             for(int i=0;i<arr.arr_len;i++){
                 Env *fe=env_new(ce);
                 if(fd->argc>0) env_def(fe,fd->field_names[0],arr.arr_data[i]);
+                if(fd->argc>1) env_def(fe,fd->field_names[1],make_int(i));
                 g_returning=0;
                 int saved=envidx;
-                result.arr_data[i]=eval_block(fd->body,fe);
-                envidx=saved; g_returning=0;
+                Val r=eval_block(fd->body,fe);
+                envidx=saved;
+                if(g_returning){memcpy(&r,&g_return_val,sizeof(Val));g_returning=0;}
+                result.arr_data[i]=r;
             }
         }
         return result;
@@ -1098,10 +1286,12 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
             for(int i=0;i<arr.arr_len;i++){
                 Env *fe=env_new(ce);
                 if(fd->argc>0) env_def(fe,fd->field_names[0],arr.arr_data[i]);
+                if(fd->argc>1) env_def(fe,fd->field_names[1],make_int(i));
                 g_returning=0;
                 int saved=envidx;
                 Val r=eval_block(fd->body,fe);
-                envidx=saved; g_returning=0;
+                envidx=saved;
+                if(g_returning){memcpy(&r,&g_return_val,sizeof(Val));g_returning=0;}
                 if(val_bool(r)) result.arr_data[result.arr_len++]=arr.arr_data[i];
             }
         }
@@ -1120,10 +1310,13 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
                 Env *fe=env_new(ce);
                 if(fd->argc>0) env_def(fe,fd->field_names[0],acc);
                 if(fd->argc>1) env_def(fe,fd->field_names[1],arr.arr_data[i]);
+                if(fd->argc>2) env_def(fe,fd->field_names[2],make_int(i));
                 g_returning=0;
                 int saved=envidx;
-                acc=eval_block(fd->body,fe);
-                envidx=saved; g_returning=0;
+                Val r=eval_block(fd->body,fe);
+                envidx=saved;
+                if(g_returning){memcpy(&r,&g_return_val,sizeof(Val));g_returning=0;}
+                acc=r;
             }
         }
         return acc;
@@ -1139,6 +1332,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
             for(int i=0;i<arr.arr_len;i++){
                 Env *fe=env_new(ce);
                 if(fd->argc>0) env_def(fe,fd->field_names[0],arr.arr_data[i]);
+                if(fd->argc>1) env_def(fe,fd->field_names[1],make_int(i));
                 g_returning=0;
                 int saved=envidx;
                 eval_block(fd->body,fe);
@@ -1146,6 +1340,152 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
             }
         }
         return make_nil();
+    }
+    /* y.sort(arr) or y.sort(arr, fn_comparator) → sorted copy */
+    if(strcmp_u(name,"y.sort")==0||strcmp_u(name,"sort")==0||strcmp_u(name,"y.array.sort")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        if(arr.type!=VT_ARR||arr.arr_len==0) return arr;
+        /* copy into static scratch (safe from stack reuse) */
+        Val *sort_scratch=alloc_arr(arr.arr_len+1);
+        int slen=arr.arr_len;
+        for(int i=0;i<slen;i++) sort_scratch[i]=arr.arr_data[i];
+        /* optional comparator fn */
+        Val cmp_fn=make_nil();
+        if(argc>s0+1) cmp_fn=eval_node(args[s0+1],env);
+        /* insertion sort */
+        for(int i=1;i<slen;i++){
+            Val key=sort_scratch[i]; int j=i-1;
+            while(j>=0){
+                int should_swap=0;
+                if(cmp_fn.type==VT_FN&&cmp_fn.fn_node){
+                    Node *fd=cmp_fn.fn_node;
+                    Env *ce=(cmp_fn.fn_env)?((Env*)cmp_fn.fn_env):env;
+                    Env *fe=env_new(ce);
+                    if(fd->argc>0) env_def(fe,fd->field_names[0],key);
+                    if(fd->argc>1) env_def(fe,fd->field_names[1],sort_scratch[j]);
+                    g_returning=0;
+                    int saved=envidx;
+                    Val r=eval_block(fd->body,fe);
+                    envidx=saved;
+                    if(g_returning){memcpy(&r,&g_return_val,sizeof(Val));g_returning=0;}
+                    should_swap=val_bool(r);
+                } else {
+                    if(key.type==VT_STR&&sort_scratch[j].type==VT_STR)
+                        should_swap=(strcmp(key.sval,sort_scratch[j].sval)<0);
+                    else
+                        should_swap=(val_int(key)<val_int(sort_scratch[j]));
+                }
+                if(!should_swap) break;
+                sort_scratch[j+1]=sort_scratch[j]; j--;
+            }
+            sort_scratch[j+1]=key;
+        }
+        /* copy result via static out to avoid stack Val corruption */
+        static Val sort_out;
+        sort_out=make_nil(); sort_out.type=VT_ARR;
+        sort_out.arr_data=alloc_arr(slen+1);
+        sort_out.arr_len=slen;
+        for(int i=0;i<slen;i++) sort_out.arr_data[i]=sort_scratch[i];
+        return sort_out;
+    }
+    /* y.range(n) or y.range(start, end) or y.range(start, end, step) → array */
+    if(strcmp_u(name,"y.range")==0||strcmp_u(name,"range")==0){
+        int s0=(argc>1)?1:0;
+        int64_t start=0,end2=0,step=1;
+        if(argc-s0==1){
+            end2=val_int(eval_node(args[s0],env));
+        } else if(argc-s0==2){
+            start=val_int(eval_node(args[s0],env));
+            end2 =val_int(eval_node(args[s0+1],env));
+        } else if(argc-s0>=3){
+            start=val_int(eval_node(args[s0],env));
+            end2 =val_int(eval_node(args[s0+1],env));
+            step =val_int(eval_node(args[s0+2],env));
+        }
+        if(step==0) step=1;
+        /* count elements */
+        int64_t cnt2=0;
+        if(step>0) cnt2=(end2>start)?(end2-start+step-1)/step:0;
+        else       cnt2=(start>end2)?(start-end2-step-1)/(-step):0;
+        /* no cap on range size */
+        Val result=make_nil(); result.type=VT_ARR;
+        result.arr_data=alloc_arr((int)cnt2+1);
+        result.arr_len=(int)cnt2;
+        int64_t v2=start;
+        for(int i=0;i<(int)cnt2;i++,v2+=step) result.arr_data[i]=make_int(v2);
+        return result;
+    }
+    /* y.zip(arr1, arr2) → array of Pair{first, second} structs */
+    if(strcmp_u(name,"y.zip")==0||strcmp_u(name,"zip")==0){
+        int s0=(argc>2)?1:0;
+        Val a1=eval_node(args[s0],env);
+        Val a2=eval_node(args[s0+1],env);
+        int len=(a1.arr_len<a2.arr_len)?a1.arr_len:a2.arr_len;
+        Val result=make_nil(); result.type=VT_ARR;
+        result.arr_data=alloc_arr(len+1);
+        result.arr_len=len;
+        static char pair_names[2][32]={"first","second"};
+        for(int i=0;i<len;i++){
+            Val pair; memset(&pair,0,sizeof(Val));
+            pair.type=VT_STRUCT;
+            strcpy(pair.struct_name,"Pair");
+            pair.field_count=2;
+            pair.field_names=pair_names;
+            pair.field_vals=alloc_arr(2);
+            memcpy(&pair.field_vals[0],&a1.arr_data[i],sizeof(Val));
+            memcpy(&pair.field_vals[1],&a2.arr_data[i],sizeof(Val));
+            result.arr_data[i]=pair;
+        }
+        return result;
+    }
+    /* y.flatten(arr_of_arrs) → flat array */
+    if(strcmp_u(name,"y.flatten")==0||strcmp_u(name,"flatten")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        Val result=make_nil(); result.type=VT_ARR;
+        result.arr_data=alloc_arr(arr.arr_len*4+1);
+        result.arr_len=0;
+        for(int i=0;i<arr.arr_len&&result.arr_len<64;i++){
+            Val inner=arr.arr_data[i];
+            if(inner.type==VT_ARR){
+                for(int j=0;j<inner.arr_len&&result.arr_len<64;j++)
+                    result.arr_data[result.arr_len++]=inner.arr_data[j];
+            } else {
+                result.arr_data[result.arr_len++]=inner;
+            }
+        }
+        return result;
+    }
+    /* y.sum(arr) → sum of elements */
+    if(strcmp_u(name,"y.sum")==0||strcmp_u(name,"sum")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        int use_f=0;
+        for(int i=0;i<arr.arr_len;i++) if(arr.arr_data[i].type==VT_FLOAT) use_f=1;
+        if(use_f){
+            double s=0.0; for(int i=0;i<arr.arr_len;i++) s+=val_float(arr.arr_data[i]);
+            return make_float(s);
+        }
+        int64_t s=0; for(int i=0;i<arr.arr_len;i++) s+=val_int(arr.arr_data[i]);
+        return make_int(s);
+    }
+    /* y.min(arr) / y.max(arr) → min or max element */
+    if(strcmp_u(name,"y.min_arr")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        if(arr.arr_len==0) return make_nil();
+        Val m=arr.arr_data[0];
+        for(int i=1;i<arr.arr_len;i++) if(val_int(arr.arr_data[i])<val_int(m)) m=arr.arr_data[i];
+        return m;
+    }
+    if(strcmp_u(name,"y.max_arr")==0){
+        int s0=(argc>1)?1:0;
+        Val arr=eval_node(args[s0],env);
+        if(arr.arr_len==0) return make_nil();
+        Val m=arr.arr_data[0];
+        for(int i=1;i<arr.arr_len;i++) if(val_int(arr.arr_data[i])>val_int(m)) m=arr.arr_data[i];
+        return m;
     }
 
     /* y.typeof(val) → "int","float","str","bool","array","struct","fn","err","nil" */
@@ -1199,52 +1539,80 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     /*  y.math  */
     if(strcmp_u(name,"y.math.sqrt")==0){
         int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
-        /* integer sqrt via Newton's method */
-        int64_t n2=val_int(v); if(n2<0){ys_error(0,"sqrt of negative");return make_nil();}
-        if(n2==0) return make_int(0);
-        int64_t x=n2,y2=1; while(x>y2){x=(x+y2)/2;y2=n2/x;}
-        return make_int(x);
+        double d=val_float(v);
+        if(d<0.0){ys_error(0,"sqrt of negative");return make_nil();}
+        if(d==0.0) return v.type==VT_FLOAT?make_float(0.0):make_int(0);
+        double x=d,y2=1.0;
+        for(int _i=0;_i<60&&(x-y2)>0.000001;_i++){x=(x+y2)/2.0;y2=d/x;}
+        if(v.type!=VT_FLOAT){int64_t ir=(int64_t)(x+0.5);return make_int(ir);}
+        return make_float(x);
     }
     if(strcmp_u(name,"y.math.pow")==0){
         int s0=(argc>1)?1:0;
-        int64_t base=val_int(eval_node(args[s0],env));
-        int64_t exp2=val_int(eval_node(args[s0+1],env));
-        int64_t result=1; for(int64_t i=0;i<exp2;i++) result*=base;
+        Val bv=eval_node(args[s0],env);
+        Val ev=eval_node(args[s0+1],env);
+        if(bv.type==VT_FLOAT||ev.type==VT_FLOAT){
+            double res=1.0,base2=val_float(bv); int64_t e2=val_int(ev);
+            for(int64_t i=0;i<(e2<0?-e2:e2);i++) res*=base2;
+            if(e2<0) res=1.0/res;
+            return make_float(res);
+        }
+        int64_t base=val_int(bv),exp2=val_int(ev),result=1;
+        for(int64_t i=0;i<exp2;i++) result*=base;
         return make_int(result);
     }
     if(strcmp_u(name,"y.math.abs")==0){
-        int s0=(argc>1)?1:0; int64_t v=val_int(eval_node(args[s0],env));
-        return make_int(v<0?-v:v);
+        int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
+        if(v.type==VT_FLOAT) return make_float(v.fval<0.0?-v.fval:v.fval);
+        int64_t iv=val_int(v); return make_int(iv<0?-iv:iv);
     }
     if(strcmp_u(name,"y.math.min")==0){
         int s0=(argc>1)?1:0;
-        int64_t a=val_int(eval_node(args[s0],env));
-        int64_t b=val_int(eval_node(args[s0+1],env));
-        return make_int(a<b?a:b);
+        Val av=eval_node(args[s0],env);
+        Val bv=eval_node(args[s0+1],env);
+        if(av.type==VT_FLOAT||bv.type==VT_FLOAT)
+            return val_float(av)<val_float(bv)?av:bv;
+        return make_int(val_int(av)<val_int(bv)?val_int(av):val_int(bv));
     }
     if(strcmp_u(name,"y.math.max")==0){
         int s0=(argc>1)?1:0;
-        int64_t a=val_int(eval_node(args[s0],env));
-        int64_t b=val_int(eval_node(args[s0+1],env));
-        return make_int(a>b?a:b);
+        Val av=eval_node(args[s0],env);
+        Val bv=eval_node(args[s0+1],env);
+        if(av.type==VT_FLOAT||bv.type==VT_FLOAT)
+            return val_float(av)>val_float(bv)?av:bv;
+        return make_int(val_int(av)>val_int(bv)?val_int(av):val_int(bv));
     }
     if(strcmp_u(name,"y.math.clamp")==0){
         int s0=(argc>1)?1:0;
-        int64_t v=val_int(eval_node(args[s0],env));
-        int64_t lo=val_int(eval_node(args[s0+1],env));
-        int64_t hi=val_int(eval_node(args[s0+2],env));
-        return make_int(v<lo?lo:v>hi?hi:v);
+        Val v=eval_node(args[s0],env);
+        Val lv=eval_node(args[s0+1],env);
+        Val hv=eval_node(args[s0+2],env);
+        if(v.type==VT_FLOAT||lv.type==VT_FLOAT||hv.type==VT_FLOAT){
+            double d=val_float(v),lo=val_float(lv),hi=val_float(hv);
+            return make_float(d<lo?lo:d>hi?hi:d);
+        }
+        int64_t iv=val_int(v),lo=val_int(lv),hi=val_int(hv);
+        return make_int(iv<lo?lo:iv>hi?hi:iv);
     }
     if(strcmp_u(name,"y.math.floor")==0){
         int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
-        return make_int(v.type==VT_FLOAT?v.fval/1000:v.ival);
+        if(v.type==VT_FLOAT){
+            double d=v.fval; int64_t i=(int64_t)d;
+            return make_int(d<0.0&&d!=(double)i?i-1:i);
+        }
+        return make_int(v.ival);
     }
     if(strcmp_u(name,"y.math.ceil")==0){
         int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
         if(v.type==VT_FLOAT){
-            int64_t w=v.fval/1000, r=v.fval%1000;
-            return make_int(r>0?w+1:w);
+            double d=v.fval; int64_t i=(int64_t)d;
+            return make_int(d>0.0&&d!=(double)i?i+1:i);
         }
+        return make_int(v.ival);
+    }
+    if(strcmp_u(name,"y.math.round")==0){
+        int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
+        if(v.type==VT_FLOAT) return make_int((int64_t)(v.fval>=0.0?v.fval+0.5:v.fval-0.5));
         return make_int(v.ival);
     }
     if(strcmp_u(name,"y.math.sign")==0){
@@ -1258,8 +1626,8 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         Val sv=eval_node(args[s0],env);
         int n2=(int)val_int(eval_node(args[s0+1],env));
         char buf[512]; int bi=0, slen=str_len_u(sv.sval);
-        for(int i=0;i<n2&&bi<510;i++)
-            for(int j=0;j<slen&&bi<510;j++) buf[bi++]=sv.sval[j];
+        for(int i=0;i<n2&&bi<8188;i++)
+            for(int j=0;j<slen&&bi<8188;j++) buf[bi++]=sv.sval[j];
         buf[bi]=0; return make_str(buf);
     }
     if(strcmp_u(name,"y.string.starts_with")==0){
@@ -1287,11 +1655,11 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         Val to=eval_node(args[s0+2],env);
         int fl=str_len_u(from.sval), tl=str_len_u(to.sval);
         char buf[512]; int bi=0, si=0, slen=str_len_u(sv.sval);
-        while(si<slen&&bi<510){
+        while(si<slen&&bi<8188){
             int match=(fl>0);
             for(int i=0;i<fl&&match;i++) if(sv.sval[si+i]!=from.sval[i]) match=0;
             if(match&&fl>0){
-                for(int i=0;i<tl&&bi<510;i++) buf[bi++]=to.sval[i];
+                for(int i=0;i<tl&&bi<8188;i++) buf[bi++]=to.sval[i];
                 si+=fl;
             } else { buf[bi++]=sv.sval[si++]; }
         }
@@ -1338,19 +1706,19 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         int s0=(argc>1)?1:0;
         Val arr=eval_node(args[s0],env);
         Val sep=make_str(""); if(argc>s0+1) sep=eval_node(args[s0+1],env);
-        char buf[512]; int bi=0;
+        char buf[8192]; int bi=0;
         for(int i=0;i<arr.arr_len;i++){
             /* print element */
             Val el=arr.arr_data[i];
-            if(el.type==VT_STR){ int j=0; while(el.sval[j]&&bi<510) buf[bi++]=el.sval[j++]; }
+            if(el.type==VT_STR){ int j=0; while(el.sval[j]&&bi<8188) buf[bi++]=el.sval[j++]; }
             else if(el.type==VT_INT){
                 int64_t v=el.ival; int neg=v<0; if(neg)v=-v;
                 char tb[24]; int ti=0;
                 do{tb[ti++]=(char)('0'+(v%10));v/=10;}while(v>0);
-                if(neg&&bi<509) buf[bi++]='-';
-                while(ti>0&&bi<510) buf[bi++]=tb[--ti];
+                if(neg&&bi<8188) buf[bi++]='-';
+                while(ti>0&&bi<8188) buf[bi++]=tb[--ti];
             }
-            if(i<arr.arr_len-1){ int j=0; while(sep.sval[j]&&bi<510) buf[bi++]=sep.sval[j++]; }
+            if(i<arr.arr_len-1){ int j=0; while(sep.sval[j]&&bi<8188) buf[bi++]=sep.sval[j++]; }
         }
         buf[bi]=0; return make_str(buf);
     }
@@ -1411,21 +1779,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         }
         return make_bool(0);
     }
-    if(strcmp_u(name,"y.array.sort")==0){
-        /* simple insertion sort */
-        int s0=(argc>1)?1:0; Val arr=eval_node(args[s0],env);
-        Val result=make_nil(); result.type=VT_ARR;
-        result.arr_data=alloc_arr(arr.arr_len+1); result.arr_len=arr.arr_len;
-        for(int i=0;i<arr.arr_len;i++) result.arr_data[i]=arr.arr_data[i];
-        for(int i=1;i<result.arr_len;i++){
-            Val key=result.arr_data[i]; int j=i-1;
-            while(j>=0&&val_int(result.arr_data[j])>val_int(key)){
-                result.arr_data[j+1]=result.arr_data[j]; j--;
-            }
-            result.arr_data[j+1]=key;
-        }
-        return result;
-    }
+    /* y.array.sort → redirect to y.sort (handled above) */
 
     /* y.push(arr, val) */
     if(strcmp_u(name,"y.push")==0||strcmp_u(name,"push")==0){

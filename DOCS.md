@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-Version: v0.6  
+Version: v0.7.5  
 Interpreter: `ys`  
 Extension: `.y`
 
@@ -174,6 +174,66 @@ for ch in "hello" {
 -- output: h-e-l-l-o-
 ```
 
+### break
+
+Exits the innermost loop immediately.
+
+```yolish
+for n in 0..100 {
+    if n * n > 50 { break }
+    y.print(n)             -- 0 1 2 3 4 5 6 7
+}
+```
+
+```yolish
+var i = 0
+while i < 10 {
+    if i == 5 { break }
+    y.print(i)
+    i = i + 1
+}
+-- prints: 0 1 2 3 4
+```
+
+### continue
+
+Skips the rest of the current iteration and moves to the next.
+
+```yolish
+for n in 1..11 {
+    if n % 2 == 0 { continue }
+    y.print(n)             -- 1 3 5 7 9
+}
+```
+
+```yolish
+for w in ["a", "skip", "b", "skip", "c"] {
+    if w == "skip" { continue }
+    y.println(w)           -- a, b, c
+}
+```
+
+### Nested loops
+
+`break` and `continue` only affect the **innermost** loop:
+
+```yolish
+for i in 0..3 {
+    for j in 0..5 {
+        if j == 3 { break }   -- only exits inner loop
+        y.print(j)
+    }
+    y.print("|")
+}
+-- 012|012|012|
+```
+
+### Notes
+
+- `break` and `continue` work in `while`, `for item in array`, and `for i in range` loops.
+- They do **not** escape function boundaries — a `break` inside a called function does not affect the caller's loop.
+- Using `break` or `continue` outside a loop has no effect.
+
 ---
 
 ## 6. Match Expressions
@@ -249,19 +309,41 @@ match x {
 }
 ```
 
-### Match as expression (return value)
+### Match as expression
+
+`match` is a full expression and can appear anywhere a value is expected:
 
 ```yolish
+-- direct assignment (top-level)
+let label = match status {
+    200 => "OK"
+    404 => "Not Found"
+    _   => "Unknown"
+}
+
+-- in function return
 fn grade(score) {
-    match score {
+    return match score {
         90..100 => "A"
         80..90  => "B"
         70..80  => "C"
         _       => "F"
     }
 }
-
 let g = grade(85)    -- "B"
+
+-- inside y.format
+y.println(y.format(r"Code {0}: {1}", code, match code {
+    200 => "OK"
+    404 => "Not Found"
+    _   => "Unknown"
+}))
+
+-- nested match
+let result = match a {
+    1 => match b { 3 => "1-3" _ => "1-x" }
+    _ => "other"
+}
 ```
 
 ### Notes
@@ -409,7 +491,55 @@ y.print(p2.x)    -- 5
 
 ---
 
-## 10. String Builtins
+## 10. Impl — Struct Methods
+
+Use `impl StructName { }` to attach methods to a struct. The first parameter must be `self`, which receives the struct value.
+
+```yolish
+struct Point { x, y }
+
+impl Point {
+    fn distance(self) {
+        return y.math.sqrt(self.x * self.x + self.y * self.y)
+    }
+    fn scale(self, factor) {
+        return Point { x: self.x * factor, y: self.y * factor }
+    }
+    fn to_str(self) {
+        return y.format(r"Point({0}, {1})", self.x, self.y)
+    }
+}
+
+let p = Point { x: 3, y: 4 }
+y.println(p.distance())          -- 5
+y.println(p.scale(2).to_str())   -- Point(6, 8)
+```
+
+### Method chaining
+
+Methods that return a struct can be chained with further method calls:
+
+```yolish
+struct Counter { value }
+impl Counter {
+    fn inc(self)    { return Counter { value: self.value + 1 } }
+    fn add(self, n) { return Counter { value: self.value + n } }
+    fn get(self)    { return self.value }
+}
+
+let c = Counter { value: 0 }
+y.println(c.inc().inc().add(5).get())   -- 7
+```
+
+### Notes
+
+- `self` is a **copy** of the struct (Yolish structs are value types). Return a new struct to represent mutation.
+- Put all methods for a struct in a single `impl` block.
+- Methods are resolved by struct name at runtime.
+
+---
+
+## 11. String Builtins
 
 All string functions are also available without the `y.` prefix.
 
@@ -449,7 +579,63 @@ let info = y.format("OS: {0}  v{1}", "Exploidus", 3)
 
 ---
 
-## 11. I/O Builtins
+## 15. I/O Builtins
+
+### Output
+
+| Function | Description |
+|----------|-------------|
+| `y.print(val)` | Print value without newline |
+| `y.println(val)` | Print value with newline |
+| `y.format(fmt, ...)` | Return formatted string — use `{0}`, `{1}` placeholders |
+
+### Input
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `y.input()` | `str` | Read a line from stdin |
+| `y.input(prompt)` | `str` | Print prompt, then read a line |
+| `y.input_int()` | `int` | Read a line and parse as integer |
+| `y.input_int(prompt)` | `int` | Print prompt, read and parse as integer |
+| `y.input_float()` | `float` | Read a line and parse as float |
+| `y.input_float(prompt)` | `float` | Print prompt, read and parse as float |
+
+```yolish
+let name  = y.input("Your name: ")
+let age   = y.input_int("Your age: ")
+let score = y.input_float("Score: ")
+
+y.println(y.format(r"Hello {0}, age {1}", name, age))
+```
+
+---
+
+## 16. Type Conversion Builtins
+
+| Function | Description |
+|----------|-------------|
+| `y.str(val)` | Convert any value to string (`int`, `float`, `bool`, `nil`, `arr`) |
+| `y.int(val)` | Parse string to int, or truncate float to int |
+| `y.float(val)` | Parse string to float, or convert int to float |
+| `y.bool(val)` | `"true"/"1"/"yes"` → `true`; `"false"/"0"` → `false`; int: `0` → `false` |
+
+```yolish
+y.str(42)           -- "42"
+y.str(-3.14)        -- "-3.14"
+y.str(true)         -- "true"
+y.str([1, 2, 3])    -- "[1, 2, 3]"
+
+y.int("42")         -- 42
+y.int("-17")        -- -17
+y.int(3.9)          -- 3
+
+y.float("3.14")     -- 3.14
+y.float(42)         -- 42.0
+
+y.bool("true")      -- true
+y.bool("0")         -- false
+y.bool(1)           -- true
+```
 
 | Function | Description |
 |----------|-------------|
@@ -465,7 +651,176 @@ y.println(y.format("Hello, {0}!", name))
 
 ---
 
-## 12. Utility Builtins
+## 12. Multiline Strings
+
+Use backtick `` ` `` to write strings that span multiple lines. Newlines are included literally. `{expr}` interpolation works normally.
+
+```yolish
+let name = "Diaz"
+let banner = `Hello {name}!
+Welcome to Yolish.
+Have a great day.`
+y.println(banner)
+-- Hello Diaz!
+-- Welcome to Yolish.
+-- Have a great day.
+```
+
+Multiline strings work anywhere a normal string works — `let`, `var`, function args, arrays, return values.
+
+```yolish
+fn sql_query(table, limit) {
+    return `SELECT *
+FROM {table}
+WHERE active = 1
+LIMIT {limit}`
+}
+```
+
+---
+
+## 13. Raw Strings
+
+Prefix a string with `r` to disable both escape sequences and `{expr}` interpolation. Everything is taken literally.
+
+```yolish
+let path = r"C:\Users\Diaz\file.txt"
+y.println(path)   -- C:\Users\Diaz\file.txt
+
+let pat = r"\d+\.\d+"
+y.println(pat)    -- \d+\.\d+
+
+let tmpl = r"Dear {name}, code {0}"
+y.println(tmpl)   -- Dear {name}, code {0}  (no substitution)
+```
+
+Raw strings are the recommended way to write `y.format` templates:
+
+```yolish
+y.println(y.format(r"Hello {0}! You have {1} messages.", "Diaz", 5))
+-- Hello Diaz! You have 5 messages.
+```
+
+### String syntax summary
+
+| Syntax | Newlines | `\n` `\t` escapes | `{expr}` interpolation |
+|--------|----------|-------------------|------------------------|
+| `"..."` | `\n` only | ✓ | ✓ |
+| `` `...` `` | literal | ✗ | ✓ |
+| `r"..."` | `\n` only | ✗ | ✗ |
+
+---
+
+## 17. Array Functional Builtins
+
+### y.range
+
+```yolish
+y.range(n)             -- [0, 1, ..., n-1]
+y.range(start, end)    -- [start, start+1, ..., end-1]
+y.range(start, end, step)
+```
+
+```yolish
+y.range(5)            -- [0, 1, 2, 3, 4]
+y.range(2, 7)         -- [2, 3, 4, 5, 6]
+y.range(0, 10, 2)     -- [0, 2, 4, 6, 8]
+y.range(10, 0, -3)    -- [10, 7, 4, 1]
+```
+
+Note: arrays are capped at 64 elements.
+
+### y.sort
+
+```yolish
+y.sort(arr)                  -- ascending by default (numbers or strings)
+y.sort(arr, fn(a,b){...})    -- custom comparator: return true if a should come first
+```
+
+```yolish
+y.sort([5, 2, 8, 1])              -- [1, 2, 5, 8]
+y.sort(["b", "a", "c"])           -- [a, b, c]
+y.sort([5,2,8], fn(a,b){ return a > b })  -- [8, 5, 2]
+```
+
+Returns a **sorted copy** — the original is unchanged.
+
+### y.map
+
+```yolish
+y.map(arr, fn(item) { ... })
+y.map(arr, fn(item, index) { ... })
+```
+
+```yolish
+y.map([1,2,3,4,5], fn(x){ return x * x })    -- [1, 4, 9, 16, 25]
+y.map(["hi","bye"], fn(s){ return y.upper(s) }) -- [HI, BYE]
+```
+
+### y.filter
+
+```yolish
+y.filter(arr, fn(item) { ... })   -- keep items where fn returns true
+```
+
+```yolish
+y.filter([1..10], fn(n){ return n % 2 == 0 })  -- [2, 4, 6, 8, 10]
+```
+
+### y.reduce
+
+```yolish
+y.reduce(arr, fn(acc, item) { ... }, initial)
+```
+
+```yolish
+y.reduce([1,2,3,4,5], fn(acc, x){ return acc + x }, 0)  -- 15
+y.reduce([3,7,2,9],   fn(m, x){ if x>m { return x } return m }, 0)  -- 9
+```
+
+### y.each
+
+```yolish
+y.each(arr, fn(item) { ... })   -- run fn for side effects, returns nil
+```
+
+### y.zip
+
+```yolish
+y.zip(arr1, arr2)   -- array of Pair{first, second} structs, length = min(len1, len2)
+```
+
+```yolish
+let pairs = y.zip(["a","b","c"], [1, 2, 3])
+for p in pairs { y.println(y.format(r"{0}={1}", p.first, p.second)) }
+```
+
+### y.sum
+
+```yolish
+y.sum([1, 2, 3, 4, 5])     -- 15
+```
+
+### y.flatten
+
+```yolish
+y.flatten([[1,2],[3,4],[5]])   -- [1, 2, 3, 4, 5]
+```
+
+### Pipeline pattern
+
+```yolish
+-- sum of squares of odd numbers 1..10
+let result = y.reduce(
+    y.map(
+        y.filter(y.range(1,11), fn(x){ return x % 2 == 1 }),
+        fn(x){ return x * x }
+    ),
+    fn(acc, x){ return acc + x },
+    0
+)
+y.println(result)   -- 165
+```
 
 | Function | Returns | Description |
 |----------|---------|-------------|
@@ -1081,55 +1436,3 @@ y.array.index_of(arr,v)
 ```
 
 ---
-
-## Known Limitations (v0.6)
-
-### 1. Match as direct expression (assignment target)
-
-`match` works correctly as a **return value inside a function**, but cannot be assigned directly to a variable at the statement level:
-
-```yolish
--- works:
-fn grade(score) {
-    match score {
-        90..100 => "A"
-        80..90  => "B"
-        _       => "F"
-    }
-}
-let g = grade(85)   -- "B" ✓
-
--- also works (inside function body):
-fn describe(x) {
-    let label = match x {
-        404 => "Not Found"
-        _   => "Unknown"
-    }
-    return label
-}
-
--- does not work (top-level direct assignment):
-let label = match x {
-    404 => "Not Found"
-    _   => "Unknown"
-}   -- label = nil ✗
-```
-
-**Workaround:** wrap the match in a function and call it.
-
-### 2. String and array limits
-
-- Strings: max 255 characters
-- String interpolation expressions: max 127 characters
-- Arrays: max 64 elements at creation, max 2048 total across the whole program
-- Functions: max 8 parameters
-- Structs: max 8 fields
-- Match arms: max 8 per expression
-
-### 3. Float precision
-
-Floats are stored as fixed-point integers ×1000 (3 decimal places). Very large or very small floats may lose precision.
-
-```yolish
-let pi = 3.14159   -- stored as 3.141
-```

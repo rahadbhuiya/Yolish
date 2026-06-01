@@ -24,6 +24,7 @@ typedef enum {
     TK_FOR, TK_IN, TK_RETURN, TK_STRUCT, TK_IMPL,
     TK_MATCH, TK_UNSAFE, TK_TRUE, TK_FALSE, TK_IMPORT,
     TK_TRY, TK_CATCH, TK_THROW, TK_AS,
+    TK_BREAK, TK_CONTINUE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_GT, TK_LTE, TK_GTE,
     TK_AND, TK_OR, TK_NOT, TK_ARROW, TK_FAT_ARROW, TK_DOTDOT, TK_DOT,
@@ -38,8 +39,8 @@ typedef struct {
     const char *start;
     int         len;
     int64_t     ival;
-    int64_t     fval;
-    int         line; /* source line number */
+    double      fval;
+    int         line;
 } Token;
 
 /*  AST node types  */
@@ -51,14 +52,16 @@ typedef enum {
     ND_FN, ND_FN_LIT, ND_STRUCT, ND_STRUCT_LIT, ND_MATCH, ND_IMPORT,
     ND_TRY, ND_THROW, ND_MODULE,
     ND_ARRAY,
+    ND_BREAK, ND_CONTINUE,
+    ND_IMPL,
 } NodeKind;
 
 typedef struct Node Node;
 struct Node {
     NodeKind  kind;
     int64_t   ival;
-    int64_t   fval;
-    char      sval[256];
+    double    fval;
+    char      sval[8192];
     int       op;
     Node     *left;
     Node     *right;
@@ -82,13 +85,13 @@ struct Node {
 typedef struct Val Val;
 
 /*  Array storage  */
-#define MAX_ARR 64
+#define MAX_ARR 512
 struct Val {
     int      type;
     int64_t  ival;
-    int64_t  fval;
+    double   fval;
     int      bval;
-    char     sval[256];
+    char     sval[8192];
     Node    *fn_node; /* ann type/arg are in fn_node->type and fn_node->sval */
     void    *fn_env;  /* captured Env* for closures (NULL = use call-site env) */
     /* capability */
