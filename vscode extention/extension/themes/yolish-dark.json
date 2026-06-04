@@ -1,0 +1,86 @@
+{
+  "name": "Yolish Dark",
+  "type": "dark",
+  "colors": {
+    "editor.background":          "#0d1117",
+    "editor.foreground":          "#cdd9e5",
+    "editorLineNumber.foreground":"#444c56",
+    "editor.selectionBackground": "#264f78",
+    "editor.lineHighlightBackground": "#161b22",
+    "editorCursor.foreground":    "#00e5ff",
+    "activityBar.background":     "#0d1117",
+    "sideBar.background":         "#0d1117",
+    "statusBar.background":       "#0d1117",
+    "statusBar.foreground":       "#00e5ff",
+    "tab.activeBackground":       "#161b22",
+    "tab.inactiveBackground":     "#0d1117",
+    "terminal.background":        "#0d1117",
+    "terminal.foreground":        "#cdd9e5",
+    "terminal.ansiCyan":          "#00e5ff",
+    "terminal.ansiMagenta":       "#7b2fff"
+  },
+  "tokenColors": [
+    {
+      "name": "Keywords",
+      "scope": "keyword.control.yolish",
+      "settings": { "foreground": "#7b2fff", "fontStyle": "bold" }
+    },
+    {
+      "name": "Functions",
+      "scope": "entity.name.function.yolish",
+      "settings": { "foreground": "#00e5ff" }
+    },
+    {
+      "name": "Builtins",
+      "scope": "support.function.yolish",
+      "settings": { "foreground": "#79c0ff" }
+    },
+    {
+      "name": "Strings",
+      "scope": [
+        "string.quoted.double.yolish",
+        "string.quoted.backtick.yolish",
+        "string.quoted.raw.yolish"
+      ],
+      "settings": { "foreground": "#a5d6ff" }
+    },
+    {
+      "name": "String interpolation braces",
+      "scope": "meta.interpolation.yolish",
+      "settings": { "foreground": "#00e5ff" }
+    },
+    {
+      "name": "Numbers",
+      "scope": [
+        "constant.numeric.integer.yolish",
+        "constant.numeric.float.yolish"
+      ],
+      "settings": { "foreground": "#f2cc60" }
+    },
+    {
+      "name": "Constants (true/false/nil)",
+      "scope": "constant.language.yolish",
+      "settings": { "foreground": "#ff7b72" }
+    },
+    {
+      "name": "Comments",
+      "scope": ["comment.line.yolish", "comment.block.yolish"],
+      "settings": { "foreground": "#8b949e", "fontStyle": "italic" }
+    },
+    {
+      "name": "Annotations",
+      "scope": "entity.other.attribute-name.yolish",
+      "settings": { "foreground": "#f2cc60", "fontStyle": "italic" }
+    },
+    {
+      "name": "Operators",
+      "scope": "keyword.operator.yolish",
+      "settings": { "foreground": "#7b2fff" }
+    },
+    {
+      "name": "Escape sequences",
+      "scope": "constant.character.escape.yolish",
+      "settings": { "foreground": "#ff7b72" }
+    }
+  ]
+}

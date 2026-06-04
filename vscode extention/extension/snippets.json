@@ -1,0 +1,119 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": ["fn ${1:name}(${2:params}) {", "\t${0}", "}"],
+    "description": "Define a function"
+  },
+  "If statement": {
+    "prefix": "if",
+    "body": ["if ${1:condition} {", "\t${0}", "}"],
+    "description": "If statement"
+  },
+  "If else": {
+    "prefix": "ife",
+    "body": ["if ${1:condition} {", "\t${2}", "} else {", "\t${0}", "}"],
+    "description": "If/else statement"
+  },
+  "While loop": {
+    "prefix": "while",
+    "body": ["while ${1:condition} {", "\t${0}", "}"],
+    "description": "While loop"
+  },
+  "For range": {
+    "prefix": "for",
+    "body": ["for ${1:i} in ${2:0..10} {", "\t${0}", "}"],
+    "description": "For range loop"
+  },
+  "For array": {
+    "prefix": "fora",
+    "body": ["for ${1:item} in ${2:arr} {", "\t${0}", "}"],
+    "description": "For array loop"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "\t${2:pattern} => ${3:expr}",
+      "\t_ => ${0}",
+      "}"
+    ],
+    "description": "Match expression"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": ["struct ${1:Name} {", "\t${0}", "}"],
+    "description": "Define a struct"
+  },
+  "Impl": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Name} {",
+      "\tfn ${2:method}(self) {",
+      "\t\t${0}",
+      "\t}",
+      "}"
+    ],
+    "description": "Implement methods for a struct"
+  },
+  "Try catch": {
+    "prefix": "try",
+    "body": [
+      "try {",
+      "\t${1}",
+      "} catch(e) {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Try/catch block"
+  },
+  "Let variable": {
+    "prefix": "let",
+    "body": ["let ${1:name} = ${0}"],
+    "description": "Immutable variable"
+  },
+  "Var variable": {
+    "prefix": "var",
+    "body": ["var ${1:name} = ${0}"],
+    "description": "Mutable variable"
+  },
+  "Println": {
+    "prefix": "pl",
+    "body": ["y.println(${0})"],
+    "description": "y.println"
+  },
+  "Print": {
+    "prefix": "pr",
+    "body": ["y.print(${0})"],
+    "description": "y.print"
+  },
+  "Main function": {
+    "prefix": "main",
+    "body": ["fn main() {", "\t${0}", "}", "", "main()"],
+    "description": "Main function with call"
+  },
+  "Import": {
+    "prefix": "import",
+    "body": ["import \"${1:module}.y\" as ${0}"],
+    "description": "Import a module"
+  },
+  "Closure": {
+    "prefix": "fnx",
+    "body": ["fn(${1:x}) { return ${0} }"],
+    "description": "Anonymous function / closure"
+  },
+  "Map": {
+    "prefix": "map",
+    "body": ["y.map(${1:arr}, fn(${2:x}) { return ${0} })"],
+    "description": "y.map"
+  },
+  "Filter": {
+    "prefix": "filter",
+    "body": ["y.filter(${1:arr}, fn(${2:x}) { return ${0} })"],
+    "description": "y.filter"
+  },
+  "Reduce": {
+    "prefix": "reduce",
+    "body": ["y.reduce(${1:arr}, fn(${2:acc}, ${3:x}) { return ${0} }, ${4:0})"],
+    "description": "y.reduce"
+  }
+}

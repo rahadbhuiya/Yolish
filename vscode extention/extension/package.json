@@ -1,0 +1,151 @@
+{
+  "name": "yolish",
+  "displayName": "Yolish",
+  "description": "Yolish language support for VS Code \u2014 syntax highlighting, run button, snippets",
+  "version": "1.0.0",
+  "publisher": "Exploidus",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Themes"
+  ],
+  "keywords": [
+    "yolish",
+    "exploidus",
+    "ys"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rahadbhuiya/yolish"
+  },
+  "activationEvents": [
+    "onLanguage:yolish"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "yolish",
+        "aliases": [
+          "Yolish",
+          "ys"
+        ],
+        "extensions": [
+          ".y"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icon.png",
+          "dark": "./icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "yolish",
+        "scopeName": "source.yolish",
+        "path": "./syntaxes/yolish.tmLanguage.json"
+      }
+    ],
+    "themes": [
+      {
+        "label": "Yolish Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/yolish-dark.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "yolish",
+        "path": "./snippets.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "yolish.run",
+        "title": "Run Yolish File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "yolish.compile",
+        "title": "Compile Yolish File",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "yolish.repl",
+        "title": "Open Yolish REPL",
+        "icon": "$(terminal)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "yolish.run",
+          "when": "resourceExtname == .y",
+          "group": "navigation@1"
+        },
+        {
+          "command": "yolish.compile",
+          "when": "resourceExtname == .y",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "yolish.run",
+          "when": "resourceExtname == .y",
+          "group": "yolish"
+        },
+        {
+          "command": "yolish.compile",
+          "when": "resourceExtname == .y",
+          "group": "yolish"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "yolish.run",
+          "when": "resourceExtname == .y",
+          "group": "yolish"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "yolish.run",
+        "key": "f5",
+        "when": "resourceExtname == .y && editorFocus"
+      },
+      {
+        "command": "yolish.compile",
+        "key": "ctrl+shift+b",
+        "when": "resourceExtname == .y && editorFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Yolish",
+      "properties": {
+        "yolish.executablePath": {
+          "type": "string",
+          "default": "ys",
+          "description": "Path to the ys executable. Default: 'ys' (must be in PATH)"
+        },
+        "yolish.compileTarget": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "linux",
+            "windows",
+            "macos"
+          ],
+          "description": "Compile target. 'auto' detects current OS."
+        }
+      }
+    }
+  }
+}

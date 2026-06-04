@@ -1,0 +1,34 @@
+#include <winver.h>
+
+// Icon
+IDI_ICON1 ICON "icons/ys.ico"
+
+// Version info
+VS_VERSION_INFO VERSIONINFO
+  FILEVERSION     1,0,0,0
+  PRODUCTVERSION  1,0,0,0
+  FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+  FILEFLAGS       0
+  FILEOS          VOS__WINDOWS32
+  FILETYPE        VFT_APP
+  FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName",      "Exploidus"
+      VALUE "FileDescription",  "Yolish Language Compiler\0"
+      VALUE "FileVersion",      "1.0.0.0\0"
+      VALUE "InternalName",     "ys\0"
+      VALUE "LegalCopyright",   "Copyright (C) 2025 .Bhuiya\0"
+      VALUE "OriginalFilename", "ys.exe\0"
+      VALUE "ProductName",      "Yolish\0"
+      VALUE "ProductVersion",   "1.0\0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END

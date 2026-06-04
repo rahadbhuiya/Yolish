@@ -230,7 +230,7 @@ static Node *parse_primary(Lexer *l){
         n->cond=parse_expr(l);
         expect(l,TK_LBRACE);
         int arms=0;
-        while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)&&arms<8){
+        while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)&&arms<16){
             while(check(l,TK_NL)||check(l,TK_SEMICOLON)) eat(l);
             if(check(l,TK_RBRACE)) break;
             Node *pat=NULL;
@@ -240,12 +240,17 @@ static Node *parse_primary(Lexer *l){
             } else {
                 pat=parse_binop(l,0);
             }
+            /* optional guard: if <expr> */
+            Node *guard=NULL;
+            if(check(l,TK_IF)){ eat(l); guard=parse_expr(l); }
             if(check(l,TK_FAT_ARROW)) eat(l);
             Node *body=NULL;
             if(check(l,TK_LBRACE)) body=parse_block(l);
             else body=parse_expr(l);
-            n->arg_data[arms*2  ]=pat;
-            n->arg_data[arms*2+1]=body;
+            /* wrap in ND_MATCH_ARM: left=pat, cond=guard, right=body */
+            Node *arm=alloc_node(ND_MATCH_ARM);
+            arm->left=pat; arm->cond=guard; arm->right=body;
+            n->arg_data[arms]=arm;
             arms++;
             while(check(l,TK_NL)||check(l,TK_SEMICOLON)||check(l,TK_COMMA)) eat(l);
         }
@@ -494,32 +499,33 @@ static Node *parse_stmt(Lexer *l){
         return n;
     }
     
-    /* match x { pat => body, ... } */
+    /* match x { pat [if guard] => body, ... } */
     if(t.kind==TK_MATCH){
         eat(l);
         Node *n=alloc_node(ND_MATCH);
         n->cond=parse_expr(l);
         expect(l,TK_LBRACE);
         int arms=0;
-        while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)&&arms<8){
+        while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)&&arms<16){
             while(check(l,TK_NL)||check(l,TK_SEMICOLON)) eat(l);
             if(check(l,TK_RBRACE)) break;
-            /* parse pattern: int, float, str, bool, _, or range a..b */
             Node *pat=NULL;
             if(check(l,TK_IDENT)&&l->cur.len==1&&l->cur.start[0]=='_'){
                 eat(l); pat=alloc_node(ND_IDENT);
                 pat->name[0]='_'; pat->name[1]=0;
             } else {
-                pat=parse_binop(l,0); /* parse_binop avoids assignment trap */
+                pat=parse_binop(l,0);
             }
-            /* expect => (TK_FAT_ARROW) */
+            /* optional guard: if <expr> */
+            Node *guard=NULL;
+            if(check(l,TK_IF)){ eat(l); guard=parse_expr(l); }
             if(check(l,TK_FAT_ARROW)) eat(l);
-            /* body: block or single expr */
             Node *body=NULL;
             if(check(l,TK_LBRACE)) body=parse_block(l);
             else body=parse_expr(l);
-            n->arg_data[arms*2  ]=pat;
-            n->arg_data[arms*2+1]=body;
+            Node *arm=alloc_node(ND_MATCH_ARM);
+            arm->left=pat; arm->cond=guard; arm->right=body;
+            n->arg_data[arms]=arm;
             arms++;
             while(check(l,TK_NL)||check(l,TK_SEMICOLON)||check(l,TK_COMMA)) eat(l);
         }

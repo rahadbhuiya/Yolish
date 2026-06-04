@@ -1,0 +1,117 @@
+name: Build and Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  #  Linux + Windows (cross-compile) 
+  build-linux-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            gcc-mingw-w64-x86-64 \
+            mingw-w64-tools \
+            librsvg2-bin \
+            imagemagick
+
+      - name: Generate icons
+        run: make icons
+
+      - name: Build Linux binary
+        run: |
+          gcc -std=c11 -O2 -static \
+            -o ys-linux \
+            lexer.c parser.c eval.c compiler.c \
+            elf_out.c pe_out.c macho_out.c main.c -lm
+          chmod +x ys-linux
+
+      - name: Build Windows binary
+        run: make windows
+
+      - name: Build VS Code extension (.vsix)
+        run: |
+          npm install -g @vscode/vsce
+          cd vscode-yolish
+          vsce package --no-dependencies
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Yolish ${{ github.ref_name }}"
+          body: |
+            ## Yolish ${{ github.ref_name }}
+
+            ### Download
+
+            | Platform | File |
+            |----------|------|
+            | Windows x64 | [`ys.exe`](../../releases/download/${{ github.ref_name }}/ys.exe) |
+            | Linux x64 | [`ys-linux`](../../releases/download/${{ github.ref_name }}/ys-linux) |
+            | macOS x64 | [`ys-macos`](../../releases/download/${{ github.ref_name }}/ys-macos) |
+            | VS Code extension | [`yolish-${{ github.ref_name }}.vsix`](../../releases/download/${{ github.ref_name }}/yolish-${{ github.ref_name }}.vsix) |
+
+            ### Install
+
+            **Windows** (PowerShell as Admin):
+            ```powershell
+            powershell -ExecutionPolicy Bypass -File install.ps1
+            ```
+
+            **Linux / macOS:**
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/install.sh | sh
+            ```
+
+            **VS Code extension:**
+            ```
+            Extensions → ⋯ → Install from VSIX → yolish-*.vsix
+            ```
+            or:
+            ```cmd
+            code --install-extension yolish-${{ github.ref_name }}.vsix
+            ```
+
+            ### Usage
+            ```
+            ys hello.y          run a file
+            ys -c hello.y       compile to native binary
+            ys                  REPL
+            ```
+          files: |
+            ys-linux
+            ys.exe
+            install.ps1
+            install.sh
+            logo.svg
+            vscode-yolish/yolish-*.vsix
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  #  macOS 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build macOS binary
+        run: |
+          gcc -std=c11 -O2 \
+            -o ys-macos \
+            lexer.c parser.c eval.c compiler.c \
+            elf_out.c pe_out.c macho_out.c main.c -lm
+          chmod +x ys-macos
+
+      - name: Upload macOS binary
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ys-macos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

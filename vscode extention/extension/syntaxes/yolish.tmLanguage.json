@@ -1,0 +1,90 @@
+{
+  "name": "Yolish",
+  "scopeName": "source.yolish",
+  "fileTypes": ["y"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#builtins" },
+    { "include": "#numbers" },
+    { "include": "#functions" },
+    { "include": "#annotations" },
+    { "include": "#operators" },
+    { "include": "#constants" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.yolish",
+          "begin": "--\\[",
+          "end": "\\]--"
+        },
+        {
+          "name": "comment.line.yolish",
+          "match": "--.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.backtick.yolish",
+          "begin": "`",
+          "end": "`",
+          "patterns": [{ "include": "#interpolation" }]
+        },
+        {
+          "name": "string.quoted.raw.yolish",
+          "match": "r\"[^\"]*\""
+        },
+        {
+          "name": "string.quoted.double.yolish",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "include": "#interpolation" },
+            { "name": "constant.character.escape.yolish", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "interpolation": {
+      "name": "meta.interpolation.yolish",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [{ "include": "$self" }]
+    },
+    "keywords": {
+      "name": "keyword.control.yolish",
+      "match": "\\b(if|else|while|for|in|return|break|continue|match|try|catch|throw|import|as|fn|let|var|struct|impl|self|nil)\\b"
+    },
+    "builtins": {
+      "name": "support.function.yolish",
+      "match": "\\b(y\\.println|y\\.print|y\\.input|y\\.input_int|y\\.input_float|y\\.len|y\\.push|y\\.pop|y\\.slice|y\\.sort|y\\.map|y\\.filter|y\\.reduce|y\\.each|y\\.zip|y\\.sum|y\\.flatten|y\\.range|y\\.reverse|y\\.format|y\\.str|y\\.int|y\\.float|y\\.bool|y\\.typeof|y\\.is_int|y\\.is_str|y\\.is_float|y\\.is_bool|y\\.is_array|y\\.is_fn|y\\.is_nil|y\\.is_err|y\\.error|y\\.upper|y\\.lower|y\\.trim|y\\.split|y\\.join|y\\.contains|y\\.replace|y\\.substr|y\\.starts_with|y\\.ends_with|y\\.index_of|y\\.repeat|y\\.capabilities|y\\.has_cap)\\b"
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.float.yolish",   "match": "\\b[0-9]+\\.[0-9]+\\b" },
+        { "name": "constant.numeric.integer.yolish", "match": "\\b[0-9]+\\b" }
+      ]
+    },
+    "functions": {
+      "name": "entity.name.function.yolish",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()"
+    },
+    "annotations": {
+      "name": "entity.other.attribute-name.yolish",
+      "match": "@[a-zA-Z_][a-zA-Z0-9_]*"
+    },
+    "operators": {
+      "name": "keyword.operator.yolish",
+      "match": "(\\+|-|\\*|/|%|==|!=|<=|>=|<|>|&&|\\|\\||!|=>|\\.\\.|=)"
+    },
+    "constants": {
+      "name": "constant.language.yolish",
+      "match": "\\b(true|false|nil)\\b"
+    }
+  }
+}

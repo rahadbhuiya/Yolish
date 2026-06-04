@@ -54,6 +54,7 @@ typedef enum {
     ND_ARRAY,
     ND_BREAK, ND_CONTINUE,
     ND_IMPL,
+    ND_MATCH_ARM,   /* pat [if guard] => body */
 } NodeKind;
 
 typedef struct Node Node;
@@ -109,16 +110,16 @@ struct Val {
 };
 
 /*  Value type constants  */
-#define VT_NIL  0
-#define VT_INT  1
-#define VT_FLOAT 2
-#define VT_BOOL 3
-#define VT_STR  4
-#define VT_FN   5
-#define VT_CAP  6
-#define VT_ARR  7
-#define VT_STRUCT 8
-#define VT_ERR    9
+#define YS_NIL  0
+#define YS_INT  1
+#define YS_FLOAT 2
+#define YS_BOOL 3
+#define YS_STR  4
+#define YS_FN   5
+#define YS_CAP  6
+#define YS_ARR  7
+#define YS_STRUCT 8
+#define YS_ERR    9
 
 /*  Environment  */
 #define ENV_MAX 32

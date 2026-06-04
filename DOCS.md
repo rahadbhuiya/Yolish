@@ -1,8 +1,8 @@
 # Yolish Language Reference
 
-Version: v0.7.5  
-Interpreter: `ys`  
-Extension: `.y`
+**Version:** v1.0  
+**Interpreter/Compiler:** `ys`  
+**File extension:** `.y`
 
 ---
 
@@ -15,24 +15,30 @@ Extension: `.y`
 5. [Loops](#5-loops)
 6. [Match Expressions](#6-match-expressions)
 7. [Functions](#7-functions)
-8. [Arrays](#8-arrays)
-9. [Structs](#9-structs)
-10. [String Builtins](#10-string-builtins)
-11. [I/O Builtins](#11-io-builtins)
-12. [Utility Builtins](#12-utility-builtins)
-13. [Capability System](#13-capability-system)
-14. [Import](#14-import)
-15. [Error Messages](#15-error-messages)
-16. [Comments](#16-comments)
-17. [Annotations](#17-annotations)
-18. [Error Handling](#18-error-handling)
-19. [Type System](#19-type-system)
-20. [Closures and First-Class Functions](#20-closures-and-first-class-functions)
-21. [REPL](#21-repl)
+8. [Closures and First-Class Functions](#8-closures-and-first-class-functions)
+9. [Arrays](#9-arrays)
+10. [Structs](#10-structs)
+11. [Impl — Struct Methods](#11-impl--struct-methods)
+12. [String Builtins](#12-string-builtins)
+13. [I/O Builtins](#13-io-builtins)
+14. [Type Conversion Builtins](#14-type-conversion-builtins)
+15. [Multiline and Raw Strings](#15-multiline-and-raw-strings)
+16. [Array Functional Builtins](#16-array-functional-builtins)
+17. [Capability System](#17-capability-system)
+18. [Import / Modules](#18-import--modules)
+19. [Annotations](#19-annotations)
+20. [Error Handling](#20-error-handling)
+21. [Type System](#21-type-system)
 22. [String Interpolation](#22-string-interpolation)
 23. [Error Objects](#23-error-objects)
-24. [Module System](#24-module-system)
+24. [REPL](#24-repl)
 25. [Standard Library](#25-standard-library)
+26. [Native Compiler](#26-native-compiler)
+27. [Comments](#27-comments)
+28. [Known Limitations](#28-known-limitations)
+29. [String Formatting Reference](#29-string-formatting-reference)
+30. [Full Example Programs](#30-full-example-programs)
+31. [Quick Reference](#31-quick-reference)
 
 ---
 
@@ -52,7 +58,7 @@ let pi:   float = 3.14
 let on:   bool  = true
 ```
 
-Reassignment (only `var`):
+Reassignment (`var` only):
 
 ```yolish
 var i = 0
@@ -66,10 +72,10 @@ i = i + 1
 | Type | Literal | Notes |
 |------|---------|-------|
 | `int` | `42`, `-7` | 64-bit signed integer |
-| `float` | `3.14`, `0.5` | Fixed-point x1000 (3 decimal places) |
-| `str` | `"hello"` | Max 255 chars. Escapes: `\n` `\t` `\\` |
+| `float` | `3.14`, `-0.5` | IEEE 754 double precision (~15 significant digits) |
+| `str` | `"hello"` | Max 1023 chars. Escapes: `\n` `\t` `\\` `\"` |
 | `bool` | `true`, `false` | |
-| `array` | `[1, 2, 3]` | Mixed types allowed |
+| `array` | `[1, 2, 3]` | Dynamic, mixed types allowed. Max 512 elements |
 | `struct` | `Point { x: 1, y: 2 }` | User-defined |
 | `nil` | — | Zero value, unset variable |
 
@@ -83,7 +89,7 @@ i = i + 1
 let a = 10 + 3    -- 13
 let b = 10 - 3    -- 7
 let c = 10 * 3    -- 30
-let d = 10 / 3    -- 3  (integer division)
+let d = 10 / 3    -- 3  (integer division for ints)
 let e = 10 % 3    -- 1
 ```
 
@@ -112,7 +118,7 @@ let s = "Hello" + ", " + "world"
 ### Range
 
 ```yolish
-0..10    -- used with for loops and match (inclusive start, exclusive end)
+0..10    -- inclusive start, exclusive end (used in for loops and match)
 ```
 
 ---
@@ -131,6 +137,12 @@ if score >= 90 {
 } else {
     y.println("F")
 }
+```
+
+`if` is also an expression:
+
+```yolish
+let label = if x > 0 { "positive" } else { "non-positive" }
 ```
 
 ---
@@ -162,6 +174,11 @@ let arr = [10, 20, 30]
 for item in arr {
     y.println(item)
 }
+
+-- with index using range
+for i in 0..y.len(arr) {
+    y.println(arr[i])
+}
 ```
 
 ### for — string characters
@@ -181,7 +198,7 @@ Exits the innermost loop immediately.
 ```yolish
 for n in 0..100 {
     if n * n > 50 { break }
-    y.print(n)             -- 0 1 2 3 4 5 6 7
+    y.print(n)    -- 0 1 2 3 4 5 6 7
 }
 ```
 
@@ -202,14 +219,14 @@ Skips the rest of the current iteration and moves to the next.
 ```yolish
 for n in 1..11 {
     if n % 2 == 0 { continue }
-    y.print(n)             -- 1 3 5 7 9
+    y.print(n)    -- 1 3 5 7 9
 }
 ```
 
 ```yolish
 for w in ["a", "skip", "b", "skip", "c"] {
     if w == "skip" { continue }
-    y.println(w)           -- a, b, c
+    y.println(w)    -- a, b, c
 }
 ```
 
@@ -220,7 +237,7 @@ for w in ["a", "skip", "b", "skip", "c"] {
 ```yolish
 for i in 0..3 {
     for j in 0..5 {
-        if j == 3 { break }   -- only exits inner loop
+        if j == 3 { break }    -- only exits inner loop
         y.print(j)
     }
     y.print("|")
@@ -231,14 +248,14 @@ for i in 0..3 {
 ### Notes
 
 - `break` and `continue` work in `while`, `for item in array`, and `for i in range` loops.
-- They do **not** escape function boundaries — a `break` inside a called function does not affect the caller's loop.
+- They do **not** escape function boundaries.
 - Using `break` or `continue` outside a loop has no effect.
 
 ---
 
 ## 6. Match Expressions
 
-Match compares a value against a list of patterns and executes the first arm that matches. The `_` wildcard matches anything and acts as a default case.
+`match` is a full expression — it returns a value and can appear anywhere a value is expected.
 
 ### Syntax
 
@@ -273,7 +290,7 @@ match score {
 }
 ```
 
-Range is inclusive on the left, exclusive on the right (`90..100` matches 90 to 99).
+Range is inclusive on the left, exclusive on the right (`90..100` matches 90–99).
 
 ### String patterns
 
@@ -300,21 +317,17 @@ match flag {
 ```yolish
 match x {
     1 => {
-        y.print("one\n")
-        y.print("confirmed\n")
+        y.println("one")
+        y.println("confirmed")
     }
-    _ => {
-        y.print("other\n")
-    }
+    _ => y.println("other")
 }
 ```
 
 ### Match as expression
 
-`match` is a full expression and can appear anywhere a value is expected:
-
 ```yolish
--- direct assignment (top-level)
+-- direct assignment
 let label = match status {
     200 => "OK"
     404 => "Not Found"
@@ -330,28 +343,55 @@ fn grade(score) {
         _       => "F"
     }
 }
-let g = grade(85)    -- "B"
-
--- inside y.format
-y.println(y.format(r"Code {0}: {1}", code, match code {
-    200 => "OK"
-    404 => "Not Found"
-    _   => "Unknown"
-}))
 
 -- nested match
 let result = match a {
-    1 => match b { 3 => "1-3" _ => "1-x" }
+    1 => match b { 3 => "1-3"  _ => "1-x" }
     _ => "other"
 }
 ```
 
+### Match guards
+
+Add `if <condition>` after a pattern. The arm only matches if the pattern matches **and** the guard is true:
+
+```yolish
+fn classify(n) {
+    return match n {
+        0            => "zero"
+        n if n < 0   => "negative"
+        n if n < 10  => "small"
+        n if n < 100 => "medium"
+        _            => "large"
+    }
+}
+y.println(classify(-5))    -- "negative"
+y.println(classify(7))     -- "small"
+```
+
+### Pattern binding
+
+A bare identifier as a pattern always matches and binds the subject to that name inside the guard and body:
+
+```yolish
+fn fizzbuzz(n) {
+    return match n {
+        n if n % 15 == 0 => "FizzBuzz"
+        n if n % 3  == 0 => "Fizz"
+        n if n % 5  == 0 => "Buzz"
+        n                => y.str(n)
+    }
+}
+```
+
+The binding name is only visible inside that arm — it does not leak out.
+
 ### Notes
 
 - Arms are evaluated in order; first match wins.
-- Max 8 arms per match.
+- Up to 16 arms per match expression.
 - If no arm matches and there is no `_`, returns `nil`.
-- Arm separator is `=>` (fat arrow), not `->`.
+- Guards are only evaluated if the pattern matches.
 
 ---
 
@@ -365,7 +405,7 @@ fn add(a, b) {
 }
 ```
 
-Optional return type annotation (not enforced, documentation only):
+Optional return type annotation (documentation only, not enforced):
 
 ```yolish
 fn multiply(a, b) -> int {
@@ -391,12 +431,62 @@ fn factorial(n) {
 ### Notes
 
 - Max 8 parameters per function.
-- `return` exits the function immediately at any depth.
-- Functions are first-class values and can be stored in variables.
+- `return` exits immediately at any depth.
+- Functions are first-class values — they can be stored in variables and passed as arguments.
 
 ---
 
-## 8. Arrays
+## 8. Closures and First-Class Functions
+
+Functions are first-class values in Yolish — they can be stored in variables, passed as arguments, and returned from other functions.
+
+### Anonymous functions
+
+```yolish
+let double = fn(x) { return x * 2 }
+y.println(double(5))    -- 10
+```
+
+### Pass as argument
+
+```yolish
+fn apply(f, x) { return f(x) }
+y.println(apply(double, 7))    -- 14
+```
+
+### Closures — capture environment
+
+```yolish
+fn make_adder(n) {
+    return fn(x) { return x + n }    -- captures n
+}
+
+let add5  = make_adder(5)
+let add10 = make_adder(10)
+y.println(add5(3))     -- 8
+y.println(add10(3))    -- 13
+```
+
+### Higher-order builtins
+
+| Function | Description |
+|----------|-------------|
+| `y.map(arr, fn)` | Apply fn to each element, return new array |
+| `y.filter(arr, fn)` | Keep elements where fn returns true |
+| `y.reduce(arr, fn, init)` | Fold array to single value |
+| `y.each(arr, fn)` | Run fn for side effects |
+
+```yolish
+let nums = [1, 2, 3, 4, 5]
+y.map(nums, fn(x) { return x * 2 })              -- [2, 4, 6, 8, 10]
+y.filter(nums, fn(x) { return x % 2 == 0 })      -- [2, 4]
+y.reduce(nums, fn(acc, x) { return acc + x }, 0) -- 15
+y.each(nums, fn(x) { y.print(x)  y.print(" ") })
+```
+
+---
+
+## 9. Arrays
 
 ### Create
 
@@ -431,31 +521,33 @@ for item in arr {
 }
 ```
 
-### Push
+### Push / Pop
 
 ```yolish
-y.push(arr, 60)
+y.push(arr, 60)    -- append
+y.pop(arr)         -- remove and return last element
+```
+
+### Slice
+
+```yolish
+y.slice(arr, 1, 3)    -- elements at index 1 and 2
 ```
 
 ### Notes
 
-- Max 64 elements per array literal.
-- Element type can be mixed.
+- Max 512 elements per array.
+- Element types can be mixed.
 
 ---
 
-## 9. Structs
+## 10. Structs
 
 ### Define
 
 ```yolish
-struct Point {
-    x, y
-}
-
-struct Person {
-    name, age
-}
+struct Point  { x, y }
+struct Person { name, age }
 ```
 
 ### Instantiate
@@ -478,22 +570,20 @@ y.print(person.name)   -- Diaz
 fn make_point(px, py) {
     return Point { x: px, y: py }
 }
-
 let p2 = make_point(5, 15)
-y.print(p2.x)    -- 5
 ```
 
 ### Notes
 
-- Struct names must start with an uppercase letter (`Point`, not `point`).
+- Struct names must start with an uppercase letter.
 - Max 8 fields per struct.
 - Field values can be any type including other structs.
 
 ---
 
-## 10. Impl — Struct Methods
+## 11. Impl — Struct Methods
 
-Use `impl StructName { }` to attach methods to a struct. The first parameter must be `self`, which receives the struct value.
+Use `impl StructName { }` to attach methods to a struct. The first parameter must be `self`.
 
 ```yolish
 struct Point { x, y }
@@ -517,8 +607,6 @@ y.println(p.scale(2).to_str())   -- Point(6, 8)
 
 ### Method chaining
 
-Methods that return a struct can be chained with further method calls:
-
 ```yolish
 struct Counter { value }
 impl Counter {
@@ -528,20 +616,18 @@ impl Counter {
 }
 
 let c = Counter { value: 0 }
-y.println(c.inc().inc().add(5).get())   -- 7
+y.println(c.inc().inc().add(5).get())    -- 7
 ```
 
 ### Notes
 
-- `self` is a **copy** of the struct (Yolish structs are value types). Return a new struct to represent mutation.
+- `self` is a **copy** of the struct (value type). Return a new struct to represent mutation.
 - Put all methods for a struct in a single `impl` block.
 - Methods are resolved by struct name at runtime.
 
 ---
 
-## 11. String Builtins
-
-All string functions are also available without the `y.` prefix.
+## 12. String Builtins
 
 | Function | Returns | Description |
 |----------|---------|-------------|
@@ -551,35 +637,49 @@ All string functions are also available without the `y.` prefix.
 | `y.trim(s)` | `str` | Remove leading/trailing whitespace |
 | `y.substr(s, start, len)` | `str` | Slice a substring |
 | `y.contains(s, sub)` | `bool` | Check if `sub` is in `s` |
-| `y.split(s, sep)` | `array` | Split string by separator |
-| `y.format(fmt, ...)` | `str` | String interpolation |
+| `y.starts_with(s, prefix)` | `bool` | Prefix check |
+| `y.ends_with(s, suffix)` | `bool` | Suffix check |
+| `y.split(s, sep)` | `array` | Split by separator |
+| `y.replace(s, from, to)` | `str` | Replace first match |
+| `y.index_of(s, sub)` | `int` | Index of substring (-1 if not found) |
+| `y.reverse(s)` | `str` | Reverse the string |
+| `y.repeat(s, n)` | `str` | Repeat string n times |
+| `y.join(arr, sep)` | `str` | Join array elements with separator |
+| `y.format(fmt, ...)` | `str` | Positional string formatting |
 
 ### Examples
 
 ```yolish
-y.upper("hello")              -- "HELLO"
-y.lower("WORLD")              -- "world"
-y.trim("  hi  ")              -- "hi"
-y.substr("Exploidus", 0, 5)   -- "Explo"
-y.contains("Yolish", "oli")   -- true
-y.split("a,b,c", ",")         -- ["a", "b", "c"]
+y.upper("hello")                   -- "HELLO"
+y.lower("WORLD")                   -- "world"
+y.trim("  hi  ")                   -- "hi"
+y.substr("Exploidus", 0, 5)        -- "Explo"
+y.contains("Yolish", "oli")        -- true
+y.starts_with("Yolish", "Yo")      -- true
+y.ends_with("Yolish", "ish")       -- true
+y.split("a,b,c", ",")              -- ["a", "b", "c"]
+y.replace("Hi World", "World", "Yolish")   -- "Hi Yolish"
+y.index_of("hello", "ll")          -- 2
+y.reverse("Yolish")                -- "hsiloY"
+y.repeat("ha", 3)                  -- "hahaha"
+y.join(["a", "b", "c"], "-")       -- "a-b-c"
 ```
 
-### y.format
-
-Uses `{0}`, `{1}`, ... positional placeholders:
+Also available as `y.string.*` namespace:
 
 ```yolish
-let msg = y.format("Hello {0}! You are {1} years old.", "Diaz", 22)
--- "Hello Diaz! You are 22 years old."
-
-let info = y.format("OS: {0}  v{1}", "Exploidus", 3)
--- "OS: Exploidus  v3"
+y.string.repeat("ha", 3)
+y.string.starts_with("Yolish", "Yo")
+y.string.ends_with("Yolish", "ish")
+y.string.replace("Hi World", "World", "Yolish")
+y.string.reverse("Yolish")
+y.string.pad_left("42", 6)         -- "    42"
+y.string.pad_right("42", 6)        -- "42    "
 ```
 
 ---
 
-## 15. I/O Builtins
+## 13. I/O Builtins
 
 ### Output
 
@@ -587,7 +687,6 @@ let info = y.format("OS: {0}  v{1}", "Exploidus", 3)
 |----------|-------------|
 | `y.print(val)` | Print value without newline |
 | `y.println(val)` | Print value with newline |
-| `y.format(fmt, ...)` | Return formatted string — use `{0}`, `{1}` placeholders |
 
 ### Input
 
@@ -595,9 +694,9 @@ let info = y.format("OS: {0}  v{1}", "Exploidus", 3)
 |----------|---------|-------------|
 | `y.input()` | `str` | Read a line from stdin |
 | `y.input(prompt)` | `str` | Print prompt, then read a line |
-| `y.input_int()` | `int` | Read a line and parse as integer |
+| `y.input_int()` | `int` | Read and parse as integer |
 | `y.input_int(prompt)` | `int` | Print prompt, read and parse as integer |
-| `y.input_float()` | `float` | Read a line and parse as float |
+| `y.input_float()` | `float` | Read and parse as float |
 | `y.input_float(prompt)` | `float` | Print prompt, read and parse as float |
 
 ```yolish
@@ -610,14 +709,14 @@ y.println(y.format(r"Hello {0}, age {1}", name, age))
 
 ---
 
-## 16. Type Conversion Builtins
+## 14. Type Conversion Builtins
 
 | Function | Description |
 |----------|-------------|
-| `y.str(val)` | Convert any value to string (`int`, `float`, `bool`, `nil`, `arr`) |
+| `y.str(val)` | Convert int / float / bool / nil / array to string |
 | `y.int(val)` | Parse string to int, or truncate float to int |
 | `y.float(val)` | Parse string to float, or convert int to float |
-| `y.bool(val)` | `"true"/"1"/"yes"` → `true`; `"false"/"0"` → `false`; int: `0` → `false` |
+| `y.bool(val)` | `"true"/"1"/"yes"` → `true`; `"false"/"0"` → `false`; int `0` → `false` |
 
 ```yolish
 y.str(42)           -- "42"
@@ -637,23 +736,13 @@ y.bool("0")         -- false
 y.bool(1)           -- true
 ```
 
-| Function | Description |
-|----------|-------------|
-| `y.print(val)` | Print value without newline |
-| `y.println(val)` | Print value with newline |
-| `y.input()` | Read a line from stdin, returns `str` |
-
-```yolish
-y.print("Enter name: ")
-let name = y.input()
-y.println(y.format("Hello, {0}!", name))
-```
-
 ---
 
-## 12. Multiline Strings
+## 15. Multiline and Raw Strings
 
-Use backtick `` ` `` to write strings that span multiple lines. Newlines are included literally. `{expr}` interpolation works normally.
+### Multiline (backtick)
+
+Use `` ` `` to write strings that span multiple lines. Newlines are included literally. `{expr}` interpolation works normally.
 
 ```yolish
 let name = "Diaz"
@@ -661,12 +750,7 @@ let banner = `Hello {name}!
 Welcome to Yolish.
 Have a great day.`
 y.println(banner)
--- Hello Diaz!
--- Welcome to Yolish.
--- Have a great day.
 ```
-
-Multiline strings work anywhere a normal string works — `let`, `var`, function args, arrays, return values.
 
 ```yolish
 fn sql_query(table, limit) {
@@ -677,94 +761,89 @@ LIMIT {limit}`
 }
 ```
 
----
+### Raw strings
 
-## 13. Raw Strings
-
-Prefix a string with `r` to disable both escape sequences and `{expr}` interpolation. Everything is taken literally.
+Prefix with `r` to disable both escape sequences and `{expr}` interpolation. Everything is taken literally.
 
 ```yolish
 let path = r"C:\Users\Diaz\file.txt"
-y.println(path)   -- C:\Users\Diaz\file.txt
+y.println(path)    -- C:\Users\Diaz\file.txt
 
 let pat = r"\d+\.\d+"
-y.println(pat)    -- \d+\.\d+
+y.println(pat)     -- \d+\.\d+
 
 let tmpl = r"Dear {name}, code {0}"
-y.println(tmpl)   -- Dear {name}, code {0}  (no substitution)
+y.println(tmpl)    -- Dear {name}, code {0}  (no substitution)
 ```
 
 Raw strings are the recommended way to write `y.format` templates:
 
 ```yolish
 y.println(y.format(r"Hello {0}! You have {1} messages.", "Diaz", 5))
--- Hello Diaz! You have 5 messages.
 ```
 
 ### String syntax summary
 
 | Syntax | Newlines | `\n` `\t` escapes | `{expr}` interpolation |
 |--------|----------|-------------------|------------------------|
-| `"..."` | `\n` only | ✓ | ✓ |
-| `` `...` `` | literal | ✗ | ✓ |
-| `r"..."` | `\n` only | ✗ | ✗ |
+| `"..."` | `\n` only | Yes | Yes |
+| `` `...` `` | literal | No | Yes |
+| `r"..."` | `\n` only | No | No |
 
 ---
 
-## 17. Array Functional Builtins
+## 16. Array Functional Builtins
 
 ### y.range
 
 ```yolish
-y.range(n)             -- [0, 1, ..., n-1]
-y.range(start, end)    -- [start, start+1, ..., end-1]
-y.range(start, end, step)
+y.range(n)                     -- [0, 1, ..., n-1]
+y.range(start, end)            -- [start, ..., end-1]
+y.range(start, end, step)      -- with step (can be negative)
 ```
 
 ```yolish
-y.range(5)            -- [0, 1, 2, 3, 4]
-y.range(2, 7)         -- [2, 3, 4, 5, 6]
-y.range(0, 10, 2)     -- [0, 2, 4, 6, 8]
-y.range(10, 0, -3)    -- [10, 7, 4, 1]
+y.range(5)             -- [0, 1, 2, 3, 4]
+y.range(2, 7)          -- [2, 3, 4, 5, 6]
+y.range(0, 10, 2)      -- [0, 2, 4, 6, 8]
+y.range(10, 0, -3)     -- [10, 7, 4, 1]
 ```
-
-Note: arrays are capped at 64 elements.
 
 ### y.sort
 
 ```yolish
-y.sort(arr)                  -- ascending by default (numbers or strings)
-y.sort(arr, fn(a,b){...})    -- custom comparator: return true if a should come first
+y.sort(arr)                           -- ascending (numbers or strings)
+y.sort(arr, fn(a, b){ return ... })   -- custom comparator: return true if a before b
 ```
 
 ```yolish
-y.sort([5, 2, 8, 1])              -- [1, 2, 5, 8]
-y.sort(["b", "a", "c"])           -- [a, b, c]
-y.sort([5,2,8], fn(a,b){ return a > b })  -- [8, 5, 2]
+y.sort([5, 2, 8, 1])                           -- [1, 2, 5, 8]
+y.sort(["b", "a", "c"])                        -- ["a", "b", "c"]
+y.sort([5, 2, 8], fn(a, b){ return a > b })    -- [8, 5, 2]  (descending)
 ```
 
-Returns a **sorted copy** — the original is unchanged.
+Returns a **sorted copy** — original is unchanged.
 
 ### y.map
 
 ```yolish
 y.map(arr, fn(item) { ... })
-y.map(arr, fn(item, index) { ... })
+y.map(arr, fn(item, index) { ... })    -- index available as 2nd param
 ```
 
 ```yolish
-y.map([1,2,3,4,5], fn(x){ return x * x })    -- [1, 4, 9, 16, 25]
-y.map(["hi","bye"], fn(s){ return y.upper(s) }) -- [HI, BYE]
+y.map([1,2,3,4,5], fn(x){ return x * x })       -- [1, 4, 9, 16, 25]
+y.map(["hi","bye"], fn(s){ return y.upper(s) })  -- ["HI", "BYE"]
 ```
 
 ### y.filter
 
 ```yolish
-y.filter(arr, fn(item) { ... })   -- keep items where fn returns true
+y.filter(arr, fn(item) { ... })    -- keep items where fn returns true
 ```
 
 ```yolish
-y.filter([1..10], fn(n){ return n % 2 == 0 })  -- [2, 4, 6, 8, 10]
+y.filter(y.range(1, 11), fn(n){ return n % 2 == 0 })    -- [2, 4, 6, 8, 10]
 ```
 
 ### y.reduce
@@ -774,37 +853,42 @@ y.reduce(arr, fn(acc, item) { ... }, initial)
 ```
 
 ```yolish
-y.reduce([1,2,3,4,5], fn(acc, x){ return acc + x }, 0)  -- 15
-y.reduce([3,7,2,9],   fn(m, x){ if x>m { return x } return m }, 0)  -- 9
+y.reduce([1,2,3,4,5], fn(acc, x){ return acc + x }, 0)           -- 15
+y.reduce([3,7,2,9], fn(m, x){ if x > m { return x } return m }, 0) -- 9
 ```
 
 ### y.each
 
 ```yolish
-y.each(arr, fn(item) { ... })   -- run fn for side effects, returns nil
+y.each(arr, fn(item) { ... })    -- run fn for side effects, returns nil
 ```
 
 ### y.zip
 
 ```yolish
-y.zip(arr1, arr2)   -- array of Pair{first, second} structs, length = min(len1, len2)
+y.zip(arr1, arr2)    -- array of Pair{first, second} structs, length = min(len1, len2)
 ```
 
 ```yolish
 let pairs = y.zip(["a","b","c"], [1, 2, 3])
-for p in pairs { y.println(y.format(r"{0}={1}", p.first, p.second)) }
+for p in pairs {
+    y.println(y.format(r"{0} = {1}", p.first, p.second))
+}
+-- a = 1
+-- b = 2
+-- c = 3
 ```
 
 ### y.sum
 
 ```yolish
-y.sum([1, 2, 3, 4, 5])     -- 15
+y.sum([1, 2, 3, 4, 5])    -- 15  (works with ints and floats)
 ```
 
 ### y.flatten
 
 ```yolish
-y.flatten([[1,2],[3,4],[5]])   -- [1, 2, 3, 4, 5]
+y.flatten([[1,2],[3,4],[5]])    -- [1, 2, 3, 4, 5]
 ```
 
 ### Pipeline pattern
@@ -813,27 +897,30 @@ y.flatten([[1,2],[3,4],[5]])   -- [1, 2, 3, 4, 5]
 -- sum of squares of odd numbers 1..10
 let result = y.reduce(
     y.map(
-        y.filter(y.range(1,11), fn(x){ return x % 2 == 1 }),
+        y.filter(y.range(1, 11), fn(x){ return x % 2 == 1 }),
         fn(x){ return x * x }
     ),
     fn(acc, x){ return acc + x },
     0
 )
-y.println(result)   -- 165
+y.println(result)    -- 165  (1 + 9 + 25 + 49 + 81)
 ```
 
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `y.len(x)` | `int` | Length of string or array |
-| `y.abs(n)` | `int` | Absolute value |
-| `y.str(n)` | `str` | Convert int/float/bool to string |
-| `y.int(s)` | `int` | Parse string to integer |
-| `y.push(arr, val)` | — | Append value to array |
-| `y.exit(code)` | — | Exit with status code |
+Also available as `y.array.*` namespace:
+
+```yolish
+y.array.sort(arr)
+y.array.reverse(arr)
+y.array.slice(arr, start, end)
+y.array.join(arr, sep)
+y.array.find(arr, fn(x){ return x > 5 })      -- first matching element
+y.array.index_of(arr, val)                     -- index of value (-1 if not found)
+y.array.contains(arr, val)                     -- true / false
+```
 
 ---
 
-## 13. Capability System
+## 17. Capability System
 
 Every resource access in Yolish requires an explicit capability token. You cannot accidentally open, read, or write a file without declaring intent.
 
@@ -841,10 +928,10 @@ Every resource access in Yolish requires an explicit capability token. You canno
 
 | Value | Meaning |
 |-------|---------|
-| `1` | Read (CAP_READ) |
-| `2` | Write (CAP_WRITE) |
+| `1` | Read (`CAP_READ`) |
+| `2` | Write (`CAP_WRITE`) |
 | `3` | Read + Write |
-| `4` | Execute (CAP_EXEC) |
+| `4` | Execute (`CAP_EXEC`) |
 
 ### Functions
 
@@ -883,15 +970,33 @@ fn copy_file(src, dst) {
 }
 ```
 
+### Capability annotations
+
+```yolish
+@cap(net.read, fs.write)
+fn fetch_and_save(url, path) {
+    -- only runs if caller has net.read + fs.write capabilities
+}
+```
+
+### Runtime capability check
+
+```yolish
+let caps = y.capabilities()
+if y.has_cap(caps, "fs.read") {
+    -- safe to read files
+}
+```
+
 ### Why this matters
 
 In C or Python, any code can open any file. In Yolish, capabilities are typed values — they can be passed, stored, and inspected. On Exploidus OS, the kernel validates the capability before granting access. When a capability goes out of scope, it is automatically revoked.
 
 ---
 
-## 14. Import
+## 18. Import / Modules
 
-Load and execute another `.y` file. All functions and variables defined in the imported file become available in the current scope.
+### Simple import (shared env)
 
 ```yolish
 import "mathlib.y"
@@ -901,130 +1006,47 @@ fn main() {
 }
 ```
 
+### Named import (isolated namespace)
+
+```yolish
+-- utils.y
+fn greet(name) { return "Hello, {name}!" }
+fn double(n)   { return n * 2 }
+```
+
+```yolish
+-- main.y
+import "utils.y" as util
+
+fn main() {
+    y.println(util.greet("Diaz"))    -- Hello, Diaz!
+    y.println(util.double(21))       -- 42
+}
+```
+
 ### Notes
 
-- Path is relative to the working directory where `ys` is run.
-- Imported file shares the same environment — all symbols are immediately visible.
+- Path is relative to the importing file's directory.
+- `import "file.y" as name` runs in an isolated env — symbols do not pollute the caller.
+- `import "file.y"` (without `as`) shares the caller's env.
 - Circular imports are not detected; avoid them manually.
 
 ---
 
-## 15. Error Messages
+## 19. Annotations
 
-Parse errors include the line number:
-
-```
-[YS] parse error (line 5)
-```
-
-Runtime errors:
-
-```
-[YS] error (line 12): unknown struct field
-[YS] error (line 7): cannot open import file
-```
-
----
-
-## 16. Comments
-
-```yolish
--- This is a single-line comment
-let x = 10    -- inline comment
-```
-
-Multi-line: use multiple `--` lines. Block comments are not supported.
-
----
-
-## Quick reference
-
-```yolish
--- Variables
-let x = 10
-var y = 20
-
--- if / else if / else
-if x > 5 { ... } else if x == 5 { ... } else { ... }
-
--- loops
-while i < 10 { i = i + 1 }
-for i in 0..10 { ... }
-for item in arr { ... }
-for ch in "str" { ... }
-
--- match
-match x {
-    1       => "one"
-    2..5    => "two to four"
-    "hello" => "greeting"
-    true    => "yes"
-    _       => "default"
-}
-
--- functions
-fn add(a, b) { return a + b }
-let r = add(3, 4)
-
--- arrays
-let arr = [1, 2, 3]
-arr[0]            y.len(arr)        y.push(arr, 4)
-
--- structs
-struct Point { x, y }
-let p = Point { x: 1, y: 2 }
-p.x
-
--- strings
-y.upper(s)   y.lower(s)   y.trim(s)
-y.substr(s, 0, 5)         y.contains(s, "hi")
-y.split(s, ",")            y.format("{0} is {1}", name, age)
-
--- capabilities
-let f = cap.open("/file", 1)
-cap.read(f)    cap.write(f, data)    cap.close(f)
-
--- import
-import "utils.y"
-
--- try / catch / throw
-try { throw "oops" } catch(e) { y.println(e) }
-
--- types
-y.typeof(42)         -- "int"
-y.is_str("hi")       -- true
-
--- closures
-let f = fn(x) { return x * 2 }
-let add5 = make_adder(5)
-
--- higher-order
-y.map(arr, fn(x) { return x * 2 })
-y.filter(arr, fn(x) { return x % 2 == 0 })
-y.reduce(arr, fn(acc, x) { return acc + x }, 0)
-y.each(arr, fn(x) { y.print(x) })
-```
-
----
-
-## 17. Annotations
-
-Annotations attach metadata to functions. They are declared on the line immediately before `fn`.
+Annotations attach metadata to functions. Declared on the line immediately before `fn`.
 
 ### Syntax
 
 ```yolish
 @annotation_name("argument")
-fn function_name(params) {
-    ...
-}
+fn function_name(params) { ... }
 ```
 
 ### @intent
 
-Signals the resource intent of a function to the Exploidus OS scheduler. The scheduler uses this hint to prioritize or manage resources before the function runs.
-
-The hint is emitted to `stderr` once per outermost call — recursive calls do not repeat it.
+Signals resource intent to the Exploidus OS scheduler. Emitted to `stderr` once per outermost call — recursive calls do not repeat it.
 
 ```yolish
 @intent("io")
@@ -1038,12 +1060,7 @@ fn read_config(path) {
 @intent("compute")
 fn fibonacci(n) {
     if n <= 1 { return n }
-    return fibonacci(n - 1) + fibonacci(n - 2)
-}
-
-@intent("network")
-fn fetch(url) {
-    -- future: network capability
+    return fibonacci(n-1) + fibonacci(n-2)
 }
 ```
 
@@ -1063,19 +1080,12 @@ Scheduler output (stderr):
 
 ### @audit
 
-Logs every call to the function — tag, function name, and argument count. Output goes to `stderr` so it does not mix with program output.
+Logs every call — tag, function name, and argument count. Output goes to `stderr`.
 
 ```yolish
-@audit("sensitive")
-fn get_secret() {
-    return "key-abc-123"
-}
-
 @audit("auth")
 fn login(user, pass) {
-    if user == "admin" {
-        if pass == "1234" { return true }
-    }
+    if user == "admin" && pass == "1234" { return true }
     return false
 }
 
@@ -1090,39 +1100,37 @@ fn save_log(msg) {
 Audit output (stderr):
 ```
 [audit] tag=auth fn=login args=2
-[audit] tag=sensitive fn=get_secret args=0
+[audit] tag=write fn=save_log args=1
 ```
 
 ### Separating output from logs
 
 ```bash
-./ys examples/ann_test.y               -- both together in terminal
-./ys examples/ann_test.y 2>/dev/null   -- program output only
-./ys examples/ann_test.y 2>audit.log   -- save logs, show output
-./ys examples/ann_test.y >out.txt 2>audit.log  -- save both separately
+ys program.y                           -- both in terminal
+ys program.y 2>/dev/null               -- program output only
+ys program.y 2>audit.log               -- save audit log
+ys program.y >out.txt 2>audit.log      -- save both separately
 ```
 
 ### Notes
 
 - Annotation must be on the line directly before `fn`.
 - Only one annotation per function.
-- Annotation fires once per outermost call — recursive calls are suppressed.
 - Both `@intent` and `@audit` accept an optional string argument.
 - On Exploidus OS, `@intent` integrates with the kernel scheduler directly.
 
 ---
 
-## 18. Error Handling
-
-Yolish has a `try/catch/throw` system for runtime error handling.
+## 20. Error Handling
 
 ### throw
 
-Raises an error. Execution stops at the throw point and unwinds to the nearest `catch`.
+Raises an error. Execution stops and unwinds to the nearest `catch`.
 
 ```yolish
 throw "division by zero"
 throw "invalid input"
+throw y.error("not found", 404)    -- structured error object
 ```
 
 ### try / catch
@@ -1131,8 +1139,18 @@ throw "invalid input"
 try {
     -- code that might throw
 } catch(e) {
-    -- e contains the error message as a string
-    y.print("error: ") y.println(e)
+    -- e is the thrown value (string or error object)
+    y.println("error: " + y.str(e))
+}
+```
+
+`catch` without a variable is also valid:
+
+```yolish
+try {
+    throw "oops"
+} catch {
+    y.println("something went wrong")
 }
 ```
 
@@ -1148,40 +1166,36 @@ fn safe_divide(a, b) {
     try {
         return divide(a, b)
     } catch(e) {
-        y.print("caught: ") y.println(e)
+        y.print("caught: ")
+        y.println(e)
         return -1
     }
 }
 
-fn main() {
-    y.println(safe_divide(10, 2))   -- 5
-    y.println(safe_divide(10, 0))   -- caught: division by zero / -1
-}
+y.println(safe_divide(10, 2))    -- 5
+y.println(safe_divide(10, 0))    -- caught: division by zero / -1
 ```
 
 ### Notes
 
-- `throw` accepts any value (string, int, etc.) and converts it to an error message.
-- `catch(e)` binds the error message to `e` as a string.
-- `catch` without a variable is also valid: `catch { ... }`.
+- `throw` accepts any value (string, int, error object).
 - Uncaught throws propagate up through function calls.
+- `throw` inside a `for` or `while` loop works correctly — it unwinds to the nearest `try`.
 
 ---
 
-## 19. Type System
+## 21. Type System
 
 ### y.typeof
 
-Returns the type of a value as a string.
-
 ```yolish
-y.typeof(42)              -- "int"
-y.typeof(3.14)            -- "float"
-y.typeof("hello")         -- "str"
-y.typeof(true)            -- "bool"
-y.typeof([1,2,3])         -- "array"
-y.typeof(fn(x){return x}) -- "fn"
-y.typeof(nil)             -- "nil"
+y.typeof(42)               -- "int"
+y.typeof(3.14)             -- "float"
+y.typeof("hello")          -- "str"
+y.typeof(true)             -- "bool"
+y.typeof([1,2,3])          -- "array"
+y.typeof(fn(x){return x})  -- "fn"
+y.typeof(nil)              -- "nil"
 ```
 
 ### Type check predicates
@@ -1195,7 +1209,7 @@ y.typeof(nil)             -- "nil"
 | `y.is_array(v)` | true if array |
 | `y.is_fn(v)` | true if function |
 | `y.is_nil(v)` | true if nil |
-| `y.is_err(v)` | true if error value |
+| `y.is_err(v)` | true if error object |
 
 ### Example
 
@@ -1209,79 +1223,6 @@ fn print_typed(v) {
     }
 }
 ```
-
----
-
-## 20. Closures and First-Class Functions
-
-Functions are first-class values in Yolish — they can be stored in variables, passed as arguments, and returned from other functions.
-
-### Anonymous functions
-
-```yolish
-let double = fn(x) { return x * 2 }
-y.println(double(5))   -- 10
-```
-
-### Pass as argument
-
-```yolish
-fn apply(f, x) { return f(x) }
-y.println(apply(double, 7))   -- 14
-```
-
-### Closures — capture environment
-
-```yolish
-fn make_adder(n) {
-    return fn(x) { return x + n }  -- captures n
-}
-
-let add5  = make_adder(5)
-let add10 = make_adder(10)
-y.println(add5(3))    -- 8
-y.println(add10(3))   -- 13
-```
-
-### Higher-order builtins
-
-| Function | Description |
-|----------|-------------|
-| `y.map(arr, fn)` | Apply fn to each element, return new array |
-| `y.filter(arr, fn)` | Keep elements where fn returns true |
-| `y.reduce(arr, fn, init)` | Fold array to single value |
-| `y.each(arr, fn)` | Run fn for side effects |
-
-```yolish
-let nums = [1, 2, 3, 4, 5]
-
-y.map(nums, fn(x) { return x * 2 })         -- [2, 4, 6, 8, 10]
-y.filter(nums, fn(x) { return x % 2 == 0 }) -- [2, 4]
-y.reduce(nums, fn(acc, x) { return acc + x }, 0) -- 15
-y.each(nums, fn(x) { y.print(x) y.print(" ") })
-```
-
----
-
-## 21. REPL
-
-Running `ys` without arguments starts an interactive REPL session.
-
-```
-$ ys
-Yolish v0.5 REPL  (type 'exit' to quit)
-ys> let x = 10
-ys> let y2 = 20
-ys> x + y2
-30
-ys> fn double(n) { return n * 2 }
-ys> double(21)
-42
-ys> exit
-Bye!
-```
-
-The REPL shares a persistent environment across lines — variables and functions defined on one line are available on the next.
 
 ---
 
@@ -1315,50 +1256,51 @@ fn divide(a, b) {
     return a / b
 }
 
-fn main() {
-    try {
-        y.println(divide(10, 0))
-    } catch(e) {
-        y.print("message : ") y.println(e.message)   -- division by zero
-        y.print("code    : ") y.println(e.code)       -- 400
-    }
+try {
+    y.println(divide(10, 0))
+} catch(e) {
+    y.println(e.message)    -- division by zero
+    y.println(e.code)       -- 400
 }
 ```
 
-You can also throw plain strings — catch will receive them as a string:
+You can also throw plain strings:
+
 ```yolish
-throw "something went wrong"   -- catch(e): e is a string
-throw y.error("msg", 500)      -- catch(e): e is a struct
+throw "something went wrong"    -- catch(e): e is a string
+throw y.error("msg", 500)       -- catch(e): e is a struct with .message and .code
 ```
 
 ---
 
-## 24. Module System
+## 24. REPL
 
-`import "file.y" as name` runs the file in an isolated environment and exposes all its definitions as a namespace.
+Running `ys` without arguments starts an interactive REPL session.
 
-```yolish
--- utils.y
-fn greet(name) { return "Hello, {name}!" }
-fn double(n)   { return n * 2 }
+```
+$ ys
+  __  __     ___  __   _      __
+ \ \/ /__  / (_)/ /_ | |_    / /
+  \  / _ \/ / / / __/| __ \  \ \
+  / / (_) / / /\ \_ | | | | / /
+ /_/\___/_/_/_/ \__/|_| |_|/_/
+  v1.0 — The Exploidus Language
+  type 'exit' to quit
+
+ys> let x = 10
+ys> let y2 = 20
+ys> x + y2
+30
+ys> fn double(n) { return n * 2 }
+ys> double(21)
+42
+ys> y.map([1,2,3], fn(x){ return x*x })
+[1, 4, 9]
+ys> exit
+Bye!
 ```
 
-```yolish
--- main.y
-import "utils.y" as util
-
-fn main() {
-    y.println(util.greet("Diaz"))   -- Hello, Diaz!
-    y.println(util.double(21))      -- 42
-}
-```
-
-### Notes
-
-- The imported file runs in its own env — its globals do not pollute the caller.
-- All top-level `fn` and `let`/`var` definitions become fields of the namespace.
-- Path is relative to the importing file's directory.
-- `import "file.y"` (without `as`) still works and shares the caller's env.
+The REPL shares a persistent environment across lines — variables and functions defined on one line are available on the next.
 
 ---
 
@@ -1368,15 +1310,21 @@ fn main() {
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `y.math.sqrt(n)` | Integer square root | `y.math.sqrt(144)` → `12` |
+| `y.math.sqrt(n)` | Square root | `y.math.sqrt(144)` → `12` |
 | `y.math.pow(base, exp)` | Power | `y.math.pow(2, 10)` → `1024` |
 | `y.math.abs(n)` | Absolute value | `y.math.abs(-42)` → `42` |
 | `y.math.min(a, b)` | Minimum | `y.math.min(3, 5)` → `3` |
 | `y.math.max(a, b)` | Maximum | `y.math.max(3, 5)` → `5` |
 | `y.math.clamp(v, lo, hi)` | Clamp to range | `y.math.clamp(15, 0, 10)` → `10` |
-| `y.math.floor(n)` | Floor (float → int) | `y.math.floor(3.7)` → `3` |
-| `y.math.ceil(n)` | Ceiling (float → int) | `y.math.ceil(3.2)` → `4` |
+| `y.math.floor(n)` | Floor | `y.math.floor(3.7)` → `3` |
+| `y.math.ceil(n)` | Ceiling | `y.math.ceil(3.2)` → `4` |
+| `y.math.round(n)` | Round to nearest | `y.math.round(3.5)` → `4` |
 | `y.math.sign(n)` | Sign (-1, 0, 1) | `y.math.sign(-5)` → `-1` |
+| `y.math.log(n)` | Natural logarithm | `y.math.log(2.718)` → `≈1` |
+| `y.math.sin(n)` | Sine (radians) | `y.math.sin(0)` → `0` |
+| `y.math.cos(n)` | Cosine (radians) | `y.math.cos(0)` → `1` |
+| `y.math.tan(n)` | Tangent (radians) | |
+| `y.math.pi` | π constant | `3.141592653589793` |
 
 ### y.string
 
@@ -1387,52 +1335,340 @@ fn main() {
 | `y.string.ends_with(s, p)` | Suffix check | `y.string.ends_with("Yolish", "ish")` → `true` |
 | `y.string.replace(s, from, to)` | Replace first match | `y.string.replace("Hi World", "World", "Yolish")` → `"Hi Yolish"` |
 | `y.string.reverse(s)` | Reverse string | `y.string.reverse("Yolish")` → `"hsiloY"` |
-| `y.string.pad_left(s, width)` | Left-pad with spaces | `y.string.pad_left("42", 6)` → `"    42"` |
-| `y.string.pad_right(s, width)` | Right-pad with spaces | `y.string.pad_right("42", 6)` → `"42    "` |
+| `y.string.pad_left(s, w)` | Left-pad with spaces | `y.string.pad_left("42", 6)` → `"    42"` |
+| `y.string.pad_right(s, w)` | Right-pad with spaces | `y.string.pad_right("42", 6)` → `"42    "` |
 
 ### y.array
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `y.array.sort(arr)` | Sort ascending (returns new array) | `y.array.sort([3,1,2])` → `[1,2,3]` |
-| `y.array.reverse(arr)` | Reverse (returns new array) | `y.array.reverse([1,2,3])` → `[3,2,1]` |
-| `y.array.slice(arr, start, end)` | Slice | `y.array.slice(arr, 1, 3)` → elements 1–2 |
+| `y.array.sort(arr)` | Sort ascending (copy) | `y.array.sort([3,1,2])` → `[1,2,3]` |
+| `y.array.reverse(arr)` | Reverse (copy) | `y.array.reverse([1,2,3])` → `[3,2,1]` |
+| `y.array.slice(arr, s, e)` | Slice | `y.array.slice(arr, 1, 3)` |
 | `y.array.join(arr, sep)` | Join to string | `y.array.join([1,2,3], ", ")` → `"1, 2, 3"` |
 | `y.array.find(arr, fn)` | First matching element | `y.array.find(arr, fn(x){return x>5})` |
-| `y.array.index_of(arr, val)` | Index of value (-1 if not found) | `y.array.index_of(arr, 4)` → `2` |
+| `y.array.index_of(arr, val)` | Index of value | `y.array.index_of(arr, 4)` → `2` |
 | `y.array.contains(arr, val)` | Check membership | `y.array.contains(arr, 9)` → `true` |
 
 ---
 
-## Updated Quick Reference
+## 26. Native Compiler
+
+Compile Yolish source to a standalone native binary — no interpreter needed at runtime.
+
+```bash
+ys -c program.y                      -- compile for current OS
+ys -c program.y -o myprogram         -- custom output name
+ys -c program.y --target linux       -- Linux ELF64
+ys -c program.y --target windows     -- Windows PE32+
+ys -c program.y --target macos       -- macOS Mach-O
+```
+
+### Currently supported in native compiler
+
+| Feature | Native |
+|---------|--------|
+| Integer arithmetic (`+` `-` `*` `/` `%`) | Yes |
+| Comparisons (`<` `<=` `>` `>=` `==` `!=`) | Yes |
+| `if` / `else` | Yes |
+| `while` loop + `break` / `continue` | Yes |
+| `for i in lo..hi` | Yes |
+| Functions + recursion | Yes |
+| `y.print` / `y.println` (int + string) | Yes |
+| Local variables | Yes |
+| String literals | Yes |
+| Float, arrays, structs | [ ] v1.1 |
+| File I/O | [ ] v1.2 |
+
+### Binary output formats
+
+| Target | Format | Notes |
+|--------|--------|-------|
+| `linux` | ELF64 | Static, runs without libc |
+| `windows` | PE32+ | kernel32.dll imports |
+| `macos` | Mach-O 64-bit | LC_MAIN entry |
+| `exploidus` | (v1.1) | Native Exploidus syscalls |
+
+---
+
+## 27. Comments
 
 ```yolish
--- String interpolation
-let msg = "Hello {name}, age {age}!"
+-- This is a single-line comment
+let x = 10    -- inline comment
+```
 
--- Error objects
-throw y.error("not found", 404)
-try { ... } catch(e) { y.println(e.message)  y.println(e.code) }
+Multi-line block comments:
 
--- Module system
-import "utils.y" as util
-util.greet("Diaz")
-
--- y.math
-y.math.sqrt(144)          y.math.pow(2,10)
-y.math.min(a,b)           y.math.max(a,b)
-y.math.clamp(v,lo,hi)     y.math.abs(n)
-
--- y.string
-y.string.repeat(s,n)      y.string.replace(s,from,to)
-y.string.starts_with(s,p) y.string.ends_with(s,p)
-y.string.reverse(s)       y.string.pad_left(s,w)
-
--- y.array
-y.array.sort(arr)         y.array.reverse(arr)
-y.array.slice(arr,s,e)    y.array.join(arr,sep)
-y.array.find(arr,fn)      y.array.contains(arr,v)
-y.array.index_of(arr,v)
+```yolish
+--[
+   This is a multi-line comment.
+   Everything here is ignored.
+   Useful for disabling blocks of code.
+]--
 ```
 
 ---
+
+## 28. Known Limitations
+
+### String length
+Max **1023 characters**. Longer strings are silently truncated at the lexer.
+
+### Array size
+Max **512 elements** per array literal. The interpreter uses a shared pool of up to **8192 array objects** total.
+
+### Float precision
+Floats use native `double` (IEEE 754, ~15 significant digits):
+```yolish
+y.println(0.1 + 0.2)    -- 0.30000000000000004  (standard float behaviour)
+```
+For exact decimal arithmetic, use integers and scale manually (e.g. store cents, not dollars).
+
+### Function parameters
+Max **8 parameters** per function.
+
+### Struct fields
+Max **8 fields** per struct.
+
+### Match arms
+Max **16 arms** per `match` expression.
+
+### Native compiler
+The native compiler (`ys -c`) currently supports integers, strings, arithmetic, `if`/`else`, `while`, `for`, and recursion. Float, arrays, and structs in native mode are coming in **v1.1**.
+
+---
+
+## 29. String Formatting Reference
+
+`y.format` supports two styles:
+
+### Positional arguments
+
+```yolish
+y.format("Hello {0}!", "World")              -- "Hello World!"
+y.format("{0} + {1} = {2}", 1, 2, 3)        -- "1 + 2 = 3"
+y.format("repeat: {0} {0} {0}", "ha")       -- "repeat: ha ha ha"
+y.format(r"OS: {0}  v{1}", "Exploidus", 3)  -- "OS: Exploidus  v3"
+```
+
+### Inline expression interpolation
+
+```yolish
+let name = "Yolish"
+let ver  = 1
+let s = "Welcome to {name} v{ver}"           -- "Welcome to Yolish v1"
+
+let x = 10
+let s2 = "double = {x * 2}"                  -- "double = 20"
+```
+
+---
+
+## 30. Full Example Programs
+
+### FizzBuzz
+
+```yolish
+for i in 1..101 {
+    if i % 15 == 0      { y.println("FizzBuzz") }
+    else if i % 3 == 0  { y.println("Fizz") }
+    else if i % 5 == 0  { y.println("Buzz") }
+    else                 { y.println(i) }
+}
+```
+
+### Fibonacci
+
+```yolish
+fn fib(n) {
+    if n <= 1 { return n }
+    return fib(n-1) + fib(n-2)
+}
+
+for i in 0..10 {
+    y.print(fib(i))
+    y.print(" ")
+}
+y.println("")
+-- 0 1 1 2 3 5 8 13 21 34
+```
+
+### Stack struct
+
+```yolish
+struct Stack { items }
+impl Stack {
+    fn push(self, val) {
+        y.push(self.items, val)
+        return self
+    }
+    fn pop(self)  { return y.pop(self.items) }
+    fn size(self) { return y.len(self.items) }
+    fn peek(self) { return self.items[self.size() - 1] }
+}
+
+let s = Stack { items: [] }
+s.push(1).push(2).push(3)
+y.println(s.size())    -- 3
+y.println(s.peek())    -- 3
+y.println(s.pop())     -- 3
+y.println(s.size())    -- 2
+```
+
+### Array pipeline
+
+```yolish
+-- sum of squares of odd numbers from 1 to 10
+let result = y.reduce(
+    y.map(
+        y.filter(y.range(1, 11), fn(x){ return x % 2 == 1 }),
+        fn(x){ return x * x }
+    ),
+    fn(acc, x){ return acc + x },
+    0
+)
+y.println(result)    -- 165
+```
+
+### Error handling with error objects
+
+```yolish
+fn safe_divide(a, b) {
+    if b == 0 { throw y.error("division by zero", 400) }
+    return a / b
+}
+
+try {
+    y.println(safe_divide(10, 2))     -- 5
+    y.println(safe_divide(10, 0))
+} catch(e) {
+    y.println("Error " + y.str(e.code) + ": " + e.message)
+}
+-- Error 400: division by zero
+```
+
+### Module usage
+
+```yolish
+-- mathlib.y
+fn square(x) { return x * x }
+fn cube(x)   { return x * x * x }
+```
+
+```yolish
+-- main.y
+import "mathlib.y" as math
+y.println(math.square(5))    -- 25
+y.println(math.cube(3))      -- 27
+```
+
+---
+
+## 31. Quick Reference
+
+```yolish
+-- Variables
+let x = 10
+var y2 = 20
+
+-- if / else if / else
+if x > 5 { ... } else if x == 5 { ... } else { ... }
+
+-- loops
+while i < 10 { i = i + 1 }
+for i in 0..10 { ... }
+for item in arr { ... }
+for ch in "str" { ... }
+
+-- break / continue
+while true { if done { break } if skip { continue } }
+
+-- match
+match x {
+    1       => "one"
+    2..5    => "two to four"
+    "hello" => "greeting"
+    true    => "yes"
+    n if n > 100 => "big"
+    _       => "default"
+}
+
+-- functions
+fn add(a, b) { return a + b }
+let r = add(3, 4)
+
+-- closures
+let double = fn(x) { return x * 2 }
+fn make_adder(n) { return fn(x) { return x + n } }
+
+-- arrays
+let arr = [1, 2, 3]
+arr[0]                y.len(arr)
+y.push(arr, 4)        y.pop(arr)
+y.slice(arr, 1, 3)
+
+-- structs
+struct Point { x, y }
+let p = Point { x: 1, y: 2 }
+p.x
+
+-- impl methods
+impl Point {
+    fn to_str(self) { return "{self.x},{self.y}" }
+}
+p.to_str()
+
+-- strings
+y.upper(s)   y.lower(s)   y.trim(s)   y.reverse(s)
+y.substr(s, 0, 5)          y.contains(s, "hi")
+y.split(s, ",")             y.join(arr, ", ")
+y.replace(s, "old", "new")  y.repeat(s, 3)
+y.format(r"{0} is {1}", name, age)
+"Hello {name}, age {age}!"   -- interpolation
+
+-- capabilities
+let f = cap.open("/file", 1)
+cap.read(f)    cap.write(f, data)    cap.close(f)
+
+-- import
+import "utils.y" as util
+util.greet("Diaz")
+
+-- try / catch / throw
+try { throw "oops" } catch(e) { y.println(e) }
+try { throw y.error("fail", 500) } catch(e) { y.println(e.message) }
+
+-- types
+y.typeof(42)         -- "int"
+y.is_str("hi")       -- true
+y.str(42)    y.int("5")    y.float("3.14")    y.bool("true")
+
+-- higher-order
+y.map(arr, fn(x) { return x * 2 })
+y.filter(arr, fn(x) { return x % 2 == 0 })
+y.reduce(arr, fn(acc, x) { return acc + x }, 0)
+y.sort(arr)    y.range(0, 10)    y.sum(arr)
+
+-- y.math
+y.math.sqrt(144)    y.math.pow(2, 10)    y.math.pi
+y.math.min(a, b)    y.math.max(a, b)    y.math.clamp(v, lo, hi)
+y.math.floor(n)     y.math.ceil(n)      y.math.sign(n)
+
+-- y.string
+y.string.pad_left(s, 10)    y.string.pad_right(s, 10)
+y.string.starts_with(s, p)  y.string.ends_with(s, p)
+
+-- y.array
+y.array.find(arr, fn)       y.array.contains(arr, v)
+y.array.index_of(arr, v)    y.array.join(arr, ", ")
+
+-- native compiler
+ys -c file.y
+ys -c file.y --target linux|windows|macos
+```
+
+---
+
+*Full changelog: see [README.md](README.md)*  
+*Build instructions: see [BUILD.md](BUILD.md)*
