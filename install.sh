@@ -6,7 +6,6 @@ set -e
 
 VERSION="v1.0"
 REPO="rahadbhuiya/yolish"
-INSTALL_DIR="/usr/local/bin"
 
 echo "=============================="
 echo "  Yolish $VERSION Installer"
@@ -14,15 +13,10 @@ echo "=============================="
 
 # Detect OS
 OS=$(uname -s)
-ARCH=$(uname -m)
 
 case "$OS" in
-  Linux)
-    BINARY="ys-linux"
-    ;;
-  Darwin)
-    BINARY="ys-macos"
-    ;;
+  Linux)  BINARY="ys-linux"  ;;
+  Darwin) BINARY="ys-macos"  ;;
   *)
     echo "Unsupported OS: $OS"
     echo "Please build from source: https://github.com/$REPO"
@@ -30,13 +24,27 @@ case "$OS" in
     ;;
 esac
 
-# Download binary
-URL="https://github.com/$REPO/releases/download/$VERSION/$BINARY"
+# Pick install dir: prefer /usr/local/bin if writable, else ~/.local/bin
+if [ -w "/usr/local/bin" ]; then
+    INSTALL_DIR="/usr/local/bin"
+elif [ "$(id -u)" = "0" ]; then
+    INSTALL_DIR="/usr/local/bin"
+else
+    INSTALL_DIR="$HOME/.local/bin"
+    mkdir -p "$INSTALL_DIR"
+    echo "Note: installing to $INSTALL_DIR (no sudo)"
+    echo "      Make sure $INSTALL_DIR is in your PATH."
+    echo "      Add this to ~/.bashrc or ~/.zshrc if needed:"
+    echo "        export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo ""
+fi
+
 DEST="$INSTALL_DIR/ys"
+URL="https://github.com/$REPO/releases/download/$VERSION/$BINARY"
 
 echo "Downloading $BINARY..."
 if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$URL" -o "$DEST"
+    curl -fSL "$URL" -o "$DEST"
 elif command -v wget >/dev/null 2>&1; then
     wget -q "$URL" -O "$DEST"
 else

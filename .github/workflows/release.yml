@@ -63,9 +63,10 @@ jobs:
 
             ### Install
 
-            **Windows** (PowerShell as Admin):
+            **Windows** (PowerShell as Admin — run from the folder where install.ps1 was downloaded):
             ```powershell
-            powershell -ExecutionPolicy Bypass -File install.ps1
+            # First download install.ps1, then from that folder run:
+            powershell -ExecutionPolicy Bypass -File .\install.ps1
             ```
 
             **Linux / macOS:**

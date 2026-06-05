@@ -40,7 +40,7 @@
 
 ```powershell
 # Run once as Administrator — downloads ys.exe and adds to PATH automatically
-powershell -ExecutionPolicy Bypass -File install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 After that: open any terminal and type `ys`.
