@@ -1,7 +1,0 @@
-[scheduler] intent=compute fn=fibonacci
-[scheduler] intent=compute fn=factorial
-[audit] tag=sensitive fn=get_secret args=0
-[audit] tag=write fn=save_log args=1
-[audit] tag=write fn=save_log args=1
-[audit] tag=auth fn=login args=2
-[audit] tag=auth fn=login args=2

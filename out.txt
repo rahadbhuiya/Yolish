@@ -1,5 +1,0 @@
-fib(8)     = 21
-10!        = 3628800
-secret     = top-secret-key-123
-login ok   = true
-login fail = false
