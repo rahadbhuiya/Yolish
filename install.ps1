@@ -13,29 +13,26 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] `
     [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 
+function Write-Header {
+    Write-Host ""
+    Write-Host "  ==============================" -ForegroundColor Cyan
+    Write-Host "    Yolish $version Installer" -ForegroundColor White
+    Write-Host "    The Exploidus Language" -ForegroundColor DarkGray
+    Write-Host "  ==============================" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+Write-Header
+
 if ($isAdmin) {
     $installDir = "$env:ProgramFiles\Yolish"
 } else {
     $installDir = "$env:LOCALAPPDATA\Yolish"
-    Write-Host ""
     Write-Host "  Note: Not running as Administrator." -ForegroundColor DarkYellow
     Write-Host "  Installing to: $installDir" -ForegroundColor DarkYellow
     Write-Host "  For a system-wide install, re-run as Administrator." -ForegroundColor DarkYellow
     Write-Host ""
 }
-
-function Write-Header {
-    Write-Host ""
-    Write-Host "  ██  ██  ██  ██   ██" -ForegroundColor Cyan
-    Write-Host "   ██  ██  ██   ██ " -ForegroundColor Cyan
-    Write-Host "    ██  ██  ██  ██  " -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  Yolish $version  Installer" -ForegroundColor White
-    Write-Host "  The Exploidus Language" -ForegroundColor DarkGray
-    Write-Host ""
-}
-
-Write-Header
 
 #  Step 1: Create install directory 
 Write-Host "[1/6] Creating install directory..." -ForegroundColor Yellow
@@ -66,23 +63,43 @@ if (Test-Path ".\ys.exe") {
 }
 Write-Host "      ys.exe installed" -ForegroundColor DarkGray
 
-#  Step 3: Copy ys.exe icon (.ico)
+#  Step 3: Get ys.ico (local or download)
 Write-Host "[3/6] Installing exe icon..." -ForegroundColor Yellow
 $exeIconSrc  = "$PSScriptRoot\icons\ys.ico"
 $exeIconPath = "$installDir\ys.ico"
+New-Item -ItemType Directory -Path "$installDir\icons" -Force | Out-Null
 
 if (Test-Path $exeIconSrc) {
     Copy-Item $exeIconSrc $exeIconPath -Force
-    Write-Host "      ys.exe icon copied: $exeIconPath" -ForegroundColor DarkGray
+    Write-Host "      ys.ico copied from local" -ForegroundColor DarkGray
 } else {
-    Write-Host "      Warning: ys.ico not found at $exeIconSrc (non-critical)" -ForegroundColor DarkYellow
-    $exeIconPath = $null
+    Write-Host "      Downloading ys.ico from GitHub..." -ForegroundColor DarkGray
+    try {
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$repo/master/icons/ys.ico" `
+            -OutFile $exeIconPath -UseBasicParsing
+        Write-Host "      ys.ico downloaded" -ForegroundColor DarkGray
+    } catch {
+        Write-Host "      Warning: Could not get ys.ico (non-critical)" -ForegroundColor DarkYellow
+        $exeIconPath = $null
+    }
 }
 
 #  Step 4: Copy .y file icon (convert PNG -> ICO for Windows)
 Write-Host "[4/6] Installing file icon..." -ForegroundColor Yellow
 $iconSrc  = "$PSScriptRoot\icons\file.png"
 $iconPath = "$installDir\file.ico"
+
+if (!(Test-Path $iconSrc)) {
+    Write-Host "      Downloading file.png from GitHub..." -ForegroundColor DarkGray
+    try {
+        New-Item -ItemType Directory -Path "$PSScriptRoot\icons" -Force | Out-Null
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$repo/master/icons/file.png" `
+            -OutFile $iconSrc -UseBasicParsing
+        Write-Host "      file.png downloaded" -ForegroundColor DarkGray
+    } catch {
+        Write-Host "      Warning: Could not download file.png (non-critical)" -ForegroundColor DarkYellow
+    }
+}
 
 if (Test-Path $iconSrc) {
     # Convert PNG to ICO using .NET System.Drawing
@@ -156,7 +173,12 @@ $env:PATH = "$env:PATH;$installDir"
 #  Step 6: Register .y file association 
 Write-Host "[6/6] Registering .y file type..." -ForegroundColor Yellow
 try {
-    $reg = "HKLM:\SOFTWARE\Classes"
+    # HKCU works without Admin; HKLM needs Admin (system-wide)
+    if ($isAdmin) {
+        $reg = "HKLM:\SOFTWARE\Classes"
+    } else {
+        $reg = "HKCU:\SOFTWARE\Classes"
+    }
 
     New-Item -Path "$reg\.y" -Force | Out-Null
     Set-ItemProperty -Path "$reg\.y" -Name "(Default)" -Value "YolishFile"
