@@ -215,7 +215,7 @@ ys.exe      Windows x86-64 binary (with icon)
 |--------|-------------|
 | `make` | Build `ys` for current OS |
 | `make windows` | Cross-compile `ys.exe` for Windows |
-| `make icons` | Generate `logo.ico` + PNG sizes from `logo.svg` |
+| `make icons` | Generate `ys.ico` + PNG sizes from `logo.svg` |
 | `make release` | Build both `ys` and `ys.exe` |
 | `make debug` | Build `ys_debug` with sanitizers |
 | `make clean` | Remove all build artifacts |
@@ -227,8 +227,8 @@ ys.exe      Windows x86-64 binary (with icon)
 Pushing a version tag triggers automatic builds for all platforms:
 
 ```bash
-git tag v1.1
-git push origin v1.1
+git tag v1.0
+git push origin v1.0
 ```
 
 GitHub Actions will:
@@ -238,6 +238,3 @@ GitHub Actions will:
 4. Create a GitHub Release with all three binaries attached
 
 Workflow file: [`.github/workflows/release.yml`](.github/workflows/release.yml)
-
----
-

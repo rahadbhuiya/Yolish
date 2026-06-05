@@ -32,10 +32,10 @@ static void run_repl(void){
 #endif
 
     if(ansi_ok){
-        fprintf(stdout, "\033[33mYolish 0.2\033[0m (Exploidus Runtime, Jun 2026)\n");
+        fprintf(stdout, "\033[33mYolish v1.0\033[0m (Exploidus Runtime)\n");
         fprintf(stdout, "Type \033[36m\"help\"\033[0m or \033[36m\"exit\"\033[0m to quit.\n\n");
     } else {
-        fprintf(stdout, "Yolish 0.2 (Exploidus Runtime, Jun 2026)\n");
+        fprintf(stdout, "Yolish v1.0 (Exploidus Runtime)\n");
         fprintf(stdout, "Type \"help\" or \"exit\" to quit.\n\n");
     }
 

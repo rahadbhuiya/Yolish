@@ -49,6 +49,11 @@ Exploidus — readable, safe, and practical.
 - `sys.exit(code)`
 - Exploidus OS system call integration
 
+### v1.4 — Error Messages & Diagnostics
+- Source locations in all error messages (file, line, column)
+- Better parse error recovery — report multiple errors in one run
+- Warning system for common mistakes (unused variables, unreachable code)
+
 ### v1.5 — Runtime Improvements
 - Garbage collector (mark-and-sweep)
 - Better error messages with file, line, and column:

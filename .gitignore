@@ -2,6 +2,7 @@ ys
 ys_debug
 *.o
 *.out
-.DS_Storeys
+.DS_Store
 ys_o2
-
+audit.log
+out.txt

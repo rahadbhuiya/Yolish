@@ -1,0 +1,33 @@
+Install Extension from .vsix File
+
+
+
+Open VS Code  
+Start Visual Studio Code.
+
+Open Command Palette
+
+Windows/Linux: Ctrl + Shift + P
+
+macOS: Cmd + Shift + P
+
+Run the Install Command  
+Type:
+
+Code
+Extensions: Install from VSIX...
+and select it.
+
+Choose the File  
+A file picker will open. Navigate to the location of your .vsix file, select it, and click Open.
+
+Reload if Needed  
+VS Code may ask you to reload after installation. Do that, and the extension will be ready to use.
+
+
+
+
+
+Tip: You can also install via terminal if you have the code command available:
+
+code --install-extension yolish-1.0.0.vsix

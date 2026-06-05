@@ -1279,13 +1279,8 @@ Running `ys` without arguments starts an interactive REPL session.
 
 ```
 $ ys
-  __  __     ___  __   _      __
- \ \/ /__  / (_)/ /_ | |_    / /
-  \  / _ \/ / / / __/| __ \  \ \
-  / / (_) / / /\ \_ | | | | / /
- /_/\___/_/_/_/ \__/|_| |_|/_/
-  v1.0 — The Exploidus Language
-  type 'exit' to quit
+Yolish v1.0 (Exploidus Runtime)
+Type "help" or "exit" to quit.
 
 ys> let x = 10
 ys> let y2 = 20
@@ -1670,5 +1665,5 @@ ys -c file.y --target linux|windows|macos
 
 ---
 
-*Full changelog: see [README.md](README.md)*  
+*Release history: see [README.md § Release History](README.md#release-history)*  
 *Build instructions: see [BUILD.md](BUILD.md)*

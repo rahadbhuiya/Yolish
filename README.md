@@ -306,4 +306,5 @@ ys examples/ann_test.y 2>audit.log   # save annotation logs separately
 
 See [DOCS.md](DOCS.md) for the full language reference.  
 See [BUILD.md](BUILD.md) for detailed build and release instructions.  
-See [ROADMAP.md](ROADMAP.md) for the full detailed roadmap.
+See [ROADMAP.md](ROADMAP.md) for the full detailed roadmap.  
+See [LICENSE](LICENSE) for the full MIT license text.
