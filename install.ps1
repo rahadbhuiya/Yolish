@@ -1,11 +1,28 @@
 # Yolish Installer for Windows
-# Run as Administrator:
-#   powershell -ExecutionPolicy Bypass -File install.ps1
+# Run from the folder where install.ps1 is located:
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1
+#
+# Admin is optional — without it, installs to %LOCALAPPDATA%\Yolish instead of Program Files.
 
 $ErrorActionPreference = "Stop"
-$version    = "v1.0"
-$repo       = "rahadbhuiya/yolish"
-$installDir = "$env:ProgramFiles\Yolish"
+$version = "v1.0"
+$repo    = "rahadbhuiya/yolish"
+
+# Use Program Files if Admin, else fallback to user-local dir (no Admin needed)
+$isAdmin = ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if ($isAdmin) {
+    $installDir = "$env:ProgramFiles\Yolish"
+} else {
+    $installDir = "$env:LOCALAPPDATA\Yolish"
+    Write-Host ""
+    Write-Host "  Note: Not running as Administrator." -ForegroundColor DarkYellow
+    Write-Host "  Installing to: $installDir" -ForegroundColor DarkYellow
+    Write-Host "  For a system-wide install, re-run as Administrator." -ForegroundColor DarkYellow
+    Write-Host ""
+}
 
 function Write-Header {
     Write-Host ""
@@ -51,7 +68,7 @@ Write-Host "      ys.exe installed" -ForegroundColor DarkGray
 
 #  Step 3: Copy ys.exe icon (.ico)
 Write-Host "[3/6] Installing exe icon..." -ForegroundColor Yellow
-$exeIconSrc  = "$env:HOMEDRIVE$env:HOMEPATH\icons\ys.ico"
+$exeIconSrc  = "$PSScriptRoot\icons\ys.ico"
 $exeIconPath = "$installDir\ys.ico"
 
 if (Test-Path $exeIconSrc) {
@@ -62,14 +79,54 @@ if (Test-Path $exeIconSrc) {
     $exeIconPath = $null
 }
 
-#  Step 4: Copy .y file icon (.png)
+#  Step 4: Copy .y file icon (convert PNG -> ICO for Windows)
 Write-Host "[4/6] Installing file icon..." -ForegroundColor Yellow
-$iconSrc  = "$env:HOMEDRIVE$env:HOMEPATH\icons\file.png"
-$iconPath = "$installDir\file.png"
+$iconSrc  = "$PSScriptRoot\icons\file.png"
+$iconPath = "$installDir\file.ico"
 
 if (Test-Path $iconSrc) {
-    Copy-Item $iconSrc $iconPath -Force
-    Write-Host "      Icon copied: $iconPath" -ForegroundColor DarkGray
+    # Convert PNG to ICO using .NET System.Drawing
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $png    = [System.Drawing.Image]::FromFile($iconSrc)
+        $bitmap = New-Object System.Drawing.Bitmap(256, 256)
+        $g      = [System.Drawing.Graphics]::FromImage($bitmap)
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.DrawImage($png, 0, 0, 256, 256)
+        $g.Dispose()
+        $png.Dispose()
+
+        # Write ICO file (header + 256x256 PNG chunk)
+        $ms = New-Object System.IO.MemoryStream
+        $bitmap.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bitmap.Dispose()
+        $pngBytes = $ms.ToArray()
+        $ms.Dispose()
+
+        $fs = [System.IO.File]::OpenWrite($iconPath)
+        $bw = New-Object System.IO.BinaryWriter($fs)
+        # ICO header
+        $bw.Write([uint16]0)      # reserved
+        $bw.Write([uint16]1)      # type: icon
+        $bw.Write([uint16]1)      # image count
+        # Directory entry (256x256 PNG)
+        $bw.Write([byte]0)        # width  (0 = 256)
+        $bw.Write([byte]0)        # height (0 = 256)
+        $bw.Write([byte]0)        # color count
+        $bw.Write([byte]0)        # reserved
+        $bw.Write([uint16]1)      # planes
+        $bw.Write([uint16]32)     # bit count
+        $bw.Write([uint32]$pngBytes.Length)
+        $bw.Write([uint32]22)     # offset (6 header + 16 dir entry)
+        $bw.Write($pngBytes)
+        $bw.Dispose()
+        $fs.Dispose()
+
+        Write-Host "      file.ico created: $iconPath" -ForegroundColor DarkGray
+    } catch {
+        Write-Host "      Warning: Could not convert icon (non-critical)" -ForegroundColor DarkYellow
+        $iconPath = $null
+    }
 } else {
     Write-Host "      Warning: file.png not found at $iconSrc (non-critical)" -ForegroundColor DarkYellow
     $iconPath = $null
@@ -77,14 +134,22 @@ if (Test-Path $iconSrc) {
 
 #  Step 5: Add to system PATH 
 Write-Host "[5/6] Adding to PATH..." -ForegroundColor Yellow
-$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-if ($machinePath -notlike "*$installDir*") {
-    [Environment]::SetEnvironmentVariable(
-        "Path", "$machinePath;$installDir", "Machine"
-    )
-    Write-Host "      Added: $installDir" -ForegroundColor DarkGray
+if ($isAdmin) {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if ($machinePath -notlike "*$installDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$machinePath;$installDir", "Machine")
+        Write-Host "      Added to system PATH: $installDir" -ForegroundColor DarkGray
+    } else {
+        Write-Host "      Already in system PATH" -ForegroundColor DarkGray
+    }
 } else {
-    Write-Host "      Already in PATH" -ForegroundColor DarkGray
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($userPath -notlike "*$installDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$userPath;$installDir", "User")
+        Write-Host "      Added to user PATH: $installDir" -ForegroundColor DarkGray
+    } else {
+        Write-Host "      Already in PATH" -ForegroundColor DarkGray
+    }
 }
 $env:PATH = "$env:PATH;$installDir"
 
