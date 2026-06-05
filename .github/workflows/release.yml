@@ -4,6 +4,10 @@ on:
   push:
     tags: ['v*']
 
+# Fix: grant write permission so GITHUB_TOKEN can create releases
+permissions:
+  contents: write
+
 jobs:
   #  Linux + Windows (cross-compile) 
   build-linux-windows:
@@ -37,8 +41,9 @@ jobs:
       - name: Build VS Code extension (.vsix)
         run: |
           npm install -g @vscode/vsce
-          cd vscode-yolish
+          cd vscode-extension/extension
           vsce package --no-dependencies
+          mv yolish-*.vsix ../../
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
@@ -54,7 +59,7 @@ jobs:
             | Windows x64 | [`ys.exe`](../../releases/download/${{ github.ref_name }}/ys.exe) |
             | Linux x64 | [`ys-linux`](../../releases/download/${{ github.ref_name }}/ys-linux) |
             | macOS x64 | [`ys-macos`](../../releases/download/${{ github.ref_name }}/ys-macos) |
-            | VS Code extension | [`yolish-${{ github.ref_name }}.vsix`](../../releases/download/${{ github.ref_name }}/yolish-${{ github.ref_name }}.vsix) |
+            | VS Code extension | [`yolish-1.0.0.vsix`](../../releases/download/${{ github.ref_name }}/yolish-1.0.0.vsix) |
 
             ### Install
 
@@ -74,7 +79,7 @@ jobs:
             ```
             or:
             ```cmd
-            code --install-extension yolish-${{ github.ref_name }}.vsix
+            code --install-extension yolish-1.0.0.vsix
             ```
 
             ### Usage
@@ -88,8 +93,8 @@ jobs:
             ys.exe
             install.ps1
             install.sh
-            logo.svg
-            vscode-yolish/yolish-*.vsix
+            icons/logo.svg
+            yolish-*.vsix
           draft: false
           prerelease: false
         env:
