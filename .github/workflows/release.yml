@@ -59,13 +59,12 @@ jobs:
             | Windows x64 | [`ys.exe`](../../releases/download/${{ github.ref_name }}/ys.exe) |
             | Linux x64 | [`ys-linux`](../../releases/download/${{ github.ref_name }}/ys-linux) |
             | macOS x64 | [`ys-macos`](../../releases/download/${{ github.ref_name }}/ys-macos) |
-            | VS Code extension | [`yolish-1.0.0.vsix`](../../releases/download/${{ github.ref_name }}/yolish-1.0.0.vsix) |
+            | VS Code extension | [`yolish-*.vsix`](../../releases/download/${{ github.ref_name }}/yolish-1.7.0.vsix) |
 
             ### Install
 
-            **Windows** (PowerShell as Admin — run from the folder where install.ps1 was downloaded):
+            **Windows** (PowerShell as Admin):
             ```powershell
-            # First download install.ps1, then from that folder run:
             powershell -ExecutionPolicy Bypass -File .\install.ps1
             ```
 
@@ -80,8 +79,18 @@ jobs:
             ```
             or:
             ```cmd
-            code --install-extension yolish-1.0.0.vsix
+            code --install-extension yolish-1.7.0.vsix
             ```
+
+            ### What's new in ${{ github.ref_name }}
+
+            - **v1.1** Float arithmetic (SSE2) + array literals in native compiler
+            - **v1.2** File I/O — `y.fs.*` (read, write, append, exists, list, mkdir, delete, rename, size, is_dir)
+            - **v1.3** Process & system — `process.spawn`, `process.env`, `sys.exit`, `sys.platform`
+            - **v1.4** Error messages — `file:line:col` format with typo suggestions
+            - **v1.6** Module system — relative imports (`./utils.y`), circular detection, caching
+            - **v1.7** Stdlib — `y.json`, `y.time`, `y.env`, `y.path`
+            - **v2.2** Enums — `enum Direction { North South East West }` with match integration
 
             ### Usage
             ```

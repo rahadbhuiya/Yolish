@@ -28,54 +28,27 @@ Exploidus — readable, safe, and practical.
 | v0.7 | `impl` methods, `y.input`, functional array builtins, dynamic allocation |
 | v0.8 | Match guards and pattern binding |
 | **v1.0** | **Native x86-64 compiler — Linux, Windows, macOS; logo; colored REPL** |
+| **v1.1** | **Float arithmetic (SSE2), array literals in native compiler** |
+| **v1.2** | **File I/O — `y.fs.read/write/append/exists/list/mkdir/delete/rename/size/is_dir`** |
+| **v1.3** | **Process & system — `process.spawn`, `process.env`, `sys.exit`, `sys.platform`** |
+| **v1.4** | **Error messages — `file:line:col` format, typo suggestions (Levenshtein)** |
+| **v1.6** | **Module system — relative imports (`./utils.y`), circular detection, import caching** |
+| **v1.7** | **Stdlib expansion — `y.json`, `y.time`, `y.env`, `y.path`** |
+| **v2.2** | **Enums — `enum Status { Ok NotFound Error }` with match integration** |
 
 ---
 
 ## Upcoming
 
-### v1.1 — Native Compiler Expansion
-- Float, arrays, and structs in native compiler
-- Exploidus OS native binary target
-- `y.print`/`y.println` for all types natively
-
-### v1.2 — File I/O
-- File read/write in native compiler
-- `y.fs.read(path)`, `y.fs.write(path, data)`, `y.fs.exists(path)`
-- Mapped to capability system — no file access without `cap.open`
-
-### v1.3 — Process and System
-- `process.spawn(cmd)` — run a subprocess
-- `process.env(key)` — read environment variables
-- `sys.exit(code)`
-- Exploidus OS system call integration
-
-### v1.4 — Error Messages & Diagnostics
-- Source locations in all error messages (file, line, column)
-- Better parse error recovery — report multiple errors in one run
-- Warning system for common mistakes (unused variables, unreachable code)
-
-### v1.5 — Runtime Improvements
-- Garbage collector (mark-and-sweep)
-- Better error messages with file, line, and column:
-  ```
-  main.y:15:8 — unexpected token '}'
-               expected expression
-  ```
+### v1.5 — Garbage Collector
+- Mark-and-sweep GC
+- Automatic memory reclamation for strings, arrays, structs
 - Runtime stack traces on uncaught throws
 
-### v1.6 — Module System
-- Relative imports (`import "./utils.y"`)
-- Circular import detection
-- Import caching (each file loaded once)
-
-### v1.7 — Standard Library Expansion
-| Library | What it adds |
-|---------|-------------|
-| `y.fs` | `read`, `write`, `exists`, `list`, `mkdir`, `delete` |
-| `y.json` | `parse()`, `stringify()` |
-| `y.time` | `now()`, `sleep()`, `format()` |
-| `y.env` | `get(key)`, `set(key, val)`, `all()` |
-| `y.path` | `join()`, `basename()`, `dirname()`, `ext()` |
+### v1.8 — Native Compiler Expansion
+- Exploidus OS native binary target
+- Structs in native compiler
+- `y.print`/`y.println` for all types natively compiled
 
 ### v2.0 — Self-Hosting
 - Yolish compiles itself
@@ -92,18 +65,6 @@ Exploidus — readable, safe, and practical.
 - `ys test` — run all `test` blocks in a file
 - `ys fmt` — auto-format `.y` files
 - `ys check` — type-check and lint without running
-
-### v2.2 — Enums
-- Simple enums for better pattern matching:
-  ```yolish
-  enum Status { Ok  NotFound  Error }
-
-  match response.status {
-      Status.Ok       => y.println("success")
-      Status.NotFound => y.println("not found")
-      Status.Error    => y.println("error")
-  }
-  ```
 
 ### v3.0 — Exploidus Integration
 - Deep Exploidus OS kernel integration

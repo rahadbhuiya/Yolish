@@ -56,7 +56,7 @@ int pe_write(const char *path,
              int *reloc_code, int *reloc_data, int nrelocs,
              int entry_off)
 {
-    /* --- compute layout --- */
+    /*  compute layout  */
     uint32_t text_vsize  = (uint32_t)code_len;
     uint32_t text_fsize  = align_up(text_vsize, FILE_ALIGN);
     uint32_t rdata_vsize = (uint32_t)(data_len + 256); /* extra for import strings */
@@ -70,7 +70,7 @@ int pe_write(const char *path,
     uint32_t rdata_rawoff = text_rawoff  + text_fsize;
     uint32_t idata_rawoff = rdata_rawoff + rdata_fsize;
 
-    /* --- apply data relocations --- */
+    /*  apply data relocations  */
     uint64_t code_va = IMAGE_BASE + text_rva;
     uint64_t data_va = IMAGE_BASE + rdata_rva;
     for(int i=0;i<nrelocs;i++){
@@ -84,7 +84,7 @@ int pe_write(const char *path,
         code[coff+3]=(uint8_t)(rel32>>24);
     }
 
-    /* --- build import table in a scratch buffer --- */
+    /*  build import table in a scratch buffer  */
     /* We need: IAT, INT, DLL names, function name strings */
     static uint8_t idata_buf[4096]; int idata_len=0;
     #define IDA(b) idata_buf[idata_len++]=(uint8_t)(b)

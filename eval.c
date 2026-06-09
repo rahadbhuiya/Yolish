@@ -1,8 +1,21 @@
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 #include "yolish.h"
 #include <string.h>
+#include <stdlib.h>
+#include <time.h>
+#ifndef _WIN32
+#  include <sys/stat.h>
+#  include <dirent.h>
+#  include <unistd.h>
+#else
+#  include <direct.h>
+#  include <windows.h>
+#  include <io.h>
+#endif
 
 /*  Memory pools  */
-static Env  envpool[4096]; static int envidx=0;
+static Env  envpool[512]; static int envidx=0; /* reduced from 4096 to keep BSS<2GB */
 /* No static arrpool — fully dynamic */
 static char nmpool[512][32]; static int nmidx=0;
 
@@ -109,6 +122,8 @@ static void int_to_str(int64_t n,char *buf){
 /*  Print value  */
 void ys_print_val(Val v){
     if(v.type==YS_INT){
+        /* v2.2: enum value has display name in sval */
+        if(v.sval[0] && strchr(v.sval,'.')){ ys_print(v.sval); return; }
         char b[24]; int_to_str(v.ival,b); puts(b);
     } else if(v.type==YS_FLOAT){
         char b[64];
@@ -163,23 +178,76 @@ static int g_throwing=0;     /* throw signal */
 static char g_throw_msg[512]; /* thrown message */
 static Val g_throw_val;       /* thrown value — use g_throw_msg for str content */
 static int g_breaking=0;   /* break signal — exit innermost loop */
-static int g_continuing=0; /* continue signal — skip to next iteration */
+static int g_continuing=0;
+
+/* v1.4: Levenshtein distance for typo suggestions in error messages */
+static int lev_dist(const char *a, const char *b){
+    int la=0,lb=0;
+    while(a[la])la++;
+    while(b[lb])lb++;
+    if(la>16||lb>16) return 99;
+    static int dp[17][17];
+    for(int i=0;i<=la;i++) dp[i][0]=i;
+    for(int j=0;j<=lb;j++) dp[0][j]=j;
+    for(int i=1;i<=la;i++)
+        for(int j=1;j<=lb;j++){
+            int cost=(a[i-1]==b[j-1])?0:1;
+            int del=dp[i-1][j]+1,ins=dp[i][j-1]+1,sub=dp[i-1][j-1]+cost;
+            dp[i][j]=del<ins?(del<sub?del:sub):(ins<sub?ins:sub);
+        }
+    return dp[la][lb];
+}
+
+/* v1.6 import cache */
+char g_imported_modules[64][512];
+int  g_nimported=0;
+static int g_idepth=0;
+static char g_istack[16][512];
+static int icached(const char *p){int i;for(i=0;i<g_nimported;i++)if(!strcmp(g_imported_modules[i],p))return 1;return 0;}
+static int icirc(const char *p){int i;for(i=0;i<g_idepth;i++)if(!strcmp(g_istack[i],p))return 1;return 0;}
+static void ipush(const char *p){if(g_idepth<16){snprintf(g_istack[g_idepth],512,"%s",p);g_idepth++;}}
+static void ipop(void){if(g_idepth>0)g_idepth--;}
+static void iadd(const char *p){if(g_nimported<64){snprintf(g_imported_modules[g_nimported],512,"%s",p);g_nimported++;}}
+static void iresolve(const char *raw,char *out,int sz){
+    extern char g_src_dir[512];
+    const char *base=(g_src_dir[0])?g_src_dir:".";
+    char tmp[1024];
+    /* cap input lengths to avoid truncation */
+    int blen=(int)strlen(base); if(blen>400)blen=400;
+    int rlen=(int)strlen(raw);  if(rlen>500)rlen=500;
+    int rel=(raw[0]=='.'&&(raw[1]=='/'||raw[1]=='.'));
+    if(rel){
+        snprintf(tmp,sizeof(tmp),"%.*s/%.*s",blen,base,rlen,raw);
+    } else {
+        snprintf(tmp,sizeof(tmp),"%.*s/%.*s",blen,base,rlen,raw);
+        FILE*f2=fopen(tmp,"r");
+        if(f2){fclose(f2);}
+        else{snprintf(tmp,sizeof(tmp),"%.*s",rlen,raw);}
+    }
+    /* safe copy to out */
+    int tl=(int)strlen(tmp);
+    if(tl>=sz) tl=sz-1;
+    memcpy(out,tmp,tl); out[tl]=0;
+    /* auto-append .y */
+    int l=(int)strlen(out);
+    if(l>1&&!(out[l-2]=='.'&&out[l-1]=='y')&&l+2<sz){out[l]='.';out[l+1]='y';out[l+2]=0;}
+}
+
 
 /*  Runtime error  */
-void ys_error(int line, const char *msg){
-    char buf[256]; int n=0;
-    const char *pre="[YS] error";
-    for(int i=0;pre[i];i++) buf[n++]=pre[i];
+char g_src_file[512]={0};
+void ys_error(int line, int col, const char *msg){
+    char buf[512]; int n=0;
+    if(g_src_file[0]){for(int i=0;g_src_file[i]&&n<200;i++)buf[n++]=g_src_file[i];buf[n++]=':';}else{buf[n++]='[';buf[n++]='Y';buf[n++]='S';buf[n++]=']';buf[n++]=':';}
     if(line>0){
-        const char *lp=" (line ";
-        for(int i=0;lp[i];i++) buf[n++]=lp[i];
-        char tmp[16]; int ti=0; int ln=line;
-        do { tmp[ti++]=(char)('0'+(ln%10)); ln/=10; } while(ln>0);
-        while(ti>0) buf[n++]=tmp[--ti];
-        buf[n++]=')';
+        char tmp[16];int ti=0,ln=line;
+        do{tmp[ti++]=(char)('0'+(ln%10));ln/=10;}while(ln>0);
+        while(ti>0){buf[n++]=tmp[--ti];}
+        buf[n++]=':';
+        if(col>0){ti=0;int cn=col;do{tmp[ti++]=(char)('0'+(cn%10));cn/=10;}while(cn>0);while(ti>0)buf[n++]=tmp[--ti];buf[n++]=':';}
     }
-    buf[n++]=':'; buf[n++]=' ';
-    for(int i=0;msg[i]&&n<250;i++) buf[n++]=msg[i];
+    buf[n++]=' ';
+    for(int i=0;msg[i]&&n<500;i++) buf[n++]=msg[i];
     buf[n++]='\n'; buf[n]=0;
     ys_print(buf);
 }
@@ -336,7 +404,30 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
 
     case ND_IDENT:{
         Val *v=env_get(env,n->name);
-        return v?*v:make_nil();
+        if(v) return *v;
+        /* builtin namespace prefixes are not variables */
+        { static const char *ns[]={"y","process","sys","cap",NULL};
+          for(int _k=0;ns[_k];_k++) if(strcmp(n->name,ns[_k])==0) return make_nil(); }
+        /* v1.4: undefined variable with typo suggestion */
+        char suggest[64]=""; int best=99;
+        Env *se=env;
+        while(se){
+            for(int _i=0;_i<se->count;_i++){
+                int d=lev_dist(n->name,se->names[_i]);
+                if(d>0 && d<best && d<=3){
+                    best=d;
+                    snprintf(suggest,64,"%s",se->names[_i]);
+                }
+            }
+            se=se->parent;
+        }
+        char errmsg[256];
+        if(suggest[0])
+            snprintf(errmsg,sizeof(errmsg),"undefined '%s' — did you mean '%s'?",n->name,suggest);
+        else
+            snprintf(errmsg,sizeof(errmsg),"undefined '%s'",n->name);
+        ys_error(g_cur_line,0,errmsg);
+        return make_nil();
     }
 
     case ND_LET: case ND_VAR:{
@@ -386,10 +477,20 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                 if(strcmp_u(obj.field_names[i],n->name)==0)
                     return obj.field_vals[i];
             }
-            ys_error(g_cur_line,"unknown struct field");
+            ys_error(g_cur_line,0,"unknown struct field");
             return make_nil();
         }
-        /* dot on non-struct: treat as builtin namespace (y.print etc handled via ND_CALL) */
+        /* v2.2: enum access — sentinel has sval="enum:EnumName" */
+        if(obj.type==YS_INT && obj.sval[0]=='e' && obj.sval[1]=='n'
+           && obj.sval[2]=='u' && obj.sval[3]=='m' && obj.sval[4]==':'){
+            /* look up "EnumName.Variant" in env */
+            char qname[128];
+            snprintf(qname,sizeof(qname),"%.60s.%.60s",&obj.sval[5],n->name);
+            Val *ev=env_get(env,qname);
+            if(ev) return *ev;
+            return make_nil();
+        }
+        /* dot on non-struct/non-enum: treat as builtin namespace */
         return make_nil();
     }
 
@@ -424,6 +525,23 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     }
 
     /*  Struct definition  */
+    case ND_ENUM:{
+        /* v2.2: register EnumName.Variant (qualified only, saves env slots) */
+        for(int i=0;i<n->stmtc;i++){
+            Node *v=n->stmts[i];
+            char qname[128];
+            snprintf(qname,sizeof(qname),"%s.%s",n->name,v->name);
+            Val ev; ev.type=YS_INT; ev.ival=(int64_t)i;
+            snprintf(ev.sval,sizeof(ev.sval),"%s.%s",n->name,v->name);
+            env_def(env,qname,ev);
+        }
+        /* sentinel: env["Direction"] = int(4) with sval="enum:Direction" */
+        Val meta; meta.type=YS_INT; meta.ival=(int64_t)n->stmtc;
+        for(int i=0;i<(int)sizeof(meta.sval);i++) meta.sval[i]=0;
+        snprintf(meta.sval,sizeof(meta.sval),"enum:%s",n->name);
+        env_def(env,n->name,meta);
+        return make_nil();
+    }
     case ND_STRUCT:{
         if(nstructs<MAX_STRUCTS){
             int si=nstructs++;
@@ -897,7 +1015,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
             int si=0; while(n->sval[si]&&di<638){rel[di++]=n->sval[si++];} rel[di]=0;
             mf=fopen(rel,"r");
         }
-        if(!mf){ ys_error(g_cur_line,"cannot open module file"); return make_nil(); }
+        if(!mf){ ys_error(g_cur_line,0,"cannot open module file"); return make_nil(); }
         int msz=(int)fread(mod_src,1,sizeof(mod_src)-1,mf);
         fclose(mf); mod_src[msz]=0;
         /* parse and eval in isolated env */
@@ -921,19 +1039,28 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     }
 
     case ND_IMPORT:{
-        /* load and eval another .y file */
-        /* path is relative to source dir — chdir in main.c handles resolution */
+        char resolved[512]; iresolve(n->sval,resolved,sizeof(resolved));
+        if(icached(resolved)) return make_nil();
+        if(icirc(resolved)){ys_error(g_cur_line,0,"circular import");return make_nil();}
+        ipush(resolved);
         static char import_src[65536];
-        FILE *f=fopen(n->sval,"r");
-        if(!f){
-            ys_error(g_cur_line,"cannot open import file");
-            return make_nil();
-        }
-        int sz=(int)fread(import_src,1,sizeof(import_src)-1,f);
-        fclose(f); import_src[sz]=0;
+        FILE *impf=fopen(resolved,"r");
+        if(!impf){char em[300];snprintf(em,sizeof(em),"cannot import: %s",resolved);
+                  ys_error(g_cur_line,0,em);ipop();return make_nil();}
+        int sz=(int)fread(import_src,1,sizeof(import_src)-1,impf);
+        fclose(impf); import_src[sz]=0;
+        extern char g_src_dir[512];
+        char odir[512],ofile[512];
+        snprintf(odir,512,"%s",g_src_dir);snprintf(ofile,512,"%s",g_src_file);
+        {int last=-1,rl=(int)strlen(resolved);
+         for(int i=0;i<rl;i++){char ch=resolved[i];if(ch==47||ch==92)last=i;}
+         if(last>=0){strncpy(g_src_dir,resolved,last);g_src_dir[last]=0;}
+         strncpy(g_src_file,resolved,511);}
         Lexer il; lex_init(&il,import_src,sz);
         Node *iprog=parse_program(&il);
-        eval_program(iprog,env); /* share same env = exported symbols */
+        eval_program(iprog,env);
+        snprintf(g_src_dir,512,"%s",odir);snprintf(g_src_file,512,"%s",ofile);
+        iadd(resolved);ipop();
         return make_nil();
     }
 
@@ -1560,7 +1687,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     if(strcmp_u(name,"y.math.sqrt")==0){
         int s0=(argc>1)?1:0; Val v=eval_node(args[s0],env);
         double d=val_float(v);
-        if(d<0.0){ys_error(0,"sqrt of negative");return make_nil();}
+        if(d<0.0){ys_error(0,0,"sqrt of negative");return make_nil();}
         if(d==0.0) return v.type==YS_FLOAT?make_float(0.0):make_int(0);
         double x=d,y2=1.0;
         for(int _i=0;_i<60&&(x-y2)>0.000001;_i++){x=(x+y2)/2.0;y2=d/x;}
@@ -1870,6 +1997,613 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         Val cap=eval_node(args[s],env);
         return make_int(cap.type==YS_CAP?cap.cap_perm:0);
     }
+
+
+    /* y.fs.read(path) → string */
+    if(strcmp_u(name,"y.fs.read")==0){
+        int s=(argc>1)?1:0;
+        Val path_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        FILE *fp=fopen(path_v.sval,"rb");
+        if(!fp){ g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"y.fs.read: cannot open '%.100s'",path_v.sval); return make_nil(); }
+        static char fbuf[8192];
+        int n=(int)fread(fbuf,1,8191,fp);
+        if(n<0) n=0;
+        fbuf[n]=0; fclose(fp);
+        return make_str(fbuf);
+    }
+
+    /* y.fs.write(path, data) → int (bytes written) */
+    if(strcmp_u(name,"y.fs.write")==0){
+        int s=(argc>2)?1:0;
+        Val path_v=eval_node(args[s],env);
+        Val data_v=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        FILE *fp=fopen(path_v.sval,"wb");
+        if(!fp){ g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"y.fs.write: cannot open '%.100s'",path_v.sval); return make_nil(); }
+        int n=(int)fwrite(data_v.sval,1,str_len_u(data_v.sval),fp);
+        fclose(fp); return make_int(n);
+    }
+
+    /* y.fs.append(path, data) → int */
+    if(strcmp_u(name,"y.fs.append")==0){
+        int s=(argc>2)?1:0;
+        Val path_v=eval_node(args[s],env);
+        Val data_v=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        FILE *fp=fopen(path_v.sval,"ab");
+        if(!fp) return make_int(-1);
+        int n=(int)fwrite(data_v.sval,1,str_len_u(data_v.sval),fp);
+        fclose(fp); return make_int(n);
+    }
+
+    /* y.fs.exists(path) → bool */
+    if(strcmp_u(name,"y.fs.exists")==0){
+        int s=(argc>1)?1:0;
+        Val path_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+#ifndef _WIN32
+        struct stat st; return make_bool(stat(path_v.sval,&st)==0);
+#else
+        return make_bool(_access(path_v.sval,0)==0);
+#endif
+    }
+
+    /* y.fs.list(dir) → array of strings */
+    if(strcmp_u(name,"y.fs.list")==0){
+        int s=(argc>1)?1:0;
+        Val path_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        Val result=make_nil(); result.type=YS_ARR;
+        result.arr_data=alloc_arr(256); result.arr_len=0;
+#ifndef _WIN32
+        DIR *d=opendir(path_v.sval);
+        if(!d) return result;
+        struct dirent *entry;
+        while((entry=readdir(d))!=NULL && result.arr_len<255){
+            if(strcmp(entry->d_name,".")==0||strcmp(entry->d_name,"..")==0) continue;
+            result.arr_data[result.arr_len++]=make_str(entry->d_name);
+        }
+        closedir(d);
+#else
+        WIN32_FIND_DATA fd; char pattern[512];
+        snprintf(pattern,sizeof(pattern),"%s\\*",path_v.sval);
+        HANDLE h=FindFirstFile(pattern,&fd);
+        if(h==INVALID_HANDLE_VALUE) return result;
+        do {
+            if(strcmp(fd.cFileName,".")==0||strcmp(fd.cFileName,"..")==0) continue;
+            if(result.arr_len<255) result.arr_data[result.arr_len++]=make_str(fd.cFileName);
+        } while(FindNextFile(h,&fd));
+        FindClose(h);
+#endif
+        return result;
+    }
+
+    /* y.fs.mkdir(path) → bool */
+    if(strcmp_u(name,"y.fs.mkdir")==0){
+        int s=(argc>1)?1:0;
+        Val path_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+#ifndef _WIN32
+        return make_bool(mkdir(path_v.sval,0755)==0);
+#else
+        return make_bool(_mkdir(path_v.sval)==0);
+#endif
+    }
+
+    /* y.fs.delete(path) → bool */
+    if(strcmp_u(name,"y.fs.delete")==0){
+        int s=(argc>1)?1:0;
+        Val path_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        return make_bool(remove(path_v.sval)==0);
+    }
+
+    /* y.fs.rename(old, new) → bool */
+    if(strcmp_u(name,"y.fs.rename")==0){
+        int s=(argc>2)?1:0;
+        Val old_v=eval_node(args[s],env);
+        Val new_v=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        return make_bool(rename(old_v.sval,new_v.sval)==0);
+    }
+
+    /* y.fs.size(path) → int (bytes, -1 on error) */
+    if(strcmp_u(name,"y.fs.size")==0){
+        int s=(argc>1)?1:0;
+        Val path_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+#ifndef _WIN32
+        struct stat st;
+        if(stat(path_v.sval,&st)!=0) return make_int(-1);
+        return make_int((int64_t)st.st_size);
+#else
+        HANDLE h=CreateFile(path_v.sval,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
+        if(h==INVALID_HANDLE_VALUE) return make_int(-1);
+        LARGE_INTEGER sz; GetFileSizeEx(h,&sz); CloseHandle(h);
+        return make_int((int64_t)sz.QuadPart);
+#endif
+    }
+
+    /* y.fs.is_dir(path) → bool */
+    if(strcmp_u(name,"y.fs.is_dir")==0){
+        int s=(argc>1)?1:0;
+        Val path_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+#ifndef _WIN32
+        struct stat st;
+        if(stat(path_v.sval,&st)!=0) return make_bool(0);
+        return make_bool(S_ISDIR(st.st_mode));
+#else
+        DWORD attr=GetFileAttributes(path_v.sval);
+        return make_bool(attr!=INVALID_FILE_ATTRIBUTES&&(attr&FILE_ATTRIBUTE_DIRECTORY));
+#endif
+    }
+
+/* 
+   v1.3  —  Process & System  (process.* / sys.*)
+*/
+
+    /* process.spawn(cmd) → string (stdout captured) */
+    if(strcmp_u(name,"process.spawn")==0){
+        int s=(argc>1)?1:0;
+        Val cmd_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        static char pbuf[8192]; int pn=0;
+#ifndef _WIN32
+        FILE *pp=popen(cmd_v.sval,"r");
+#else
+        FILE *pp=_popen(cmd_v.sval,"r");
+#endif
+        if(!pp){ g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"process.spawn: failed to run '%.100s'",cmd_v.sval); return make_nil(); }
+        int c;
+        while(pn<8190 && (c=fgetc(pp))!=EOF) pbuf[pn++]=(char)c;
+        pbuf[pn]=0;
+#ifndef _WIN32
+        pclose(pp);
+#else
+        _pclose(pp);
+#endif
+        return make_str(pbuf);
+    }
+
+    /* process.spawn_code(cmd) → int (exit code) */
+    if(strcmp_u(name,"process.spawn_code")==0){
+        int s=(argc>1)?1:0;
+        Val cmd_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        int code=system(cmd_v.sval);
+        return make_int(code);
+    }
+
+    /* process.env(key) → string or nil */
+    if(strcmp_u(name,"process.env")==0){
+        int s=(argc>1)?1:0;
+        Val key_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        const char *val_ptr=getenv(key_v.sval);
+        return val_ptr ? make_str(val_ptr) : make_nil();
+    }
+
+    /* process.pid() → int */
+    if(strcmp_u(name,"process.pid")==0){
+#ifndef _WIN32
+        return make_int((int64_t)getpid());
+#else
+        return make_int((int64_t)GetCurrentProcessId());
+#endif
+    }
+
+    /* sys.exit(code?) */
+    if(strcmp_u(name,"sys.exit")==0){
+        int s=(argc>1)?1:0;
+        int code=argc>s?(int)val_int(eval_node(args[s],env)):0;
+        exit(code);
+    }
+
+    /* sys.platform() → "linux" | "windows" | "macos" */
+    if(strcmp_u(name,"sys.platform")==0){
+#if defined(_WIN32)
+        return make_str("windows");
+#elif defined(__APPLE__)
+        return make_str("macos");
+#else
+        return make_str("linux");
+#endif
+    }
+
+/* 
+   v1.7  —  y.time.*
+*/
+
+    /* y.time.now() → int (milliseconds since epoch) */
+    if(strcmp_u(name,"y.time.now")==0){
+#ifndef _WIN32
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME,&ts);
+        return make_int((int64_t)ts.tv_sec*1000 + ts.tv_nsec/1000000);
+#else
+        FILETIME ft; GetSystemTimeAsFileTime(&ft);
+        int64_t t=((int64_t)ft.dwHighDateTime<<32)|ft.dwLowDateTime;
+        /* convert from 100ns intervals since 1601 to ms since 1970 */
+        return make_int(t/10000 - 11644473600000LL);
+#endif
+    }
+
+    /* y.time.sleep(ms) → nil */
+    if(strcmp_u(name,"y.time.sleep")==0){
+        int s=(argc>1)?1:0;
+        int64_t ms=val_int(eval_node(args[s],env));
+        if(g_throwing) return make_nil();
+#ifndef _WIN32
+        { struct timespec _ts; _ts.tv_sec=ms/1000; _ts.tv_nsec=(ms%1000)*1000000L; nanosleep(&_ts,NULL); }
+#else
+        Sleep((DWORD)ms);
+#endif
+        return make_nil();
+    }
+
+    /* y.time.format(ms, fmt?) → string */
+    if(strcmp_u(name,"y.time.format")==0){
+        int s=(argc>1)?1:0;
+        int64_t ms=val_int(eval_node(args[s],env));
+        if(g_throwing) return make_nil();
+        const char *fmt="%Y-%m-%d %H:%M:%S";
+        if(argc>s+1){ Val fv=eval_node(args[s+1],env); if(fv.type==YS_STR) fmt=fv.sval; }
+        time_t t=(time_t)(ms/1000);
+        struct tm *tm_info=localtime(&t);
+        static char tbuf[128];
+        strftime(tbuf,sizeof(tbuf),fmt,tm_info);
+        return make_str(tbuf);
+    }
+
+    /* y.time.unix() → int (seconds since epoch) */
+    if(strcmp_u(name,"y.time.unix")==0){
+        return make_int((int64_t)time(NULL));
+    }
+
+/*
+   v1.7  —  y.env.*
+*/
+
+    /* y.env.get(key) → string or nil */
+    if(strcmp_u(name,"y.env.get")==0){
+        int s=(argc>1)?1:0;
+        Val k=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        const char *v=getenv(k.sval);
+        return v ? make_str(v) : make_nil();
+    }
+
+    /* y.env.set(key, val) → nil */
+    if(strcmp_u(name,"y.env.set")==0){
+        int s=(argc>2)?1:0;
+        Val k=eval_node(args[s],env);
+        Val v=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+#ifndef _WIN32
+        setenv(k.sval,v.sval,1);
+#else
+        _putenv_s(k.sval,v.sval);
+#endif
+        return make_nil();
+    }
+
+    /* y.env.unset(key) → nil */
+    if(strcmp_u(name,"y.env.unset")==0){
+        int s=(argc>1)?1:0;
+        Val k=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+#ifndef _WIN32
+        unsetenv(k.sval);
+#else
+        _putenv_s(k.sval,"");
+#endif
+        return make_nil();
+    }
+
+/* 
+   v1.7  —  y.path.*
+*/
+
+    /* y.path.join(a, b, ...) → string */
+    if(strcmp_u(name,"y.path.join")==0){
+        int s=(argc>1)?1:0;
+        static char pb[512]; int pi=0;
+        for(int i=s;i<argc&&pi<508;i++){
+            Val seg=eval_node(args[i],env);
+            if(g_throwing) return make_nil();
+            /* add separator if needed */
+            if(pi>0 && pb[pi-1]!='/' && pb[pi-1]!='\\') pb[pi++]='/';
+            for(int j=0;seg.sval[j]&&pi<508;j++) pb[pi++]=seg.sval[j];
+        }
+        pb[pi]=0;
+        return make_str(pb);
+    }
+
+    /* y.path.basename(path) → string  e.g. "/a/b/file.y" → "file.y" */
+    if(strcmp_u(name,"y.path.basename")==0){
+        int s=(argc>1)?1:0;
+        Val p=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        int len=str_len_u(p.sval), last=-1;
+        for(int i=0;i<len;i++) if(p.sval[i]=='/'||p.sval[i]=='\\') last=i;
+        return make_str(p.sval+last+1);
+    }
+
+    /* y.path.dirname(path) → string  e.g. "/a/b/file.y" → "/a/b" */
+    if(strcmp_u(name,"y.path.dirname")==0){
+        int s=(argc>1)?1:0;
+        Val p=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        int len=str_len_u(p.sval), last=-1;
+        for(int i=0;i<len;i++) if(p.sval[i]=='/'||p.sval[i]=='\\') last=i;
+        if(last<0) return make_str(".");
+        static char db[512]; int di=0;
+        for(;di<last&&di<510;di++) db[di]=p.sval[di];
+        db[di]=0; return make_str(db);
+    }
+
+    /* y.path.ext(path) → string  e.g. "file.y" → ".y" */
+    if(strcmp_u(name,"y.path.ext")==0){
+        int s=(argc>1)?1:0;
+        Val p=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        int len=str_len_u(p.sval), last=-1;
+        for(int i=0;i<len;i++) if(p.sval[i]=='.') last=i;
+        if(last<0) return make_str("");
+        return make_str(p.sval+last);
+    }
+
+    /* y.path.stem(path) → string  e.g. "file.y" → "file" */
+    if(strcmp_u(name,"y.path.stem")==0){
+        int s=(argc>1)?1:0;
+        Val p=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        int len=str_len_u(p.sval);
+        int last_slash=-1, last_dot=-1;
+        for(int i=0;i<len;i++){
+            if(p.sval[i]=='/'||p.sval[i]=='\\') last_slash=i;
+            if(p.sval[i]=='.') last_dot=i;
+        }
+        int start=last_slash+1;
+        int end=(last_dot>start)?last_dot:len;
+        static char stb[256]; int si=0;
+        for(int i=start;i<end&&si<254;i++) stb[si++]=p.sval[i];
+        stb[si]=0; return make_str(stb);
+    }
+
+    /* y.path.abs(path) - string */
+    if(strcmp_u(name,"y.path.abs")==0){
+        int sv=(argc>1)?1:0;
+        Val pv=eval_node(args[sv],env);
+        if(g_throwing) return make_nil();
+        static char absbuf[1024];
+#ifndef _WIN32
+        /* already absolute */
+        if((unsigned char)pv.sval[0]==47u){
+            snprintf(absbuf,sizeof(absbuf),"%.1000s",pv.sval);
+            return make_str(absbuf);
+        }
+        /* "." -> cwd */
+        { char cwd[512];
+          if(getcwd(cwd,sizeof(cwd))){
+            if(pv.sval[0]=='.'&&pv.sval[1]==0){ return make_str(cwd); }
+            snprintf(absbuf,sizeof(absbuf),"%.400s/%.500s",cwd,pv.sval);
+            return make_str(absbuf);
+          }
+        }
+#else
+        if(GetFullPathName(pv.sval,1024,absbuf,NULL)) return make_str(absbuf);
+#endif
+        return pv;
+    }
+
+/* 
+   v1.7  —  y.json.*   (simple, no nested objects in parse)
+*/
+
+    /* y.json.stringify(val) → string */
+    if(strcmp_u(name,"y.json.stringify")==0){
+        int s=(argc>1)?1:0;
+        Val v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        static char jb[8192]; int ji=0;
+
+        /* inline serializer — handles str/int/float/bool/nil/arr/struct */
+        #define JS_CHR(c) do{ if(ji<8188) jb[ji++]=(c); }while(0)
+        #define JS_STR(p) do{ const char *_p=(p); while(*_p&&ji<8186) jb[ji++]=*_p++; }while(0)
+
+        if(v.type==YS_STR){
+            JS_CHR('"');
+            for(int i=0;v.sval[i]&&ji<8184;i++){
+                char _c=v.sval[i];
+                if(_c=='"'){JS_CHR('\\');JS_CHR('"');}
+                else if(_c=='\\'){JS_CHR('\\');JS_CHR('\\');}
+                else if(_c=='\n'){JS_CHR('\\');JS_CHR('n');}
+                else if(_c=='\t'){JS_CHR('\\');JS_CHR('t');}
+                else JS_CHR(_c);
+            }
+            JS_CHR('"');
+        } else if(v.type==YS_INT){
+            char tmp[24]; int_to_str(v.ival,tmp); JS_STR(tmp);
+        } else if(v.type==YS_FLOAT){
+            char tmp[32]; snprintf(tmp,sizeof(tmp),"%g",v.fval); JS_STR(tmp);
+        } else if(v.type==YS_BOOL){
+            JS_STR(v.bval?"true":"false");
+        } else if(v.type==YS_NIL){
+            JS_STR("null");
+        } else if(v.type==YS_ARR){
+            JS_CHR('[');
+            for(int i=0;i<v.arr_len;i++){
+                if(i>0){JS_CHR(',');JS_CHR(' ');}
+                Val el=v.arr_data[i];
+                if(el.type==YS_STR){ JS_CHR('"'); JS_STR(el.sval); JS_CHR('"'); }
+                else if(el.type==YS_INT){ char tmp[24]; int_to_str(el.ival,tmp); JS_STR(tmp); }
+                else if(el.type==YS_FLOAT){ char tmp[32]; snprintf(tmp,sizeof(tmp),"%g",el.fval); JS_STR(tmp); }
+                else if(el.type==YS_BOOL){ JS_STR(el.bval?"true":"false"); }
+                else { JS_STR("null"); }
+            }
+            JS_CHR(']');
+        } else if(v.type==YS_STRUCT){
+            JS_CHR('{');
+            for(int i=0;i<v.field_count;i++){
+                if(i>0){JS_CHR(',');JS_CHR(' ');}
+                JS_CHR('"'); JS_STR(v.field_names[i]); JS_CHR('"'); JS_CHR(':'); JS_CHR(' ');
+                Val fv=v.field_vals[i];
+                if(fv.type==YS_STR){ JS_CHR('"'); JS_STR(fv.sval); JS_CHR('"'); }
+                else if(fv.type==YS_INT){ char tmp[24]; int_to_str(fv.ival,tmp); JS_STR(tmp); }
+                else if(fv.type==YS_FLOAT){ char tmp[32]; snprintf(tmp,sizeof(tmp),"%g",fv.fval); JS_STR(tmp); }
+                else if(fv.type==YS_BOOL){ JS_STR(fv.bval?"true":"false"); }
+                else { JS_STR("null"); }
+            }
+            JS_CHR('}');
+        }
+        #undef JS_CHR
+        #undef JS_STR
+        jb[ji]=0; return make_str(jb);
+    }
+
+    /* y.json.parse(str) → value */
+    if(strcmp_u(name,"y.json.parse")==0){
+        int s=(argc>1)?1:0;
+        Val src_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        const char *js=src_v.sval; int jp=0;
+
+        /* skip whitespace helper */
+        #define JP_SKIP while(js[jp]==' '||js[jp]=='\t'||js[jp]=='\n'||js[jp]=='\r')jp++
+
+        JP_SKIP;
+        /* string */
+        if(js[jp]=='"'){
+            jp++;
+            static char jsbuf[8192]; int jsi=0;
+            while(js[jp]&&js[jp]!='"'){
+                if(js[jp]=='\\'&&js[jp+1]){
+                    jp++;
+                    if(js[jp]=='n'&&jsi<8190) jsbuf[jsi++]='\n';
+                    else if(js[jp]=='t'&&jsi<8190) jsbuf[jsi++]='\t';
+                    else if(jsi<8190) jsbuf[jsi++]=js[jp];
+                } else { if(jsi<8190) jsbuf[jsi++]=js[jp]; }
+                jp++;
+            }
+            jsbuf[jsi]=0;
+            return make_str(jsbuf);
+        }
+        /* boolean/null */
+        if(js[jp]=='t'&&js[jp+1]=='r'&&js[jp+2]=='u'&&js[jp+3]=='e') return make_bool(1);
+        if(js[jp]=='f'&&js[jp+1]=='a'&&js[jp+2]=='l'&&js[jp+3]=='s'&&js[jp+4]=='e') return make_bool(0);
+        if(js[jp]=='n'&&js[jp+1]=='u'&&js[jp+2]=='l'&&js[jp+3]=='l') return make_nil();
+        /* number */
+        if(js[jp]=='-'||(js[jp]>='0'&&js[jp]<='9')){
+            int neg=0; if(js[jp]=='-'){neg=1;jp++;}
+            int64_t iv=0;
+            while(js[jp]>='0'&&js[jp]<='9'){iv=iv*10+(js[jp]-'0');jp++;}
+            if(js[jp]=='.'){
+                jp++; double fv=(double)iv, div=1.0;
+                while(js[jp]>='0'&&js[jp]<='9'){fv=fv*10+(js[jp]-'0');div*=10;jp++;}
+                return make_float(neg?-fv/div:fv/div);
+            }
+            return make_int(neg?-iv:iv);
+        }
+        /* array */
+        if(js[jp]=='['){
+            jp++;
+            Val result=make_nil(); result.type=YS_ARR;
+            result.arr_data=alloc_arr(128); result.arr_len=0;
+            while(js[jp]&&js[jp]!=']'&&result.arr_len<127){
+                while(js[jp]==' '||js[jp]=='\t'||js[jp]=='\n'||js[jp]=='\r'){jp++;}
+                if(js[jp]==']') break;
+                if(js[jp]==','){jp++;continue;}
+                Val el=make_nil();
+                if(js[jp]=='"'){
+                    jp++; static char jab[512]; int jai=0;
+                    while(js[jp]&&js[jp]!='"'&&jai<510) jab[jai++]=js[jp++];
+                    jab[jai]=0; if(js[jp]=='"') jp++;
+                    el=make_str(jab);
+                } else if(js[jp]=='-'||(js[jp]>='0'&&js[jp]<='9')){
+                    int ng2=0; if(js[jp]=='-'){ng2=1;jp++;}
+                    int64_t n2=0;
+                    while(js[jp]>='0'&&js[jp]<='9'){n2=n2*10+(js[jp]-'0');jp++;}
+                    el=make_int(ng2?-n2:n2);
+                } else if(js[jp]=='t'){el=make_bool(1);jp+=4;}
+                else if(js[jp]=='f'){el=make_bool(0);jp+=5;}
+                else if(js[jp]=='n'){jp+=4;}
+                else {jp++; continue;}
+                result.arr_data[result.arr_len++]=el;
+            }
+            if(js[jp]==']') jp++;
+            #undef JP_SKIP
+            return result;
+        }
+        /* object → struct */
+        if(js[jp]=='{'){
+            jp++;
+            Val result=make_nil(); result.type=YS_STRUCT;
+            result.struct_name[0]=0; int fc=0;
+            result.field_vals=alloc_fld(32);
+            result.field_names=alloc_nm(32);
+            while(js[jp]&&js[jp]!='}'&&fc<31){
+                while(js[jp]==' '||js[jp]=='\t'||js[jp]=='\n'||js[jp]=='\r'){jp++;}
+                if(js[jp]=='}') break;
+                if(js[jp]==','||js[jp]==':'){jp++;continue;}
+                if(js[jp]!='"'){jp++;continue;}
+                /* key */
+                jp++; char key[64]; int ki=0;
+                while(js[jp]&&js[jp]!='"'&&ki<62) key[ki++]=js[jp++];
+                key[ki]=0; if(js[jp]=='"') jp++;
+                while(js[jp]==' '||js[jp]=='\t'||js[jp]=='\n'||js[jp]=='\r'){jp++;}
+                if(js[jp]==':') jp++;
+                while(js[jp]==' '||js[jp]=='\t'||js[jp]=='\n'||js[jp]=='\r')jp++;
+                /* value */
+                Val fval_v=make_nil();
+                if(js[jp]=='"'){
+                    jp++; static char fvb[512]; int fvi=0;
+                    while(js[jp]&&js[jp]!='"'&&fvi<510) fvb[fvi++]=js[jp++];
+                    fvb[fvi]=0; if(js[jp]=='"') jp++;
+                    fval_v=make_str(fvb);
+                } else if(js[jp]=='-'||(js[jp]>='0'&&js[jp]<='9')){
+                    int fneg=0; if(js[jp]=='-'){fneg=1;jp++;}
+                    int64_t fn=0;
+                    while(js[jp]>='0'&&js[jp]<='9'){fn=fn*10+(js[jp]-'0');jp++;}
+                    if(js[jp]=='.'){
+                        jp++; double ff=(double)fn, fd=1.0;
+                        while(js[jp]>='0'&&js[jp]<='9'){ff=ff*10+(js[jp]-'0');fd*=10;jp++;}
+                        fval_v=make_float(fneg?-ff/fd:ff/fd);
+                    } else fval_v=make_int(fneg?-fn:fn);
+                } else if(js[jp]=='t'){fval_v=make_bool(1);jp+=4;}
+                else if(js[jp]=='f'){fval_v=make_bool(0);jp+=5;}
+                else if(js[jp]=='n'){jp+=4;}
+                else jp++;
+                for(int ki2=0;ki2<31;ki2++) result.field_names[fc][ki2]=key[ki2];
+                result.field_names[fc][31]=0;
+                result.field_vals[fc]=fval_v; fc++;
+            }
+            result.field_count=fc;
+            #undef JP_SKIP
+            return result;
+        }
+        #undef JP_SKIP
+        return make_nil();
+    }
+
+/* 
+   v1.6  —  Module system helpers
+*/
+
+    /* y.module.loaded() → array of imported module names */
+    if(strcmp_u(name,"y.module.loaded")==0){
+        /* import cache is maintained in eval_node ND_IMPORT;
+           this returns a read-only snapshot as an array of strings */
+        extern char g_imported_modules[64][512];
+        extern int  g_nimported;
+        Val result=make_nil(); result.type=YS_ARR;
+        result.arr_data=alloc_arr(g_nimported+1); result.arr_len=g_nimported;
+        for(int i=0;i<g_nimported;i++) result.arr_data[i]=make_str(g_imported_modules[i]);
+        return result;
+    }
+
 
     return make_nil();
 }

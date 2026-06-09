@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          gcc -std=c11 -Wall -O2 \
+            -o ys \
+            lexer.c parser.c eval.c compiler.c \
+            elf_out.c pe_out.c macho_out.c main.c -lm
+
+      - name: Test — basic interpreter
+        run: |
+          echo 'y.println("hello")' | ./ys /dev/stdin | grep -q "hello"
+          echo "y.println(1 + 2)" | ./ys /dev/stdin | grep -q "3"
+          echo "y.println(2 * 21)" | ./ys /dev/stdin | grep -q "42"
+          echo "✓ basic interpreter"
+
+      - name: Test — float arithmetic
+        run: |
+          echo "y.println(1.5 + 2.3)" | ./ys /dev/stdin | grep -q "3.8"
+          echo "y.println(10.0 / 4.0)" | ./ys /dev/stdin | grep -q "2.5"
+          echo "y.println(-3.14)" | ./ys /dev/stdin | grep -q "\-3.14"
+          echo "✓ float arithmetic"
+
+      - name: Test — enums
+        run: |
+          printf 'enum Status { Ok NotFound Error }\ny.println(Status.Ok)\n' \
+            | ./ys /dev/stdin | grep -q "Status.Ok"
+          echo "✓ enums"
+
+      - name: Test — file I/O
+        run: |
+          printf 'y.fs.write("/tmp/ys_ci.txt","hello")\ny.println(y.fs.read("/tmp/ys_ci.txt"))\n' \
+            | ./ys /dev/stdin | grep -q "hello"
+          rm -f /tmp/ys_ci.txt
+          echo "✓ file I/O"
+
+      - name: Test — JSON
+        run: |
+          printf 'let o = y.json.parse(`{"x":42}`)\ny.println(o.x)\n' \
+            | ./ys /dev/stdin | grep -q "42"
+          echo "✓ JSON"
+
+      - name: Test — modules (relative import)
+        run: |
+          echo 'fn greet(n){ y.println(n) }' > /tmp/utils_ci.y
+          printf 'import "/tmp/utils_ci.y"\ngreet("ok")\n' \
+            | ./ys /dev/stdin | grep -q "ok"
+          rm -f /tmp/utils_ci.y
+          echo "✓ modules"
+
+      - name: Test — process & system
+        run: |
+          echo 'y.println(sys.platform())' | ./ys /dev/stdin | grep -q "linux"
+          echo "✓ process & system"
+
+      - name: Test — match + guards
+        run: |
+          printf 'let x = 5\nlet r = match x {\n  n if n > 3 => "big"\n  _ => "small"\n}\ny.println(r)\n' \
+            | ./ys /dev/stdin | grep -q "big"
+          echo "✓ match guards"
+
+      - name: Test — native compiler (Linux ELF)
+        run: |
+          echo 'y.println("compiled!")' > /tmp/nc_test.y
+          ./ys -c /tmp/nc_test.y -o /tmp/nc_test_bin
+          /tmp/nc_test_bin | grep -q "compiled!"
+          rm -f /tmp/nc_test.y /tmp/nc_test_bin
+          echo "✓ native compiler"
+
+      - name: Run examples
+        run: |
+          for f in examples/*.y; do
+            ./ys "$f" > /dev/null 2>&1 && echo "✓ $f" || echo "✗ $f (non-zero exit)"
+          done

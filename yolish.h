@@ -4,19 +4,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*  Platform  */
+/* Platform */
 static inline void ys_puts(const char *s){ fputs(s,stdout); fflush(stdout); }
 #define puts(s) ys_puts(s)
 static inline void ys_print(const char *s){ fputs(s,stdout); fflush(stdout); }
 static inline int strcmp_u(const char *a,const char *b){ return strcmp(a,b); }
 static inline int str_len_u(const char *s){ int n=0; while(s[n])n++; return n; }
 
-/*  Capability permissions  */
+/* Capability permissions */
 #define CAP_READ  1
 #define CAP_WRITE 2
 #define CAP_EXEC  4
 
-/*  Token types  */
+/* Token types */
 typedef enum {
     TK_EOF, TK_NL,
     TK_INT, TK_FLOAT, TK_STR, TK_IDENT, TK_BOOL,
@@ -24,7 +24,7 @@ typedef enum {
     TK_FOR, TK_IN, TK_RETURN, TK_STRUCT, TK_IMPL,
     TK_MATCH, TK_UNSAFE, TK_TRUE, TK_FALSE, TK_IMPORT,
     TK_TRY, TK_CATCH, TK_THROW, TK_AS,
-    TK_BREAK, TK_CONTINUE,
+    TK_BREAK, TK_CONTINUE, TK_ENUM,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_GT, TK_LTE, TK_GTE,
     TK_AND, TK_OR, TK_NOT, TK_ARROW, TK_FAT_ARROW, TK_DOTDOT, TK_DOT,
@@ -41,9 +41,10 @@ typedef struct {
     int64_t     ival;
     double      fval;
     int         line;
+    int         column; /* v1.4: column number (1-based) */
 } Token;
 
-/*  AST node types  */
+/* AST node types */
 typedef enum {
     ND_INT, ND_FLOAT, ND_STR, ND_BOOL, ND_IDENT,
     ND_BINOP, ND_UNOP, ND_ASSIGN, ND_LET, ND_VAR,
@@ -54,7 +55,8 @@ typedef enum {
     ND_ARRAY,
     ND_BREAK, ND_CONTINUE,
     ND_IMPL,
-    ND_MATCH_ARM,   /* pat [if guard] => body */
+    ND_MATCH_ARM,
+    ND_ENUM,  /* v2.2: enum declaration */
 } NodeKind;
 
 typedef struct Node Node;
@@ -78,14 +80,15 @@ struct Node {
     char      name[64];
     char      type[32];
     int       is_mut;
-    /* struct field names for struct literals */
     char      field_names[8][32];
+    int       line;   /* v1.4: source line for error messages */
+    int       column; /* v1.4: source column for error messages */
 };
 
-/*  Value forward declaration  */
+/* Value forward declaration */
 typedef struct Val Val;
 
-/*  Array storage  */
+/* Array storage */
 #define MAX_ARR 512
 struct Val {
     int      type;
@@ -93,36 +96,33 @@ struct Val {
     double   fval;
     int      bval;
     char     sval[8192];
-    Node    *fn_node; /* ann type/arg are in fn_node->type and fn_node->sval */
-    void    *fn_env;  /* captured Env* for closures (NULL = use call-site env) */
-    /* capability */
+    Node    *fn_node;
+    void    *fn_env;
     int64_t  cap_fd;
     int      cap_perm;
     char     cap_path[128];
-    /* array */
     Val     *arr_data;
     int      arr_len;
-    /* struct */
     char     struct_name[32];
     Val     *field_vals;
     char   (*field_names)[32];
     int      field_count;
 };
 
-/*  Value type constants  */
-#define YS_NIL  0
-#define YS_INT  1
-#define YS_FLOAT 2
-#define YS_BOOL 3
-#define YS_STR  4
-#define YS_FN   5
-#define YS_CAP  6
-#define YS_ARR  7
+/* Value type constants */
+#define YS_NIL    0
+#define YS_INT    1
+#define YS_FLOAT  2
+#define YS_BOOL   3
+#define YS_STR    4
+#define YS_FN     5
+#define YS_CAP    6
+#define YS_ARR    7
 #define YS_STRUCT 8
 #define YS_ERR    9
 
-/*  Environment  */
-#define ENV_MAX 32
+/* Environment */
+#define ENV_MAX 48
 typedef struct Env Env;
 struct Env {
     char  names[ENV_MAX][64];
@@ -131,16 +131,18 @@ struct Env {
     Env  *parent;
 };
 
-/*  Lexer  */
+/* Lexer */
 typedef struct {
     const char *src;
     int         pos;
     int         len;
     Token       cur;
-    int         line; /* current line number */
+    int         line;
+    int         column;      /* v1.4: current column (1-based) */
+    int         line_start;  /* v1.4: byte offset of current line start */
 } Lexer;
 
-/*  Function prototypes  */
+/* Function prototypes */
 void  lex_init    (Lexer *l, const char *src, int len);
 Token lex_next    (Lexer *l);
 Node *parse_program(Lexer *l);
@@ -152,7 +154,8 @@ void  env_set(Env *e, const char *name, Val v);
 void  env_def(Env *e, const char *name, Val v);
 void  env_free(Env *e);
 void  ys_print_val(Val v);
-void  ys_error(int line, const char *msg);
+void  ys_error(int line, int column, const char *msg);
 void  parser_pool_save(void);
 void  parser_pool_restore(void);
-extern char g_src_dir[512]; /* directory of the running .y file */
+extern char g_src_dir[512];
+extern char g_src_file[512]; /* v1.4: current source filename */

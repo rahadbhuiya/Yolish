@@ -10,10 +10,11 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.0-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v1.7-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
+  <img src="https://github.com/rahadbhuiya/yolish/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </p>
 
 ---
@@ -21,7 +22,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v1.0 |
+| **Version** | v1.7 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -130,12 +131,20 @@ for i in 0..10 { y.print(i) }
 var i = 0
 while i < 5 { i = i + 1 }
 
--- Match expression (returns a value)
+-- Match expression with guards
 let grade = match score {
     90..100      => "A"
     80..90       => "B"
     n if n >= 60 => "C"
     _            => "F"
+}
+
+-- Enums (v2.2)
+enum Direction { North  South  East  West }
+let dir = Direction.North
+match dir {
+    Direction.North => y.println("going north")
+    _               => y.println("other direction")
 }
 
 -- Structs + impl methods
@@ -149,13 +158,37 @@ let c = Circle { radius: 5 }
 y.println(c.area())
 
 -- Arrays + functional builtins
-let nums   = [1, 2, 3, 4, 5]
-let evens  = y.filter(nums, fn(x){ return x % 2 == 0 })
+let nums    = [1, 2, 3, 4, 5]
+let evens   = y.filter(nums, fn(x){ return x % 2 == 0 })
 let doubled = y.map(nums, fn(x){ return x * 2 })
 let total   = y.sum(nums)
 
 -- String interpolation
 let msg = "Hello {name}, score = {score}"
+
+-- Backtick strings (raw, no interpolation — perfect for JSON/templates)
+let json = `{"name": "Yolish", "version": 1}`
+
+-- File I/O (v1.2)
+y.fs.write("log.txt", "started\n")
+let content = y.fs.read("log.txt")
+y.println(y.fs.exists("log.txt"))
+
+-- JSON (v1.7)
+let obj = y.json.parse(`{"lang": "yolish", "stable": true}`)
+y.println(obj.lang)
+y.println(y.json.stringify(obj))
+
+-- Process & System (v1.3)
+let out = process.spawn("uname -s")
+y.println(sys.platform())
+
+-- Time (v1.7)
+let now = y.time.now()
+y.println(y.time.format(now, "%Y-%m-%d %H:%M:%S"))
+
+-- Module import (v1.6 — relative path, cached)
+import "./utils.y"
 
 -- Error handling
 try {
@@ -178,40 +211,51 @@ fn fetch_and_save(url, path) { ... }
 
 | Feature | Status |
 |---------|--------|
-| Variables (`let` / `var`) | [x] |
-| Functions + recursion | [x] |
-| `if` / `else if` / `else` | [x] |
-| `while` loop + `break` / `continue` | [x] |
-| `for i in lo..hi` range loop | [x] |
-| `for item in array` loop | [x] |
-| `for ch in string` character loop | [x] |
-| `match` expression + guards + binding | [x] |
-| Arrays (dynamic, max 512 elements) | [x] |
-| Structs + `impl` methods + `self` | [x] |
-| Method chaining | [x] |
-| Closures / first-class functions | [x] |
-| `try` / `catch` / `throw` | [x] |
-| String interpolation `"Hello {name}"` | [x] |
-| Multiline strings (backtick) | [x] |
-| Raw strings `r"..."` | [x] |
-| `y.map` / `y.filter` / `y.reduce` / `y.each` | [x] |
-| `y.sort` / `y.zip` / `y.flatten` / `y.sum` / `y.range` | [x] |
-| `y.math.*` — sqrt, pow, sin, cos, pi, ... | [x] |
-| `y.string.*` — upper, lower, split, join, trim, ... | [x] |
-| `y.input` / `y.input_int` / `y.input_float` | [x] |
-| Type system — `y.typeof`, `y.is_*`, conversions | [x] |
-| Capability system `@cap`, `@intent`, `@audit` | [x] |
-| Module / import system | [x] |
-| Error objects `y.error(msg, code)` | [x] |
-| REPL with colored banner | [x] |
-| **Native x86-64 compiler** | [x] **v1.0** |
-| Native → Linux ELF64 | [x] |
-| Native → Windows PE32+ (with icon) | [x] |
-| Native → macOS Mach-O | [x] |
-| Native → Exploidus | [ ] v1.1 |
-| Float / arrays / structs in native compiler | [ ] v1.1 |
-| File I/O in native compiler | [ ] v1.2 |
-| Self-hosting (Yolish compiles Yolish) | [ ] v2.0 |
+| Variables (`let` / `var`) | Done |
+| Functions + recursion | Done |
+| `if` / `else if` / `else` | Done |
+| `while` loop + `break` / `continue` | Done |
+| `for i in lo..hi` range loop | Done |
+| `for item in array` loop | Done |
+| `for ch in string` character loop | Done |
+| `match` expression + guards + binding | Done |
+| **Enums** (`enum Direction { N S E W }`) | Done **v2.2** |
+| Arrays (dynamic, max 512 elements) | Done |
+| Structs + `impl` methods + `self` | Done |
+| Method chaining | Done |
+| Closures / first-class functions | Done |
+| `try` / `catch` / `throw` | Done |
+| String interpolation `"Hello {name}"` | Done |
+| Backtick strings (raw, multiline) | Done |
+| Raw strings `r"..."` | Done |
+| `y.map` / `y.filter` / `y.reduce` / `y.each` | Done |
+| `y.sort` / `y.zip` / `y.flatten` / `y.sum` / `y.range` | Done |
+| `y.math.*` — sqrt, pow, sin, cos, pi, ... | Done |
+| `y.string.*` — upper, lower, split, join, trim, ... | Done |
+| `y.input` / `y.input_int` / `y.input_float` | Done |
+| Type system — `y.typeof`, `y.is_*`, conversions | Done |
+| Capability system `@cap`, `@intent`, `@audit` | Done |
+| Module / import system + relative paths + caching | Done **v1.6** |
+| Error objects `y.error(msg, code)` | Done |
+| Better errors — `file:line:col` + typo suggestion | Done **v1.4** |
+| REPL with colored banner | Done |
+| **Float arithmetic** (SSE2 native) | Done **v1.1** |
+| **Arrays in native compiler** | Done **v1.1** |
+| **File I/O** (`y.fs.*` — 10 functions) | Done **v1.2** |
+| **Process & System** (`process.*`, `sys.*`) | Done **v1.3** |
+| **JSON** (`y.json.parse`, `y.json.stringify`) | Done **v1.7** |
+| **Time** (`y.time.now`, `sleep`, `format`) | Done **v1.7** |
+| **Path** (`y.path.join`, `basename`, `ext`, ...) | Done **v1.7** |
+| **Env** (`y.env.get`, `y.env.set`) | Done **v1.7** |
+| **Native x86-64 compiler** | Done **v1.0** |
+| Native → Linux ELF64 | Done |
+| Native → Windows PE32+ (with icon) | Done |
+| Native → macOS Mach-O | Done |
+| Native → Exploidus | Pending v1.8 |
+| Garbage collector (mark-and-sweep) | Pending v1.5 |
+| Self-hosting (Yolish compiles Yolish) | Pending v2.0 |
+| Built-in test runner (`ys test`) | Pending v2.1 |
+| Auto-formatter (`ys fmt`) | Pending v2.1 |
 
 ---
 
@@ -219,10 +263,10 @@ fn fetch_and_save(url, path) { ... }
 
 | Platform | Interpreter | Native Compiler Output |
 |----------|-------------|------------------------|
-| Linux       | Yes | ELF64 static binary     |
-| macOS       | Yes | Mach-O 64-bit           |
-| Windows     | Yes | PE32+ with icon         |
-| Exploidus OS| Yes | coming v1.1             |
+| Linux       | Done | ELF64 static binary     |
+| macOS       | Done | Mach-O 64-bit           |
+| Windows     | Done | PE32+ with icon         |
+| Exploidus OS| Done | coming v1.8             |
 
 ---
 
@@ -231,9 +275,16 @@ fn fetch_and_save(url, path) { ... }
 | Module | Functions |
 |--------|-----------|
 | **I/O** | `y.print`, `y.println`, `y.input`, `y.input_int`, `y.input_float` |
-| **String** | `y.len`, `y.upper`, `y.lower`, `y.trim`, `y.split`, `y.join`, `y.contains`, `y.replace`, `y.substr`, `y.reverse`, `y.repeat`, `y.format`, `y.starts_with`, `y.ends_with`, `y.index_of` |
+| **String** | `y.len`, `y.upper`, `y.lower`, `y.trim`, `y.split`, `y.join`, `y.contains`, `y.replace`, `y.substr`, `y.reverse`, `y.repeat`, `y.starts_with`, `y.ends_with`, `y.index_of` |
 | **Array** | `y.push`, `y.pop`, `y.slice`, `y.len`, `y.reverse`, `y.sort`, `y.map`, `y.filter`, `y.reduce`, `y.each`, `y.zip`, `y.flatten`, `y.sum`, `y.range` |
-| **Math** | `y.math.sqrt`, `y.math.pow`, `y.math.abs`, `y.math.floor`, `y.math.ceil`, `y.math.round`, `y.math.min`, `y.math.max`, `y.math.clamp`, `y.math.sign`, `y.math.pi`, `y.math.log`, `y.math.sin`, `y.math.cos`, `y.math.tan` |
+| **Math** | `y.math.sqrt`, `y.math.pow`, `y.math.abs`, `y.math.floor`, `y.math.ceil`, `y.math.round`, `y.math.min`, `y.math.max`, `y.math.pi`, `y.math.log`, `y.math.sin`, `y.math.cos`, `y.math.tan` |
+| **File I/O** | `y.fs.read`, `y.fs.write`, `y.fs.append`, `y.fs.exists`, `y.fs.list`, `y.fs.mkdir`, `y.fs.delete`, `y.fs.rename`, `y.fs.size`, `y.fs.is_dir` |
+| **JSON** | `y.json.parse(str)`, `y.json.stringify(val)` |
+| **Time** | `y.time.now()`, `y.time.unix()`, `y.time.sleep(ms)`, `y.time.format(ms, fmt)` |
+| **Path** | `y.path.join(...)`, `y.path.basename(p)`, `y.path.dirname(p)`, `y.path.ext(p)`, `y.path.stem(p)`, `y.path.abs(p)` |
+| **Env** | `y.env.get(key)`, `y.env.set(key, val)`, `y.env.unset(key)` |
+| **Process** | `process.spawn(cmd)`, `process.spawn_code(cmd)`, `process.env(key)`, `process.pid()` |
+| **System** | `sys.exit(code)`, `sys.platform()` |
 | **Type** | `y.typeof`, `y.is_int`, `y.is_str`, `y.is_float`, `y.is_bool`, `y.is_array`, `y.is_nil`, `y.int`, `y.str`, `y.float`, `y.bool` |
 | **Error** | `y.error(msg, code)` |
 | **Capability** | `y.capabilities()`, `y.has_cap(caps, name)` |
@@ -241,12 +292,6 @@ fn fetch_and_save(url, path) { ... }
 ---
 
 ## Roadmap
-
-### Vision
-
-Yolish is the scripting and automation language of Exploidus OS —
-lightweight, capability-aware, and focused. Not trying to replace C or Rust.
-Just a clean, safe language for OS tools, config scripts, and system utilities.
 
 ### Release History
 
@@ -261,37 +306,25 @@ Just a clean, safe language for OS tools, config scripts, and system utilities.
 | v0.7 | `impl` methods, `y.input`, functional builtins, dynamic allocation |
 | v0.8 | Match guards and pattern binding |
 | **v1.0** | **Native x86-64 compiler — Linux, Windows, macOS** |
+| **v1.1** | **Float (SSE2) + arrays in native compiler** |
+| **v1.2** | **File I/O — `y.fs.*` (10 functions)** |
+| **v1.3** | **Process & system — `process.*`, `sys.*`** |
+| **v1.4** | **Error messages — `file:line:col` + typo suggestions** |
+| **v1.6** | **Module system — relative imports, circular detection, caching** |
+| **v1.7** | **Stdlib expansion — `y.json`, `y.time`, `y.env`, `y.path`** |
+| **v2.2** | **Enums — `enum Direction { N S E W }` + match integration** |
 
 ### Upcoming
 
 | Version | Plan |
 |---------|------|
-| v1.1 | Float, arrays, structs in native compiler; Exploidus target |
-| v1.2 | File I/O (`y.fs.*`) in native compiler |
-| v1.3 | Process spawning, environment variables, system calls |
-| v1.5 | Garbage collector; better error messages with file/line/column |
-| v1.6 | Improved module system (relative imports, circular detection) |
-| v1.7 | Stdlib expansion: `y.json`, `y.time`, `y.env`, `y.path` |
+| v1.5 | Garbage collector (mark-and-sweep) |
+| v1.8 | Native → Exploidus OS target |
 | v2.0 | Self-hosting — Yolish compiles itself; bytecode VM |
 | v2.1 | Built-in test runner (`ys test`), formatter (`ys fmt`) |
-| v2.2 | Enums |
 | v3.0 | Deep Exploidus OS integration; official shell language |
 
-See [ROADMAP.md](ROADMAP.md) for full details and what Yolish will NOT do.
-
-### Development Philosophy
-
-- Simplicity over features
-- Security by default — no resource access without a capability
-- Focused — does one thing well: scripting for Exploidus OS
-
-## Annotation / Audit Logs
-
-```bash
-ys examples/ann_test.y               # both in terminal
-ys examples/ann_test.y 2>/dev/null   # program output only
-ys examples/ann_test.y 2>audit.log   # save annotation logs separately
-```
+See [ROADMAP.md](ROADMAP.md) for full details.
 
 ---
 

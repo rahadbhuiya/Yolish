@@ -91,7 +91,7 @@ static int sym_find(const char *name){
 
 /*  local variable table  */
 #define LOCAL_MAX 64
-typedef struct { char name[64]; int rbp_off; } Local;
+typedef struct { char name[64]; int rbp_off; int is_float; } Local;
 static Local locals[LOCAL_MAX];
 static int   nlocals=0;
 static int   stack_size=0;  /* current frame size in bytes */
@@ -232,12 +232,99 @@ static int helper_print_str_off  = -1;
 static int helper_print_int_off  = -1;
 static int helper_print_nl_off   = -1;
 static int helper_exit_off       = -1;
+static int helper_print_float_off = -1;
+
+/* v1.1: per-local float tracking */
+static int g_last_float = 0;
+
+/* SSE2 helpers */
+static void x_movq_xmm0_rax(){ emit4(0x66,0x48,0x0f,0x6e); emit1(0xc0); }
+static void x_movq_xmm1_rcx(){ emit4(0x66,0x48,0x0f,0x6e); emit1(0xc9); }
+static void x_movq_rax_xmm0(){ emit4(0x66,0x48,0x0f,0x7e); emit1(0xc0); }
+static void x_addsd(){ emit4(0xf2,0x0f,0x58,0xc1); }
+static void x_subsd(){ emit4(0xf2,0x0f,0x5c,0xc1); }
+static void x_mulsd(){ emit4(0xf2,0x0f,0x59,0xc1); }
+static void x_divsd(){ emit4(0xf2,0x0f,0x5e,0xc1); }
+static void x_ucomisd(){ emit4(0x66,0x0f,0x2e,0xc1); }
+static void x_cvtsi2sd_xmm0_rax(){ emit4(0xf2,0x48,0x0f,0x2a); emit1(0xc0); }
+static void x_cvtsi2sd_xmm1_rcx(){ emit4(0xf2,0x48,0x0f,0x2a); emit1(0xc9); }
+static void x_cvtsi2sd_xmm1_rbx(){ emit4(0xf2,0x48,0x0f,0x2a); emit1(0xcb); }
+static void x_cvttsd2si_rax_xmm0(){ emit4(0xf2,0x48,0x0f,0x2c); emit1(0xc0); }
+static void x_cvttsd2si_rbx_xmm0(){ emit4(0xf2,0x48,0x0f,0x2c); emit1(0xd8); }
+
 
 /* SYS_write on Linux = 1, macOS = 0x2000004 */
 /* SYS_exit  on Linux = 60, macOS = 0x2000001 */
 
 /*  helper emitters  */
 /* Reset and use a clean approach */
+
+static void emit_float_helper(void){
+    int sn=(g_target==TARGET_LINUX)?1:0x2000004;
+    helper_print_float_off=code_len;
+    sym_define("__ys_print_float",code_len);
+    x_push_rbp(); x_mov_rbp_rsp();
+    emit1(0x53); emit4(0x48,0x83,0xec,0x28);
+    /* movq xmm0,rdi (load double bits from rdi) */
+    emit4(0x66,0x48,0x0f,0x6e); emit1(0xc7);
+    /* save xmm0 → [rbp-16] */
+    emit4(0xf2,0x0f,0x11,0x45); emit1(0xf0);
+    /* check sign */
+    x_movq_rax_xmm0();
+    emit3(0x48,0xc1,0xe8); emit1(0x3f);
+    x_test_rax_rax();
+    int jns=code_len; emit2(0x74,0x00);
+    /* print '-' */
+    emit4(0x48,0x83,0xec,0x08); emit4(0xc6,0x04,0x24,0x2d);
+    emit3(0x48,0x89,0xe6); x_mov_rax_imm32(1); emit3(0x48,0x89,0xc2);
+    x_mov_rax_imm32(1); emit3(0x48,0x89,0xc7);
+    x_mov_rax_imm32(sn); emit2(0x0f,0x05);
+    emit4(0x48,0x83,0xc4,0x08);
+    /* flip sign bit */
+    emit4(0xf2,0x0f,0x10,0x45); emit1(0xf0);
+    x_movq_rax_xmm0();
+    emit2(0x48,0xb9); emit_i64((int64_t)((uint64_t)1<<63));
+    emit3(0x48,0x31,0xc8); x_movq_xmm0_rax();
+    emit4(0xf2,0x0f,0x11,0x45); emit1(0xf0);
+    code_buf[jns+1]=(uint8_t)(code_len-(jns+2));
+    /* integer part */
+    emit4(0xf2,0x0f,0x10,0x45); emit1(0xf0);
+    x_cvttsd2si_rbx_xmm0();
+    emit3(0x48,0x89,0xdf); int pi=x_call_unresolved(); add_call_patch(pi,"__ys_print_int");
+    /* print '.' */
+    emit4(0x48,0x83,0xec,0x08); emit4(0xc6,0x04,0x24,0x2e);
+    emit3(0x48,0x89,0xe6); x_mov_rax_imm32(1); emit3(0x48,0x89,0xc2);
+    x_mov_rax_imm32(1); emit3(0x48,0x89,0xc7);
+    x_mov_rax_imm32(sn); emit2(0x0f,0x05);
+    emit4(0x48,0x83,0xc4,0x08);
+    /* frac = xmm0 - float(rbx) */
+    emit4(0xf2,0x0f,0x10,0x45); emit1(0xf0);
+    x_cvtsi2sd_xmm1_rbx(); x_subsd();
+    /* *1e6 */
+    int c1e6=data_len;
+    { double v=1000000.0; int64_t b; memcpy(&b,&v,8);
+      for(int i=0;i<8;i++) data_buf[data_len++]=(uint8_t)(b>>(i*8)); }
+    emit4(0xf2,0x0f,0x10,0x0d);
+    add_reloc(RELOC_DATA,code_len,c1e6); emit_i32(0);
+    x_mulsd(); x_cvttsd2si_rax_xmm0();
+    emit3(0x48,0x89,0x45); emit1(0xf8);
+    x_mov_rax_imm32(10); emit3(0x48,0x89,0xc3);
+    emit3(0x48,0x8b,0x45); emit1(0xf8);
+    { int8_t doff[6]={-6,-5,-4,-3,-2,-1};
+      for(int di=0;di<6;di++){
+        emit3(0x48,0x31,0xd2); emit3(0x48,0xf7,0xf3);
+        emit3(0x80,0xc2,0x30);
+        emit3(0x88,0x55,(uint8_t)(int8_t)doff[5-di]);
+      }
+    }
+    emit3(0x48,0x8d,0x75); emit1(0xfa);
+    x_mov_rax_imm32(6); emit3(0x48,0x89,0xc2);
+    x_mov_rax_imm32(1); emit3(0x48,0x89,0xc7);
+    x_mov_rax_imm32(sn); emit2(0x0f,0x05);
+    emit4(0x48,0x83,0xc4,0x28); emit1(0x5b);
+    x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+}
+
 
 static void emit_helpers(void){
     /*  print_str(rdi=buf, rsi=len)  */
@@ -354,6 +441,7 @@ static void emit_helpers(void){
         emit2(0x0f,0x05);
         x_ret();
     }
+    emit_float_helper();
 }
 
 /*  string length  */
@@ -372,18 +460,15 @@ static void compile_expr(Node *n){
     if(!n){ x_mov_rax_imm32(0); return; }
     switch(n->kind){
     case ND_INT:
-        if(n->ival>=-2147483648LL && n->ival<=2147483647LL)
-            x_mov_rax_imm32((int32_t)n->ival);
-        else
-            x_mov_rax_imm64(n->ival);
-        break;
+        if(n->ival>=-2147483648LL && n->ival<=2147483647LL) x_mov_rax_imm32((int32_t)n->ival);
+        else x_mov_rax_imm64(n->ival);
+        g_last_float=0; break;
     case ND_BOOL:
-        x_mov_rax_imm32(n->ival?1:0);
-        break;
-    case ND_FLOAT:
-        /* store float as int64 bits for now */
-        x_mov_rax_imm64((int64_t)n->fval);
-        break;
+        x_mov_rax_imm32(n->ival?1:0); g_last_float=0; break;
+    case ND_FLOAT:{
+        int64_t bits; double v=n->fval; memcpy(&bits,&v,8);
+        x_mov_rax_imm64(bits); g_last_float=1; break;
+    }
     case ND_STR:{
         int off=data_add_str(n->sval);
         /* lea rax, [rip + data_off] */
@@ -393,17 +478,18 @@ static void compile_expr(Node *n){
     }
     case ND_IDENT:{
         int off=local_get(n->name);
-        if(off){ x_mov_rax_mem(off); }
-        else { x_mov_rax_imm32(0); } /* undefined → 0 */
+        g_last_float=0;
+        if(off){ x_mov_rax_mem(off);
+            for(int _i=0;_i<nlocals;_i++) if(strcmp(locals[_i].name,n->name)==0){g_last_float=locals[_i].is_float;break;}
+        } else x_mov_rax_imm32(0);
         break;
     }
     case ND_UNOP:
         compile_expr(n->right);
-        if(n->op==TK_MINUS){ emit3(0x48,0xf7,0xd8); } /* neg rax */
-        else if(n->op==TK_NOT){
-            x_test_rax_rax();
-            x_set_bool(0x94); /* sete al */
-        }
+        if(n->op==TK_MINUS){
+            if(g_last_float){ emit2(0x48,0xb9); emit_i64((int64_t)((uint64_t)1<<63)); emit3(0x48,0x31,0xc8); }
+            else emit3(0x48,0xf7,0xd8);
+        } else if(n->op==TK_NOT){ x_test_rax_rax(); x_set_bool(0x94); g_last_float=0; }
         break;
     case ND_BINOP:{
         /* short-circuit && and || */
@@ -429,24 +515,41 @@ static void compile_expr(Node *n){
             x_patch_here(jend);
             break;
         }
-        /* evaluate left, push, evaluate right, pop rcx */
-        compile_expr(n->left); x_push_rax();
-        compile_expr(n->right);
-        emit3(0x48,0x89,0xc1); /* mov rcx,rax (right) */
-        x_pop_rax();           /* rax = left */
-        switch(n->op){
-        case TK_PLUS:  x_add_rax_rcx(); break;
-        case TK_MINUS: x_sub_rax_rcx(); break;
-        case TK_STAR:  x_imul_rax_rcx(); break;
-        case TK_SLASH: x_idiv_setup(); break; /* rax=quotient */
-        case TK_PERCENT: x_idiv_setup(); emit3(0x48,0x89,0xd0); break; /* mov rax,rdx */
-        case TK_EQEQ:  x_cmp_rax_rcx(); x_set_bool(0x94); break; /* sete */
-        case TK_NEQ:   x_cmp_rax_rcx(); x_set_bool(0x95); break; /* setne */
-        case TK_LT:    x_cmp_rax_rcx(); x_set_bool(0x9c); break; /* setl */
-        case TK_LTE:   x_cmp_rax_rcx(); x_set_bool(0x9e); break; /* setle */
-        case TK_GT:    x_cmp_rax_rcx(); x_set_bool(0x9f); break; /* setg */
-        case TK_GTE:   x_cmp_rax_rcx(); x_set_bool(0x9d); break; /* setge */
-        default: x_mov_rax_imm32(0); break;
+        compile_expr(n->left); int _lf=g_last_float; x_push_rax();
+        compile_expr(n->right); int _rf=g_last_float;
+        emit3(0x48,0x89,0xc1); x_pop_rax();
+        if(_lf||_rf||n->left->kind==ND_FLOAT||n->right->kind==ND_FLOAT){
+            if(_lf) x_movq_xmm0_rax(); else x_cvtsi2sd_xmm0_rax();
+            if(_rf) x_movq_xmm1_rcx(); else x_cvtsi2sd_xmm1_rcx();
+            switch(n->op){
+            case TK_PLUS:  x_addsd(); x_movq_rax_xmm0(); g_last_float=1; break;
+            case TK_MINUS: x_subsd(); x_movq_rax_xmm0(); g_last_float=1; break;
+            case TK_STAR:  x_mulsd(); x_movq_rax_xmm0(); g_last_float=1; break;
+            case TK_SLASH: x_divsd(); x_movq_rax_xmm0(); g_last_float=1; break;
+            case TK_EQEQ: x_ucomisd(); x_set_bool(0x94); g_last_float=0; break;
+            case TK_NEQ:  x_ucomisd(); x_set_bool(0x95); g_last_float=0; break;
+            case TK_LT:   x_ucomisd(); x_set_bool(0x92); g_last_float=0; break;
+            case TK_LTE:  x_ucomisd(); x_set_bool(0x96); g_last_float=0; break;
+            case TK_GT:   x_ucomisd(); x_set_bool(0x97); g_last_float=0; break;
+            case TK_GTE:  x_ucomisd(); x_set_bool(0x93); g_last_float=0; break;
+            default: x_mov_rax_imm32(0); g_last_float=0; break;
+            }
+        } else {
+            g_last_float=0;
+            switch(n->op){
+            case TK_PLUS:    x_add_rax_rcx(); break;
+            case TK_MINUS:   x_sub_rax_rcx(); break;
+            case TK_STAR:    x_imul_rax_rcx(); break;
+            case TK_SLASH:   x_idiv_setup(); break;
+            case TK_PERCENT: x_idiv_setup(); emit3(0x48,0x89,0xd0); break;
+            case TK_EQEQ:   x_cmp_rax_rcx(); x_set_bool(0x94); break;
+            case TK_NEQ:    x_cmp_rax_rcx(); x_set_bool(0x95); break;
+            case TK_LT:     x_cmp_rax_rcx(); x_set_bool(0x9c); break;
+            case TK_LTE:    x_cmp_rax_rcx(); x_set_bool(0x9e); break;
+            case TK_GT:     x_cmp_rax_rcx(); x_set_bool(0x9f); break;
+            case TK_GTE:    x_cmp_rax_rcx(); x_set_bool(0x9d); break;
+            default: x_mov_rax_imm32(0); break;
+            }
         }
         break;
     }
@@ -470,9 +573,9 @@ static void compile_expr(Node *n){
                     emit3(0x48,0x89,0xc6); /* mov rsi,rax */
                     int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str");
                 } else {
-                    compile_expr(arg);
-                    emit3(0x48,0x89,0xc7); /* mov rdi,rax */
-                    int p=x_call_unresolved(); add_call_patch(p,"__ys_print_int");
+                    compile_expr(arg); emit3(0x48,0x89,0xc7);
+                    if(g_last_float){ int p=x_call_unresolved(); add_call_patch(p,"__ys_print_float"); }
+                    else { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_int"); }
                 }
             }
             /* newline */
@@ -492,9 +595,9 @@ static void compile_expr(Node *n){
                     x_mov_rax_imm32(len); emit3(0x48,0x89,0xc6);
                     int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str");
                 } else if(arg){
-                    compile_expr(arg);
-                    emit3(0x48,0x89,0xc7);
-                    int p=x_call_unresolved(); add_call_patch(p,"__ys_print_int");
+                    compile_expr(arg); emit3(0x48,0x89,0xc7);
+                    if(g_last_float){ int p=x_call_unresolved(); add_call_patch(p,"__ys_print_float"); }
+                    else { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_int"); }
                 }
             }
             x_mov_rax_imm32(0);
@@ -550,18 +653,17 @@ static void compile_node(Node *n){
     case ND_VAR:{
         compile_expr(n->right);
         int off=local_alloc(n->name);
-        x_mov_mem_rax(off);
-        break;
+        for(int _i=0;_i<nlocals;_i++) if(strcmp(locals[_i].name,n->name)==0){locals[_i].is_float=g_last_float;break;}
+        x_mov_mem_rax(off); break;
     }
     case ND_ASSIGN:{
         compile_expr(n->right);
         /* target name is in n->left->name (parser stores ident as left child) */
         const char *aname = (n->name[0]) ? n->name
                           : (n->left && n->left->name[0]) ? n->left->name : "";
-        int off=local_get(aname);
-        if(off==0) off=local_alloc(aname);
-        x_mov_mem_rax(off);
-        break;
+        int off=local_get(aname); if(off==0) off=local_alloc(aname);
+        for(int _i=0;_i<nlocals;_i++) if(strcmp(locals[_i].name,aname)==0){locals[_i].is_float=g_last_float;break;}
+        x_mov_mem_rax(off); break;
     }
     case ND_RETURN:{
         if(n->right) compile_expr(n->right);

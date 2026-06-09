@@ -9,7 +9,10 @@
 #include <string.h>
 
 static char src[1<<20];
-char g_src_dir[512] = {0};
+char g_src_dir[512]={0};
+extern char g_src_file[512];
+extern char g_imported_modules[64][512];
+extern int g_nimported;
 
 typedef enum { TARGET_LINUX, TARGET_WINDOWS, TARGET_MACOS } Target;
 void ys_compile(Node *prog, Target target, const char *outfile);
@@ -127,9 +130,14 @@ int main(int argc, char **argv){
             di++;
         }
         if(last_sep>=0){
-            for(int i=0;i<=last_sep&&i<510;i++) g_src_dir[i]=infile[i];
-            g_src_dir[last_sep+1]=0;
+            /* copy dir without trailing slash */
+            for(int i=0;i<last_sep&&i<510;i++) g_src_dir[i]=infile[i];
+            g_src_dir[last_sep]=0;
+            /* change into the script directory */
             if(chdir(g_src_dir)){}
+            /* after chdir, clear g_src_dir so imports resolve from CWD */
+            g_src_dir[0]=0;
+            strncpy(g_src_file,infile,511);
         }
     }
 

@@ -7,12 +7,17 @@ static Node *parse_block(Lexer *l);
 static Node *parse_binop(Lexer *l, int min_prec);
 
 /* simple allocator using stack-like bump */
-static Node pool[512];
+static Node pool[2048];
 static int pool_idx=0;
 
 /* statement pointer pool — avoids static array re-entry bug */
-static Node *stmt_pool[4096];
+static Node *stmt_pool[8192];
 static int   stmt_pool_idx=0;
+static Node **alloc_stmts(int n){
+    Node **p=&stmt_pool[stmt_pool_idx];
+    stmt_pool_idx+=n; if(stmt_pool_idx>4096)stmt_pool_idx=4096;
+    return p;
+}
 static Node *alloc_node(NodeKind k){
     if(pool_idx>=512) return pool; /* out of nodes */
     Node *n=&pool[pool_idx++];
@@ -29,18 +34,78 @@ static Token eat(Lexer *l){
     return t;
 }
 static int check(Lexer *l, TokenKind k){ return l->cur.kind==k; }
+/* v1.4: human-readable token name */
+static const char *tok_name(TokenKind k){
+    switch(k){
+    case TK_EOF:      return "end of file";
+    case TK_IDENT:    return "identifier";
+    case TK_INT:      return "integer";
+    case TK_FLOAT:    return "float";
+    case TK_STR:      return "string";
+    case TK_LPAREN:   return "'('";
+    case TK_RPAREN:   return "')'";
+    case TK_LBRACE:   return "'{'";
+    case TK_RBRACE:   return "'}'";
+    case TK_LBRACKET: return "'['";
+    case TK_RBRACKET: return "']'";
+    case TK_COMMA:    return "','";
+    case TK_COLON:    return "':'";
+    case TK_EQ:       return "'='";
+    case TK_ARROW:    return "'->'";
+    case TK_FAT_ARROW:return "'=>'";
+    case TK_SEMICOLON:return "';'";
+    case TK_FN:       return "'fn'";
+    case TK_LET:      return "'let'";
+    case TK_VAR:      return "'var'";
+    case TK_IF:       return "'if'";
+    case TK_ELSE:     return "'else'";
+    case TK_WHILE:    return "'while'";
+    case TK_FOR:      return "'for'";
+    case TK_RETURN:   return "'return'";
+    case TK_STRUCT:   return "'struct'";
+    case TK_ENUM:     return "'enum'";
+    case TK_MATCH:    return "'match'";
+    case TK_IMPORT:   return "'import'";
+    case TK_IN:       return "'in'";
+    default:          return "token";
+    }
+}
+
+/* lev_dist defined in eval.c */
+extern int lev_dist(const char *a, const char *b);
+
 static Token expect(Lexer *l, TokenKind k){
     if(!check(l,k)){
-        char buf[64];
-        int n=0; buf[n++]='['; buf[n++]='Y'; buf[n++]='S'; buf[n++]=']';
-        buf[n++]=' '; buf[n++]='p'; buf[n++]='a'; buf[n++]='r'; buf[n++]='s';
-        buf[n++]='e'; buf[n++]=' '; buf[n++]='e'; buf[n++]='r'; buf[n++]='r';
-        buf[n++]='o'; buf[n++]='r'; buf[n++]=' '; buf[n++]='l'; buf[n++]='i';
-        buf[n++]='n'; buf[n++]='e'; buf[n++]=' ';
-        int64_t ln=l->line; if(ln<=0)ln=1;
+        extern char g_src_file[512];
+        char buf[256]; int n=0;
+        /* file:line:col format */
+        if(g_src_file[0]){
+            for(int i=0;g_src_file[i]&&n<100;i++) buf[n++]=g_src_file[i];
+        } else { buf[n++]='[';buf[n++]='Y';buf[n++]='S';buf[n++]=']'; }
+        buf[n++]=':';
+        /* line */
+        int ln=l->cur.line>0?l->cur.line:l->line;
         char tmp[16]; int ti=0;
-        do { tmp[ti++]=(char)('0'+(ln%10)); ln/=10; } while(ln>0);
-        while(ti>0) buf[n++]=tmp[--ti];
+        do{tmp[ti++]=(char)('0'+(ln%10));ln/=10;}while(ln>0);
+        while(ti>0){buf[n++]=tmp[--ti];} buf[n++]=':';
+        /* column */
+        int col=l->cur.column>0?l->cur.column:1;
+        ti=0; do{tmp[ti++]=(char)('0'+(col%10));col/=10;}while(col>0);
+        while(ti>0){buf[n++]=tmp[--ti];} buf[n++]=':'; buf[n++]=' ';
+        /* message */
+        const char *exp=tok_name(k);
+        const char *got=tok_name(l->cur.kind);
+        const char *msg1="expected "; for(int i=0;msg1[i];i++) buf[n++]=msg1[i];
+        for(int i=0;exp[i]&&n<220;i++) buf[n++]=exp[i];
+        const char *msg2=", got "; for(int i=0;msg2[i];i++) buf[n++]=msg2[i];
+        for(int i=0;got[i]&&n<240;i++) buf[n++]=got[i];
+        /* show the actual token value if ident */
+        if(l->cur.kind==TK_IDENT&&l->cur.len>0&&n<248){
+            buf[n++]=' '; buf[n++]='(';
+            int tl=l->cur.len<16?l->cur.len:16;
+            for(int i=0;i<tl;i++) buf[n++]=l->cur.start[i];
+            buf[n++]=')';
+        }
         buf[n++]='\n'; buf[n]=0;
         ys_print(buf);
     }
@@ -387,12 +452,35 @@ static Node *parse_stmt(Lexer *l){
     }
 
     /* struct Point { x, y } */
+    /* v2.2: enum Foo { A  B  C } */
+    if(t.kind==TK_ENUM){
+        eat(l);
+        Node *n=alloc_node(ND_ENUM);
+        Token nm=expect(l,TK_IDENT);
+        int nl=nm.len<63?nm.len:63;
+        for(int i=0;i<nl;i++){n->name[i]=nm.start[i];} n->name[nl]=0;
+        expect(l,TK_LBRACE);
+        Node **variants=alloc_stmts(32); int vc=0;
+        while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)&&vc<32){
+            while(check(l,TK_NL)||check(l,TK_COMMA)||check(l,TK_SEMICOLON)) eat(l);
+            if(check(l,TK_RBRACE)) break;
+            Token vt=expect(l,TK_IDENT);
+            Node *v=alloc_node(ND_IDENT);
+            int vl=vt.len<63?vt.len:63;
+            for(int i=0;i<vl;i++){v->name[i]=vt.start[i];} v->name[vl]=0;
+            v->ival=vc;
+            variants[vc++]=v;
+        }
+        expect(l,TK_RBRACE);
+        n->stmts=variants; n->stmtc=vc;
+        return n;
+    }
     if(t.kind==TK_STRUCT){
         eat(l);
         Node *n=alloc_node(ND_STRUCT);
         Token nm=expect(l,TK_IDENT);
         int nl=nm.len<63?nm.len:63;
-        for(int i=0;i<nl;i++) { n->name[i]=nm.start[i]; } n->name[nl]=0;
+        for(int i=0;i<nl;i++){n->name[i]=nm.start[i];} n->name[nl]=0;
         expect(l,TK_LBRACE);
         static Node *fields[16]; int fc=0;
         while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)){
@@ -401,7 +489,7 @@ static Node *parse_stmt(Lexer *l){
             Token fn=expect(l,TK_IDENT);
             Node *fld=alloc_node(ND_IDENT);
             int fl=fn.len<63?fn.len:63;
-            for(int i=0;i<fl;i++) { fld->name[i]=fn.start[i]; } fld->name[fl]=0;
+            for(int i=0;i<fl;i++){fld->name[i]=fn.start[i];} fld->name[fl]=0;
             if(check(l,TK_COMMA)) eat(l);
             fields[fc++]=fld;
         }
