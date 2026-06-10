@@ -33,17 +33,13 @@ Exploidus — readable, safe, and practical.
 | **v1.3** | **Process & system — `process.spawn`, `process.env`, `sys.exit`, `sys.platform`** |
 | **v1.4** | **Error messages — `file:line:col` format, typo suggestions (Levenshtein)** |
 | **v1.6** | **Module system — relative imports (`./utils.y`), circular detection, import caching** |
+| **v1.5** | **Garbage Collector — mark-and-sweep; `gc.collect()`, `gc.stats()`** |
 | **v1.7** | **Stdlib expansion — `y.json`, `y.time`, `y.env`, `y.path`** |
 | **v2.2** | **Enums — `enum Status { Ok NotFound Error }` with match integration** |
 
 ---
 
 ## Upcoming
-
-### v1.5 — Garbage Collector
-- Mark-and-sweep GC
-- Automatic memory reclamation for strings, arrays, structs
-- Runtime stack traces on uncaught throws
 
 ### v1.8 — Native Compiler Expansion
 - Exploidus OS native binary target

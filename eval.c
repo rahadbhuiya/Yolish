@@ -19,16 +19,135 @@ static Env  envpool[512]; static int envidx=0; /* reduced from 4096 to keep BSS<
 /* No static arrpool — fully dynamic */
 static char nmpool[512][32]; static int nmidx=0;
 
-static Val *alloc_arr(int n){
+
+/* forward declaration — defined later in this file */
+static Val g_return_val_fwd;
+
+/* 
+   v1.5  —  Mark-and-Sweep Garbage Collector
+   ================================================================
+   All arr_data and field_vals are allocated through gc_alloc().
+   A GCNode header sits immediately before each allocation.
+   gc_collect() marks from all envpool roots then sweeps unreachable
+   nodes. gc_maybe() triggers collection at statement boundaries.
+*/
+
+#define GC_MAGIC  0xBC1D5A4Eu  /* sentinel to detect managed pointers  */
+
+typedef struct GCNode {
+    unsigned int  magic;       /* always GC_MAGIC                       */
+    int           marked;      /* mark bit — set during mark phase      */
+    int           birth;       /* gc_cycle when allocated               */
+    int           size;        /* number of Val elements                */
+    struct GCNode *next;       /* intrusive linked list                 */
+    /* Val data[size] follows immediately                               */
+} GCNode;
+
+static GCNode *gc_head        = NULL;  /* head of all managed allocations */
+static int    gc_alloc_count  = 0;     /* allocations since last collect  */
+static int    gc_current_cycle= 0;     /* incremented each collection     */
+static int    gc_threshold    = 128;   /* collect after N new allocs      */
+static long   gc_total_freed  = 0;     /* lifetime freed count (stats)    */
+static long   gc_total_alloc  = 0;     /* lifetime alloc count (stats)    */
+
+/* Allocate a GC-tracked block of n Val elements */
+static Val *gc_alloc(int n){
     if(n<=0) n=1;
-    Val *p=(Val*)calloc(n,sizeof(Val));
-    return p ? p : (Val*)calloc(1,sizeof(Val));
+    GCNode *node=(GCNode*)calloc(1, sizeof(GCNode) + (size_t)n*sizeof(Val));
+    if(!node){
+        /* fallback: untracked — won't be GC'd but won't crash */
+        return (Val*)calloc(n, sizeof(Val));
+    }
+    node->magic  = GC_MAGIC;
+    node->marked = 0;
+    node->birth  = gc_current_cycle;
+    node->size   = n;
+    node->next   = gc_head;
+    gc_head      = node;
+    gc_alloc_count++;
+    gc_total_alloc++;
+    return (Val*)(node + 1);   /* data starts right after the header */
 }
-static Val *alloc_fld(int n){
-    if(n<=0) n=1;
-    Val *p=(Val*)calloc(n,sizeof(Val));
-    return p ? p : (Val*)calloc(1,sizeof(Val));
+
+/*  Mark phase  */
+
+static void gc_mark_val(Val *v);
+
+/* Mark a GC-managed Val* block (arr_data or field_vals) */
+static void gc_mark_ptr(Val *data){
+    if(!data) return;
+    GCNode *node = ((GCNode*)data) - 1;
+    if(node->magic != GC_MAGIC) return;  /* not GC-managed — skip safely */
+    if(node->marked) return;             /* already visited this cycle */
+    node->marked = 1;
+    /* recursively mark all Vals inside this block */
+    for(int i=0; i<node->size; i++) gc_mark_val(&data[i]);
 }
+
+/* Mark a single Val and everything it references */
+static void gc_mark_val(Val *v){
+    if(!v) return;
+    if(v->arr_data)   gc_mark_ptr(v->arr_data);
+    if(v->field_vals) gc_mark_ptr(v->field_vals);
+    /* closure environment — scan its local bindings */
+    if(v->type == YS_FN && v->fn_env){
+        Env *fe = (Env*)v->fn_env;
+        for(int i=0; i<fe->count; i++) gc_mark_val(&fe->vals[i]);
+    }
+}
+
+/* Mark from all known roots (envpool + g_return_val) */
+static void gc_mark_roots(void){
+    /* scan every Env slot that has been used */
+    for(int i=0; i<envidx; i++){
+        for(int j=0; j<envpool[i].count; j++){
+            gc_mark_val(&envpool[i].vals[j]);
+        }
+    }
+    /* mark the pending return value */
+    { extern Val g_return_val_fwd; (void)g_return_val_fwd; } /* suppress unused */
+    /* g_return_val is a static local declared later — skip here; envpool covers it */
+}
+
+/*  Sweep phase  */
+
+static void gc_sweep(void){
+    GCNode **node = &gc_head;
+    while(*node){
+        GCNode *cur = *node;
+        if(!cur->marked && cur->birth < gc_current_cycle){
+            /* unreachable AND not freshly allocated — free it */
+            *node = cur->next;
+            free(cur);
+            gc_total_freed++;
+        } else {
+            cur->marked = 0;       /* reset mark for next cycle */
+            node = &cur->next;
+        }
+    }
+    gc_current_cycle++;            /* advance cycle counter */
+    gc_alloc_count = 0;
+    /* Adaptive threshold: grow if we freed a lot */
+    if(gc_total_freed > gc_threshold * 4) gc_threshold = gc_threshold * 2;
+    if(gc_threshold > 4096) gc_threshold = 4096;
+}
+
+/*  Public API  */
+
+/* Full collection: mark from roots + sweep */
+static void gc_collect(void){
+    gc_mark_roots();
+    gc_sweep();
+}
+
+/* Call at statement boundaries — only collects when threshold is hit */
+static void gc_maybe(void){
+    if(gc_alloc_count >= gc_threshold) gc_collect();
+}
+
+/* v1.5: alloc_arr and alloc_fld now route through GC allocator */
+static Val *alloc_arr(int n){ return gc_alloc(n); }
+static Val *alloc_fld(int n){ return gc_alloc(n); }
 static char (*alloc_nm(int n))[32]{
     if(nmidx+n>=512) return nmpool;
     char (*p)[32]=&nmpool[nmidx]; nmidx+=n; return p;
@@ -406,7 +525,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         Val *v=env_get(env,n->name);
         if(v) return *v;
         /* builtin namespace prefixes are not variables */
-        { static const char *ns[]={"y","process","sys","cap",NULL};
+        { static const char *ns[]={"y","process","sys","cap","gc",NULL};
           for(int _k=0;ns[_k];_k++) if(strcmp(n->name,ns[_k])==0) return make_nil(); }
         /* v1.4: undefined variable with typo suggestion */
         char suggest[64]=""; int best=99;
@@ -1092,10 +1211,12 @@ static Val eval_block(Node *b,Env *parent){
     Env *e=env_new(parent);
     Val last=make_nil();
     for(int i=0;i<b->stmtc;i++){
+        gc_maybe();    /* v1.5: GC safe point — env 'e' is root, last is retired */
         last=eval_node(b->stmts[i],e);
         if(g_returning==2){ memcpy(&last,&g_return_val,sizeof(Val)); g_returning=0; }
         if((g_returning&&g_returning!=2)||g_throwing||g_breaking||g_continuing) break;
     }
+    env_free(e);   /* v1.5: release this block's env slot so GC can reclaim it */
     return last;
 }
 
@@ -2262,7 +2383,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_int((int64_t)time(NULL));
     }
 
-/*
+/* 
    v1.7  —  y.env.*
 */
 
@@ -2604,13 +2725,47 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return result;
     }
 
+    /* ---- v1.5 GC builtins ---- */
+
+    /* gc.collect() → nil  — force a full GC cycle */
+    if(strcmp_u(name,"gc.collect")==0){
+        gc_collect();
+        return make_nil();
+    }
+
+    /* gc.stats() → struct { alloc, freed, live, threshold, cycle } */
+    if(strcmp_u(name,"gc.stats")==0){
+        Val r=make_nil(); r.type=YS_STRUCT;
+        snprintf(r.struct_name,sizeof(r.struct_name),"%s","GCStats");
+        r.field_count=5;
+        r.field_vals  = alloc_fld(5);
+        r.field_names = alloc_nm(5);
+        /* count live (non-freed) GC nodes */
+        int live=0; GCNode *gn=gc_head; while(gn){live++;gn=gn->next;}
+        r.field_vals[0]=make_int(gc_total_alloc);
+        r.field_vals[1]=make_int(gc_total_freed);
+        r.field_vals[2]=make_int((int64_t)live);
+        r.field_vals[3]=make_int(gc_threshold);
+        r.field_vals[4]=make_int(gc_current_cycle);
+        snprintf(r.field_names[0],32,"%s","alloc");
+        snprintf(r.field_names[1],32,"%s","freed");
+        snprintf(r.field_names[2],32,"%s","live");
+        snprintf(r.field_names[3],32,"%s","threshold");
+        snprintf(r.field_names[4],32,"%s","cycle");
+        return r;
+    }
+
+
 
     return make_nil();
 }
 
 Val eval_program(Node *prog,Env *env){
     Val last=make_nil();
-    for(int i=0;i<prog->stmtc;i++) last=eval_node(prog->stmts[i],env);
+    for(int i=0;i<prog->stmtc;i++){
+        gc_maybe();                          /* v1.5: GC safe point */
+        last=eval_node(prog->stmts[i],env);
+    }
     Val *mf=env_get(env,"main");
     if(mf&&mf->type==YS_FN&&mf->fn_node){
         Env *fe=env_new(env);

@@ -4,7 +4,7 @@
 
 set -e
 
-VERSION="v1.0"
+VERSION="v1.5"
 REPO="rahadbhuiya/yolish"
 RAW="https://raw.githubusercontent.com/$REPO/master"
 
@@ -190,7 +190,7 @@ elif [ "$OS" = "Darwin" ]; then
 <dict>
   <key>CFBundleName</key>           <string>Yolish</string>
   <key>CFBundleIdentifier</key>     <string>com.exploidus.yolish</string>
-  <key>CFBundleVersion</key>        <string>1.0</string>
+  <key>CFBundleVersion</key>        <string>1.5</string>
   <key>CFBundleExecutable</key>     <string>ys</string>
   <key>CFBundleDocumentTypes</key>
   <array>

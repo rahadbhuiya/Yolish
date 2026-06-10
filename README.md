@@ -252,7 +252,7 @@ fn fetch_and_save(url, path) { ... }
 | Native → Windows PE32+ (with icon) | Done |
 | Native → macOS Mach-O | Done |
 | Native → Exploidus | Pending v1.8 |
-| Garbage collector (mark-and-sweep) | Pending v1.5 |
+| **Garbage Collector** (mark-and-sweep, `gc.collect`, `gc.stats`) | Done **v1.5** |
 | Self-hosting (Yolish compiles Yolish) | Pending v2.0 |
 | Built-in test runner (`ys test`) | Pending v2.1 |
 | Auto-formatter (`ys fmt`) | Pending v2.1 |
@@ -288,6 +288,7 @@ fn fetch_and_save(url, path) { ... }
 | **Type** | `y.typeof`, `y.is_int`, `y.is_str`, `y.is_float`, `y.is_bool`, `y.is_array`, `y.is_nil`, `y.int`, `y.str`, `y.float`, `y.bool` |
 | **Error** | `y.error(msg, code)` |
 | **Capability** | `y.capabilities()`, `y.has_cap(caps, name)` |
+| **GC** | `gc.collect()`, `gc.stats()` |
 
 ---
 
@@ -318,7 +319,6 @@ fn fetch_and_save(url, path) { ... }
 
 | Version | Plan |
 |---------|------|
-| v1.5 | Garbage collector (mark-and-sweep) |
 | v1.8 | Native → Exploidus OS target |
 | v2.0 | Self-hosting — Yolish compiles itself; bytecode VM |
 | v2.1 | Built-in test runner (`ys test`), formatter (`ys fmt`) |

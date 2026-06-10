@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v1.0  
+**Version:** v1.7  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -39,6 +39,14 @@
 29. [String Formatting Reference](#29-string-formatting-reference)
 30. [Full Example Programs](#30-full-example-programs)
 31. [Quick Reference](#31-quick-reference)
+32. [Enums](#32-enums)
+33. [File I/O — y.fs.*](#33-file-io--yfs)
+34. [JSON — y.json.*](#34-json--yjson)
+35. [Time — y.time.*](#35-time--ytime)
+36. [Path — y.path.*](#36-path--ypath)
+37. [Env — y.env.*](#37-env--yenv)
+38. [Process & System](#38-process--system)
+39. [Garbage Collector — gc.*](#39-garbage-collector--gc)
 
 ---
 
@@ -1279,7 +1287,7 @@ Running `ys` without arguments starts an interactive REPL session.
 
 ```
 $ ys
-Yolish v1.0 (Exploidus Runtime)
+Yolish v1.5 (Exploidus Runtime)
 Type "help" or "exit" to quit.
 
 ys> let x = 10
@@ -1300,6 +1308,10 @@ The REPL shares a persistent environment across lines — variables and function
 ---
 
 ## 25. Standard Library
+
+For `y.fs`, `y.json`, `y.time`, `y.path`, `y.env`, and `process` — see
+sections 33–38 below for full documentation.
+
 
 ### y.math
 
@@ -1667,3 +1679,318 @@ ys -c file.y --target linux|windows|macos
 
 *Release history: see [README.md § Release History](README.md#release-history)*  
 *Build instructions: see [BUILD.md](BUILD.md)*
+---
+
+## 32. Enums
+
+Enums define a fixed set of named values. Each variant is an integer under the hood
+but prints with its qualified name.
+
+```yolish
+enum Direction { North  South  East  West }
+enum Status    { Loading  Ready  Error  Done }
+enum HttpMethod { GET  POST  PUT  DELETE }
+```
+
+**Access variants** using `EnumName.Variant`:
+```yolish
+let dir = Direction.South
+y.println(dir)            -- Direction.South
+```
+
+**Match on enum values:**
+```yolish
+match dir {
+    Direction.North => y.println("Heading North")
+    Direction.South => y.println("Heading South")
+    Direction.East  => y.println("Heading East")
+    Direction.West  => y.println("Heading West")
+}
+```
+
+**Compare enum values:**
+```yolish
+let a = Direction.East
+let b = Direction.East
+y.println(a == b)                    -- true
+y.println(a == Direction.West)       -- false
+```
+
+---
+
+## 33. File I/O — y.fs.*
+
+```yolish
+y.fs.write(path, data)     -- write string to file (creates or overwrites)
+y.fs.append(path, data)    -- append string to file
+y.fs.read(path)            -- read entire file as string
+y.fs.exists(path)          -- bool — file or directory exists
+y.fs.size(path)            -- int — file size in bytes (-1 on error)
+y.fs.is_dir(path)          -- bool — path is a directory
+y.fs.list(dir)             -- array of filenames in directory
+y.fs.mkdir(path)           -- create directory (bool — success)
+y.fs.delete(path)          -- delete file or empty directory (bool)
+y.fs.rename(old, new)      -- rename/move file (bool)
+```
+
+**Examples:**
+```yolish
+-- Write and read
+y.fs.write("notes.txt", "Hello Yolish!
+")
+y.fs.append("notes.txt", "Second line.
+")
+let text = y.fs.read("notes.txt")
+y.print(text)
+
+-- Check and inspect
+y.println(y.fs.exists("notes.txt"))   -- true
+y.println(y.fs.size("notes.txt"))     -- 26
+y.println(y.fs.is_dir("."))           -- true
+
+-- Directory operations
+y.fs.mkdir("output")
+let files = y.fs.list(".")
+for f in files { y.println(f) }
+
+-- Rename and delete
+y.fs.rename("notes.txt", "notes_v2.txt")
+y.fs.delete("notes_v2.txt")
+```
+
+**Note:** File paths are relative to the script's directory.
+
+---
+
+## 34. JSON — y.json.*
+
+```yolish
+y.json.parse(str)       -- parse JSON string → value
+y.json.stringify(val)   -- convert value → JSON string
+```
+
+**Supported types:** `int`, `float`, `bool`, `nil`/`null`, `str`, arrays, structs/objects.
+
+**Important:** Use backtick strings `` `...` `` for JSON with `{}` braces,
+since `{expr}` triggers string interpolation in regular `"..."` strings.
+
+```yolish
+-- Parse a JSON object
+let obj = y.json.parse(`{"name": "Yolish", "version": 1, "stable": true}`)
+y.println(obj.name)             -- Yolish
+y.println(obj.version)          -- 1
+y.println(obj.stable)           -- true
+
+-- Parse a JSON array
+let arr = y.json.parse("[10, 20, 30]")
+y.println(arr)
+
+-- Parse primitives
+let n = y.json.parse("42")
+let f = y.json.parse("3.14")
+let b = y.json.parse("true")
+
+-- Stringify
+y.println(y.json.stringify(42))         -- 42
+y.println(y.json.stringify("hello"))    -- "hello"
+y.println(y.json.stringify(true))       -- true
+
+-- Read JSON config file
+y.fs.write("config.json", `{"debug": false, "port": 8080}`)
+let cfg = y.json.parse(y.fs.read("config.json"))
+y.println(cfg.port)                     -- 8080
+```
+
+---
+
+## 35. Time — y.time.*
+
+```yolish
+y.time.now()              -- int — milliseconds since Unix epoch
+y.time.unix()             -- int — seconds since Unix epoch
+y.time.sleep(ms)          -- sleep for N milliseconds
+y.time.format(ms, fmt)    -- format timestamp as string
+```
+
+**Format strings** follow `strftime` conventions:
+`%Y` year, `%m` month, `%d` day, `%H` hour, `%M` minute, `%S` second.
+
+```yolish
+let now = y.time.now()
+y.println(y.time.format(now, "%Y-%m-%d %H:%M:%S"))   -- 2026-06-09 14:30:00
+y.println(y.time.format(now, "%Y-%m-%d"))             -- 2026-06-09
+y.println(y.time.unix())                              -- 1780967333
+
+-- Measure elapsed time
+let start = y.time.now()
+y.time.sleep(500)
+let elapsed = y.time.now() - start
+y.println(elapsed)                                    -- ~500
+```
+
+---
+
+## 36. Path — y.path.*
+
+```yolish
+y.path.join(a, b, ...)    -- join path segments with /
+y.path.basename(path)     -- filename with extension
+y.path.dirname(path)      -- parent directory
+y.path.ext(path)          -- extension including dot (e.g. ".y")
+y.path.stem(path)         -- filename without extension
+y.path.abs(path)          -- absolute path
+```
+
+```yolish
+let p = "/home/bhuiya/projects/hello.y"
+
+y.println(y.path.basename(p))         -- hello.y
+y.println(y.path.dirname(p))          -- /home/bhuiya/projects
+y.println(y.path.ext(p))              -- .y
+y.println(y.path.stem(p))             -- hello
+y.println(y.path.join("/home", "bhuiya", "code"))  -- /home/bhuiya/code
+
+-- Check file type
+let ext = y.path.ext("script.y")
+if ext == ".y" {
+    y.println("Yolish file!")
+}
+```
+
+---
+
+## 37. Env — y.env.*
+
+```yolish
+y.env.get(key)         -- string or nil — get environment variable
+y.env.set(key, val)    -- set environment variable
+y.env.unset(key)       -- remove environment variable
+```
+
+```yolish
+let home = y.env.get("HOME")
+y.println(home)                      -- /home/bhuiya
+
+y.env.set("MY_APP_MODE", "debug")
+let mode = y.env.get("MY_APP_MODE")
+y.println(mode)                      -- debug
+
+y.env.unset("MY_APP_MODE")
+y.println(y.env.get("MY_APP_MODE"))  -- nil
+```
+
+---
+
+## 38. Process & System
+
+```yolish
+-- Run a shell command, capture stdout
+process.spawn(cmd)          -- string (stdout output)
+process.spawn_code(cmd)     -- int (exit code)
+process.env(key)            -- string or nil (environment variable)
+process.pid()               -- int (current process ID)
+
+-- System
+sys.exit(code)              -- exit with given code
+sys.platform()              -- "linux" | "windows" | "macos"
+```
+
+```yolish
+-- Run command and capture output
+let kernel = process.spawn("uname -s")
+y.print(kernel)                         -- Linux
+
+let code = process.spawn_code("true")
+y.println(code)                         -- 0
+
+-- Read environment
+let home = process.env("HOME")
+y.println(home)                         -- /home/bhuiya
+
+-- System info
+y.println(sys.platform())               -- linux
+y.println(process.pid())                -- 1234
+
+-- Exit with code
+if some_error {
+    sys.exit(1)
+}
+```
+
+---
+
+## 39. Garbage Collector — gc.*
+
+Yolish v1.5 ships a **mark-and-sweep garbage collector**. All array and struct
+field allocations are automatically tracked. The GC runs periodically between
+statements and frees unreachable objects.
+
+### How it works
+
+1. **Allocate** — every `alloc_arr` / `alloc_fld` call goes through the GC allocator
+2. **Mark** — scan all live environments, mark every reachable array/struct block
+3. **Sweep** — free all unmarked allocations from previous cycles
+4. **Cycle protection** — objects allocated in the current cycle are never freed prematurely
+
+The GC triggers automatically every ~128 allocations. You can also control it manually.
+
+### Builtins
+
+```yolish
+gc.collect()   -- force a full mark-and-sweep cycle
+gc.stats()     -- returns a struct with GC diagnostics
+```
+
+`gc.stats()` returns a struct with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `alloc` | int | total allocations since start |
+| `freed` | int | total objects freed so far |
+| `live` | int | currently live (tracked) objects |
+| `threshold` | int | allocs before next auto-collect |
+| `cycle` | int | number of GC cycles completed |
+
+### Examples
+
+```yolish
+-- Check GC state
+let s = gc.stats()
+y.print("live: ")  y.println(s.live)
+y.print("freed: ") y.println(s.freed)
+y.print("cycle: ") y.println(s.cycle)
+
+-- Force a collection
+gc.collect()
+
+-- Memory-intensive loop — GC automatically reclaims old arrays
+var i = 0
+while i < 1000 {
+    let data = [i, i+1, i+2, i+3, i+4]
+    -- previous iteration's 'data' is overwritten → freed by GC
+    i = i + 1
+}
+
+-- Verify collection happened
+let after = gc.stats()
+y.print("freed: ") y.println(after.freed)     -- significant number
+y.print("reclaim %: ")
+y.println((after.freed * 100) / after.alloc)  -- > 50%
+```
+
+### What the GC reclaims
+
+| Situation | Reclaimed? |
+|-----------|------------|
+| Array overwritten by new assignment |  Yes |
+| Struct created in loop, overwritten |  Yes |
+| Temporary arrays inside functions |  Yes (after function returns) |
+| Array stored in a live variable |  No (correctly kept alive) |
+| Array returned from a function |  No (correctly kept alive) |
+
+### Notes
+
+- The GC is **conservative** — it may keep some objects alive longer than necessary,
+  but it will never free a live object
+- For long-running programs, call `gc.collect()` explicitly at natural checkpoints
+- `gc.stats().freed` resets to 0 on each collection cycle
