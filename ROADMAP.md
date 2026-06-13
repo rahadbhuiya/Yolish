@@ -35,6 +35,7 @@ Exploidus — readable, safe, and practical.
 | **v1.6** | **Module system — relative imports (`./utils.y`), circular detection, import caching** |
 | **v1.5** | **Garbage Collector — mark-and-sweep; `gc.collect()`, `gc.stats()`** |
 | **v1.7** | **Stdlib expansion — `y.json`, `y.time`, `y.env`, `y.path`** |
+| **v2.1** | **Tooling — `ys test` (test runner), `ys fmt` (formatter), `ys check` (static analysis)** |
 | **v2.2** | **Enums — `enum Status { Ok NotFound Error }` with match integration** |
 
 ---
@@ -50,17 +51,6 @@ Exploidus — readable, safe, and practical.
 - Yolish compiles itself
 - Bytecode VM for faster interpretation
 - Constant folding and dead code elimination
-
-### v2.1 — Tooling
-- Built-in test runner:
-  ```yolish
-  test "addition works" {
-      assert(add(2, 3) == 5)
-  }
-  ```
-- `ys test` — run all `test` blocks in a file
-- `ys fmt` — auto-format `.y` files
-- `ys check` — type-check and lint without running
 
 ### v3.0 — Exploidus Integration
 - Deep Exploidus OS kernel integration

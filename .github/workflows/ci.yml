@@ -72,6 +72,37 @@ jobs:
             | ./ys /dev/stdin | grep -q "big"
           echo "✓ match guards"
 
+      - name: Test — ys test command
+        run: |
+          cat > /tmp/ci_test.y << 'YSEOF'
+fn add(a, b) { return a + b }
+test "add" {
+    assert_eq(add(2,3), 5)
+    assert(add(0,0) == 0)
+}
+test "strings" {
+    assert(y.len("hello") == 5)
+}
+YSEOF
+          ./ys test /tmp/ci_test.y | grep -q "2 passed"
+          echo "✓ ys test"
+
+      - name: Test — ys check command
+        run: |
+          echo 'let x = 10
+y.println(x)' > /tmp/ci_clean.y
+          ./ys check /tmp/ci_clean.y | grep -q "No issues"
+          echo "✓ ys check"
+
+      - name: Test — assert builtins
+        run: |
+          echo 'assert(1 == 1)
+assert_eq(2 + 2, 4)
+assert_true(true)
+assert_false(false)
+y.println("ok")' | ./ys /dev/stdin | grep -q "ok"
+          echo "✓ assert builtins"
+
       - name: Test — native compiler (Linux ELF)
         run: |
           echo 'y.println("compiled!")' > /tmp/nc_test.y

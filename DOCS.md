@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v1.7  
+**Version:** v2.1  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -47,7 +47,9 @@
 37. [Env — y.env.*](#37-env--yenv)
 38. [Process & System](#38-process--system)
 39. [Garbage Collector — gc.*](#39-garbage-collector--gc)
-
+40. [Testing — ys test](#40-testing--ys-test)
+41. [Static Checker — ys check](#41-static-checker--ys-check)
+42. [Formatter — ys fmt](#42-formatter--ys-fmt)
 ---
 
 ## 1. Variables
@@ -1983,7 +1985,7 @@ y.println((after.freed * 100) / after.alloc)  -- > 50%
 | Situation | Reclaimed? |
 |-----------|------------|
 | Array overwritten by new assignment |  Yes |
-| Struct created in loop, overwritten |  Yes |
+| Struct created in loop, overwritten | ✅Yes |
 | Temporary arrays inside functions |  Yes (after function returns) |
 | Array stored in a live variable |  No (correctly kept alive) |
 | Array returned from a function |  No (correctly kept alive) |
@@ -1994,3 +1996,159 @@ y.println((after.freed * 100) / after.alloc)  -- > 50%
   but it will never free a live object
 - For long-running programs, call `gc.collect()` explicitly at natural checkpoints
 - `gc.stats().freed` resets to 0 on each collection cycle
+
+---
+
+## 40. Testing — ys test
+
+Write `test` blocks anywhere in a `.y` file:
+
+```yolish
+test "description" {
+    -- assertions go here
+    assert(expr)
+    assert_eq(actual, expected)
+}
+```
+
+Run with:
+```bash
+ys test file.y
+```
+
+Output:
+```
+Running tests in math.y
+
+  ✓  addition (3 assertions)
+  ✓  factorial (3 assertions)
+  ✗  broken test
+    assertion failed: expected [5], got [6]
+
+2 passed, 1 failed
+```
+
+Exit code is `0` if all pass, `1` if any fail — works with CI.
+
+### Assertion builtins
+
+| Function | Fails when |
+|----------|-----------|
+| `assert(expr)` | `expr` is false |
+| `assert(expr, "msg")` | `expr` is false, shows custom message |
+| `assert_eq(actual, expected)` | `actual != expected` |
+| `assert_neq(a, b)` | `a == b` |
+| `assert_true(v)` | `v` is falsy |
+| `assert_false(v)` | `v` is truthy |
+| `assert_nil(v)` | `v` is not nil |
+
+### Example test file
+
+```yolish
+-- math.y
+fn add(a, b) { return a + b }
+fn factorial(n) {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+
+test "add works" {
+    assert_eq(add(2, 3), 5)
+    assert_eq(add(0, 0), 0)
+    assert(add(10, 20) == 30)
+}
+
+test "factorial" {
+    assert_eq(factorial(1), 1)
+    assert_eq(factorial(5), 120)
+    assert_eq(factorial(10), 3628800)
+}
+
+test "strings" {
+    let s = "hello"
+    assert(y.len(s) == 5)
+    assert_eq(y.upper(s), "HELLO")
+    assert_false(y.len(s) == 0)
+}
+```
+
+### Notes
+
+- Code outside `test` blocks runs first (setup code — define functions, load data)
+- A failing assertion stops that test block; other tests continue
+- `test` blocks are silently skipped when running with plain `ys file.y`
+
+---
+
+## 41. Static Checker — ys check
+
+```bash
+ys check file.y
+```
+
+Parses and analyzes the file **without running it**. Reports:
+- Undefined variable references
+- Calls to possibly-undefined functions
+
+```yolish
+-- buggy.y
+let username = "Bhuiya"
+y.println(usernmae)   -- typo
+```
+
+```
+$ ys check buggy.y
+buggy.y:2:11: warning: undefined 'usernmae'
+1 warning(s) found.
+```
+
+Exit code: `0` for clean, `1` if issues found. Use in CI:
+
+```bash
+ys check src/main.y && ys test src/main.y
+```
+
+### What ys check analyzes
+
+| Check | Status |
+|-------|--------|
+| Undefined variables | Done |
+| Undefined functions (non-dotted names) | Done |
+| Function parameters defined in scope | Done |
+| Enum variant names defined | Done |
+| Struct names defined | Done |
+| Import paths |  planned |
+| Type mismatches |  planned |
+
+---
+
+## 42. Formatter — ys fmt
+
+```bash
+ys fmt file.y           # prints formatted code to stdout
+ys fmt file.y > out.y   # save to new file
+ys fmt file.y > file.y  # overwrite in place
+```
+
+Normalizes:
+- **Indentation** — 4 spaces per level
+- **Trailing whitespace** — removed from every line
+- **Blank lines** — preserved
+
+```yolish
+-- before: mixed indentation
+fn greet(name) {
+let msg = "Hello " + name
+      y.println(msg)
+}
+```
+
+```yolish
+-- after: ys fmt
+fn greet(name) {
+    let msg = "Hello " + name
+    y.println(msg)
+}
+```
+
+Note: `ys fmt` preserves all string content unchanged (raw strings, backtick strings, comments).

@@ -282,22 +282,23 @@ void ys_print_val(Val v){
 }
 
 /*  Forward  */
-static Val eval_block(Node *b,Env *parent);
+Val eval_block(Node *b,Env *parent);
 static Val call_builtin(const char *name,Node **args,int argc,Env *env);
 
 /*  Safe eval: always reads g_return_val after eval_node  */
 #define EVAL_SAFE(n, env, dest) do {     eval_node((n),(env));     memcpy(&(dest), &g_return_val, sizeof(Val)); } while(0)
 
 /*  Return signal  */
-static int g_returning=0;
+int g_returning=0;
 static Val g_return_val;
 static int g_cur_line=0;  /* last known source line */
 static int g_ann_depth=0; /* annotation fire depth — suppress nested calls */
-static int g_throwing=0;     /* throw signal */
-static char g_throw_msg[512]; /* thrown message */
+int g_throwing=0;     /* throw signal */
+char g_throw_msg[512]; /* thrown message */
 static Val g_throw_val;       /* thrown value — use g_throw_msg for str content */
 static int g_breaking=0;   /* break signal — exit innermost loop */
 static int g_continuing=0;
+int g_assert_count=0; /* v2.1: assertion counter for test runner */
 
 /* v1.4: Levenshtein distance for typo suggestions in error messages */
 static int lev_dist(const char *a, const char *b){
@@ -644,6 +645,12 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     }
 
     /*  Struct definition  */
+
+    case ND_TEST:
+        /* In normal interpreter mode, test blocks are skipped.
+           Use  ys test file.y  to run them. */
+        return make_nil();
+
     case ND_ENUM:{
         /* v2.2: register EnumName.Variant (qualified only, saves env slots) */
         for(int i=0;i<n->stmtc;i++){
@@ -993,7 +1000,14 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
             ||strcmp_u(n->name,"y.reduce")==0 ||strcmp_u(n->name,"reduce")==0
             ||strcmp_u(n->name,"y.each")==0   ||strcmp_u(n->name,"each")==0
             ||strcmp_u(n->name,"y.min_arr")==0||strcmp_u(n->name,"y.max_arr")==0
-            ||strcmp_u(n->name,"y.exit")==0   ||strcmp_u(n->name,"exit")==0)
+            ||strcmp_u(n->name,"y.exit")==0   ||strcmp_u(n->name,"exit")==0
+            /* v2.1 test assertions */
+            ||strcmp_u(n->name,"assert")==0
+            ||strcmp_u(n->name,"assert_eq")==0
+            ||strcmp_u(n->name,"assert_neq")==0
+            ||strcmp_u(n->name,"assert_true")==0
+            ||strcmp_u(n->name,"assert_false")==0
+            ||strcmp_u(n->name,"assert_nil")==0)
             return call_builtin(n->name,n->args,n->argc,env);
 
         /* dot calls — build fully qualified name (handles y.math.sqrt etc) */
@@ -1206,7 +1220,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     }
 }
 
-static Val eval_block(Node *b,Env *parent){
+Val eval_block(Node *b,Env *parent){
     if(!b) return make_nil();
     Env *e=env_new(parent);
     Val last=make_nil();
@@ -2261,9 +2275,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #endif
     }
 
-/* 
+/* ================================================================
    v1.3  —  Process & System  (process.* / sys.*)
-*/
+   ================================================================ */
 
     /* process.spawn(cmd) → string (stdout captured) */
     if(strcmp_u(name,"process.spawn")==0){
@@ -2724,8 +2738,120 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         for(int i=0;i<g_nimported;i++) result.arr_data[i]=make_str(g_imported_modules[i]);
         return result;
     }
+    /*  v2.1 Test Assertion Builtins  */
 
-    /* ---- v1.5 GC builtins ---- */
+    /* assert(cond, msg?) — throws if cond is false */
+    if(strcmp_u(name,"assert")==0){
+        int sv=0; /* no receiver arg */
+        Val cond=eval_node(args[sv],env);
+        if(g_throwing) return make_nil();
+        if(!val_bool(cond)){
+            char em[256]="assertion failed";
+            if(argc>sv+1){
+                Val mv=eval_node(args[sv+1],env);
+                if(!g_throwing&&mv.type==YS_STR)
+                    snprintf(em,sizeof(em),"assertion failed: %.200s",mv.sval);
+            }
+            g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"%s",em);
+            return make_nil();
+        }
+        g_assert_count++;
+        return make_bool(1);
+    }
+
+    /* assert_eq(a, b, msg?) — throws if a != b */
+    if(strcmp_u(name,"assert_eq")==0){
+        int sv=0; /* no receiver arg */
+        Val a=eval_node(args[sv],env);
+        Val b=eval_node(args[sv+1],env);
+        if(g_throwing) return make_nil();
+        int eq=(a.type==b.type);
+        if(eq){
+            if(a.type==YS_INT)   eq=(a.ival==b.ival);
+            else if(a.type==YS_FLOAT) eq=(a.fval==b.fval);
+            else if(a.type==YS_BOOL)  eq=(a.bval==b.bval);
+            else if(a.type==YS_STR)   eq=(strcmp_u(a.sval,b.sval)==0);
+            else eq=1;
+        }
+        if(!eq){
+            char em[512];
+            /* format expected vs got */
+            char sa[64]={0}, sb[64]={0};
+            if(a.type==YS_INT){char t[32];int_to_str(a.ival,t);for(int i=0;t[i]&&i<62;i++)sa[i]=t[i];}
+            else if(a.type==YS_STR){for(int i=0;a.sval[i]&&i<62;i++)sa[i]=a.sval[i];}
+            else if(a.type==YS_BOOL){sa[0]=a.bval?'t':'f';}
+            if(b.type==YS_INT){char t[32];int_to_str(b.ival,t);for(int i=0;t[i]&&i<62;i++)sb[i]=t[i];}
+            else if(b.type==YS_STR){for(int i=0;b.sval[i]&&i<62;i++)sb[i]=b.sval[i];}
+            else if(b.type==YS_BOOL){sb[0]=b.bval?'t':'f';}
+            snprintf(em,sizeof(em),"assert_eq failed: expected [%s], got [%s]",sb,sa);
+            g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"%s",em);
+            return make_nil();
+        }
+        g_assert_count++;
+        return make_bool(1);
+    }
+
+    /* assert_neq(a, b, msg?) */
+    if(strcmp_u(name,"assert_neq")==0){
+        int sv=0;
+        Val a=eval_node(args[sv],env);
+        Val b=eval_node(args[sv+1],env);
+        if(g_throwing) return make_nil();
+        int eq=(a.type==b.type);
+        if(eq){
+            if(a.type==YS_INT)  eq=(a.ival==b.ival);
+            else if(a.type==YS_STR) eq=(strcmp_u(a.sval,b.sval)==0);
+            else if(a.type==YS_BOOL) eq=(a.bval==b.bval);
+        }
+        if(eq){
+            g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"assert_neq failed: values are equal");
+            return make_nil();
+        }
+        g_assert_count++;
+        return make_bool(1);
+    }
+
+    /* assert_nil(v) */
+    if(strcmp_u(name,"assert_nil")==0){
+        int sv=0;
+        Val v=eval_node(args[sv],env);
+        if(g_throwing) return make_nil();
+        if(v.type!=YS_NIL){
+            g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"assert_nil failed: value is not nil");
+            return make_nil();
+        }
+        g_assert_count++;
+        return make_bool(1);
+    }
+
+    /* assert_true(v) / assert_false(v) */
+    if(strcmp_u(name,"assert_true")==0){
+        int sv=0;
+        Val v=eval_node(args[sv],env);
+        if(g_throwing) return make_nil();
+        if(!val_bool(v)){
+            g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"assert_true failed");
+            return make_nil();
+        }
+        g_assert_count++;
+        return make_bool(1);
+    }
+
+    if(strcmp_u(name,"assert_false")==0){
+        int sv=0;
+        Val v=eval_node(args[sv],env);
+        if(g_throwing) return make_nil();
+        if(val_bool(v)){
+            g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"assert_false failed");
+            return make_nil();
+        }
+        g_assert_count++;
+        return make_bool(1);
+    }
+
+
+
+    /*  v1.5 GC builtins  */
 
     /* gc.collect() → nil  — force a full GC cycle */
     if(strcmp_u(name,"gc.collect")==0){

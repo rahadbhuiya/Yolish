@@ -24,7 +24,7 @@ typedef enum {
     TK_FOR, TK_IN, TK_RETURN, TK_STRUCT, TK_IMPL,
     TK_MATCH, TK_UNSAFE, TK_TRUE, TK_FALSE, TK_IMPORT,
     TK_TRY, TK_CATCH, TK_THROW, TK_AS,
-    TK_BREAK, TK_CONTINUE, TK_ENUM,
+    TK_BREAK, TK_CONTINUE, TK_ENUM, TK_TEST,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_GT, TK_LTE, TK_GTE,
     TK_AND, TK_OR, TK_NOT, TK_ARROW, TK_FAT_ARROW, TK_DOTDOT, TK_DOT,
@@ -57,6 +57,7 @@ typedef enum {
     ND_IMPL,
     ND_MATCH_ARM,
     ND_ENUM,  /* v2.2: enum declaration */
+    ND_TEST,  /* v2.1: test block */
 } NodeKind;
 
 typedef struct Node Node;
@@ -158,4 +159,13 @@ void  ys_error(int line, int column, const char *msg);
 void  parser_pool_save(void);
 void  parser_pool_restore(void);
 extern char g_src_dir[512];
+/* compiler target — defined in compiler.c */
+typedef enum { TARGET_LINUX, TARGET_WINDOWS, TARGET_MACOS } Target;
+void ys_compile(Node *prog, Target target, const char *outfile);
+/* v2.1: exposed for main.c test runner */
+extern int  g_throwing;
+extern int  g_returning;
+extern char g_throw_msg[512];
+Val eval_block(Node *b, Env *parent);
+extern int  g_assert_count;  /* v2.1: assertions in current test */
 extern char g_src_file[512]; /* v1.4: current source filename */

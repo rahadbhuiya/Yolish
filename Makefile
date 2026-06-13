@@ -1,4 +1,4 @@
-#  Yolish v1.5 — Makefile
+#  Yolish v1.0 — Makefile
 #  Targets: all  debug  windows  icons  release  clean
 
 CC       ?= gcc
@@ -11,7 +11,7 @@ CFLAGS    = -std=c11 -Wall -O2
 SAN       = -fsanitize=address,undefined -fno-omit-frame-pointer -g
 
 SRCS      = lexer.c parser.c eval.c compiler.c \
-            elf_out.c pe_out.c macho_out.c main.c
+            elf_out.c pe_out.c macho_out.c formatter.c checker.c main.c
 
 ICONS_DIR = icons
 

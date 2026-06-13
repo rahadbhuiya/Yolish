@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.7-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.1-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -107,6 +107,9 @@ ys -c <file.y> -o <name>        Compile with custom output name
 ys -c <file.y> --target linux   Compile → Linux ELF64
 ys -c <file.y> --target windows Compile → Windows PE32+
 ys -c <file.y> --target macos   Compile → macOS Mach-O
+ys test <file.y>                Run test blocks
+ys fmt  <file.y>                Format source (prints to stdout)
+ys check <file.y>               Static check without running
 ys --help                       Show help
 ```
 
@@ -253,9 +256,10 @@ fn fetch_and_save(url, path) { ... }
 | Native → macOS Mach-O | Done |
 | Native → Exploidus | Pending v1.8 |
 | **Garbage Collector** (mark-and-sweep, `gc.collect`, `gc.stats`) | Done **v1.5** |
+| **Built-in test runner** (`ys test`, `test` blocks, `assert*`) | Done **v2.1** |
+| **Static checker** (`ys check` — undefined vars, type hints) | Done **v2.1** |
+| **Code formatter** (`ys fmt` — prints formatted source) | Done **v2.1** |
 | Self-hosting (Yolish compiles Yolish) | Pending v2.0 |
-| Built-in test runner (`ys test`) | Pending v2.1 |
-| Auto-formatter (`ys fmt`) | Pending v2.1 |
 
 ---
 
@@ -289,6 +293,7 @@ fn fetch_and_save(url, path) { ... }
 | **Error** | `y.error(msg, code)` |
 | **Capability** | `y.capabilities()`, `y.has_cap(caps, name)` |
 | **GC** | `gc.collect()`, `gc.stats()` |
+| **Test** | `assert(expr)`, `assert_eq(a,b)`, `assert_neq(a,b)`, `assert_true(v)`, `assert_false(v)`, `assert_nil(v)` |
 
 ---
 
@@ -321,7 +326,6 @@ fn fetch_and_save(url, path) { ... }
 |---------|------|
 | v1.8 | Native → Exploidus OS target |
 | v2.0 | Self-hosting — Yolish compiles itself; bytecode VM |
-| v2.1 | Built-in test runner (`ys test`), formatter (`ys fmt`) |
 | v3.0 | Deep Exploidus OS integration; official shell language |
 
 See [ROADMAP.md](ROADMAP.md) for full details.

@@ -126,7 +126,7 @@ static void add_call_patch(int off, const char *target){
 }
 
 /*  target  */
-typedef enum { TARGET_LINUX, TARGET_WINDOWS, TARGET_MACOS } Target;
+/* Target typedef and ys_compile declaration moved to yolish.h */
 static Target g_target=TARGET_LINUX;
 
 /*  forward declarations  */
@@ -835,7 +835,6 @@ static void resolve_calls(void){
 }
 
 /*  public compile function  */
-void ys_compile(Node *prog, Target target, const char *outfile);
 
 /*  output format declarations  */
 extern int elf_write(const char *path,

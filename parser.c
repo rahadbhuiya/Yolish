@@ -64,6 +64,7 @@ static const char *tok_name(TokenKind k){
     case TK_RETURN:   return "'return'";
     case TK_STRUCT:   return "'struct'";
     case TK_ENUM:     return "'enum'";
+    case TK_TEST:     return "'test'";
     case TK_MATCH:    return "'match'";
     case TK_IMPORT:   return "'import'";
     case TK_IN:       return "'in'";
@@ -133,6 +134,7 @@ static Node *parse_primary(Lexer *l){
     }
     if(t.kind==TK_IDENT){
         eat(l); Node*n=alloc_node(ND_IDENT);
+        n->line=t.line; n->column=t.column;
         int len=t.len<63?t.len:63;
         for(int i=0;i<len;i++) n->name[i]=t.start[i];
         n->name[len]=0;
@@ -452,6 +454,22 @@ static Node *parse_stmt(Lexer *l){
     }
 
     /* struct Point { x, y } */
+
+    /* v2.1: test "description" { ... } */
+    if(t.kind==TK_TEST){
+        eat(l);
+        Node *n=alloc_node(ND_TEST);
+        n->line=t.line; n->column=t.column;
+        /* description string */
+        if(check(l,TK_STR)){
+            Token dt=eat(l);
+            int dl=dt.len<8190?dt.len:8190;
+            for(int i=0;i<dl;i++){n->sval[i]=dt.start[i];} n->sval[dl]=0;
+        }
+        /* test body block */
+        n->body=parse_block(l);
+        return n;
+    }
     /* v2.2: enum Foo { A  B  C } */
     if(t.kind==TK_ENUM){
         eat(l);
