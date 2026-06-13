@@ -32,7 +32,7 @@ jobs:
           gcc -std=c11 -O2 -static \
             -o ys-linux \
             lexer.c parser.c eval.c compiler.c \
-            elf_out.c pe_out.c macho_out.c main.c -lm
+            elf_out.c pe_out.c macho_out.c formatter.c checker.c main.c -lm
           chmod +x ys-linux
 
       - name: Build Windows binary
@@ -123,7 +123,7 @@ jobs:
           gcc -std=c11 -O2 \
             -o ys-macos \
             lexer.c parser.c eval.c compiler.c \
-            elf_out.c pe_out.c macho_out.c main.c -lm
+            elf_out.c pe_out.c macho_out.c formatter.c checker.c main.c -lm
           chmod +x ys-macos
 
       - name: Upload macOS binary
