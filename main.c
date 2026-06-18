@@ -24,7 +24,7 @@ int  ys_check(Node *prog, const char *filename);
 /*  REPL  */
 
 static void run_repl(void){
-    fprintf(stdout,"  Yolish v2.1 (Exploidus Runtime)\n");
+    fprintf(stdout,"  Yolish v2.3 (Exploidus Runtime)\n");
     fprintf(stdout,"  Type \"help\" or \"exit\" to quit.\n\n");
 
     Env *env=env_new(NULL);
@@ -54,7 +54,7 @@ static void run_repl(void){
 }
 
 
-/*  ys test <file.y> */
+/*  ys test <file.y>  */
 
 static int run_tests(const char *tfile) {
     FILE *f=fopen(tfile,"r");
@@ -116,7 +116,7 @@ static int run_fmt(const char *ffile) {
 }
 
 
-/*  ys check <file.y>   */
+/*  ys check <file.y>  */
 
 static int run_check(const char *cfile) {
     FILE *f=fopen(cfile,"r");
@@ -131,7 +131,7 @@ static int run_check(const char *cfile) {
 }
 
 
-/*  Usage   */
+/*  Usage  */
 
 static void usage(void){
     fprintf(stderr,
@@ -148,7 +148,7 @@ static void usage(void){
 }
 
 
-/*  main */
+/*  main  */
 
 int main(int argc,char **argv){
 

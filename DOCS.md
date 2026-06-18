@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.1  
+**Version:** v2.3  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -497,6 +497,17 @@ y.each(nums, fn(x) { y.print(x)  y.print(" ") })
 ---
 
 ## 9. Arrays
+
+`y.push` and `y.pop` always return a **new array** — the original is never mutated.
+Arrays use capacity-doubling internally (v2.3), so repeated pushes are O(1) amortized.
+
+```yolish
+let a = [1, 2, 3]
+let b = y.push(a, 4)
+y.println(y.len(a))   -- 3  (a is unchanged)
+y.println(y.len(b))   -- 4
+```
+
 
 ### Create
 
@@ -1985,7 +1996,7 @@ y.println((after.freed * 100) / after.alloc)  -- > 50%
 | Situation | Reclaimed? |
 |-----------|------------|
 | Array overwritten by new assignment |  Yes |
-| Struct created in loop, overwritten | ✅Yes |
+| Struct created in loop, overwritten |  Yes |
 | Temporary arrays inside functions |  Yes (after function returns) |
 | Array stored in a live variable |  No (correctly kept alive) |
 | Array returned from a function |  No (correctly kept alive) |

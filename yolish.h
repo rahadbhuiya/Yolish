@@ -104,6 +104,7 @@ struct Val {
     char     cap_path[128];
     Val     *arr_data;
     int      arr_len;
+    int      arr_cap;  /* v1.9: allocated capacity (0 = same as arr_len) */
     char     struct_name[32];
     Val     *field_vals;
     char   (*field_names)[32];

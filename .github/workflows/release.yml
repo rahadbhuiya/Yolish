@@ -59,7 +59,7 @@ jobs:
             | Windows x64 | [`ys.exe`](../../releases/download/${{ github.ref_name }}/ys.exe) |
             | Linux x64 | [`ys-linux`](../../releases/download/${{ github.ref_name }}/ys-linux) |
             | macOS x64 | [`ys-macos`](../../releases/download/${{ github.ref_name }}/ys-macos) |
-            | VS Code extension | [`yolish-*.vsix`](../../releases/download/${{ github.ref_name }}/yolish-2.1.0.vsix) |
+            | VS Code extension | [`yolish-*.vsix`](../../releases/download/${{ github.ref_name }}/yolish-2.3.0.vsix) |
 
             ### Install
 
@@ -79,7 +79,7 @@ jobs:
             ```
             or:
             ```cmd
-            code --install-extension yolish-2.1.0.vsix
+            code --install-extension yolish-2.3.0.vsix
             ```
 
             ### What's new in ${{ github.ref_name }}
@@ -90,6 +90,7 @@ jobs:
             - **v1.4** Error messages — `file:line:col` format with typo suggestions
             - **v1.5** Garbage Collector — mark-and-sweep GC, `gc.collect()`, `gc.stats()`
             - **v2.1** Tooling — `ys test` (test runner), `ys fmt` (formatter), `ys check` (static analysis)
+            - **v2.3** Scalability — dynamic node pool, 1024-element arrays, O(1) amortized push/pop
             - **v1.6** Module system — relative imports (`./utils.y`), circular detection, caching
             - **v1.7** Stdlib — `y.json`, `y.time`, `y.env`, `y.path`
             - **v2.2** Enums — `enum Direction { North South East West }` with match integration

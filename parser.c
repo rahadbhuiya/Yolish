@@ -7,21 +7,48 @@ static Node *parse_block(Lexer *l);
 static Node *parse_binop(Lexer *l, int min_prec);
 
 /* simple allocator using stack-like bump */
-static Node pool[2048];
-static int pool_idx=0;
+/* v1.9: chunk-based node allocator — pointers never invalidated */
+#define NODE_CHUNK_SIZE 2048
+
+typedef struct NodeChunk {
+    Node             nodes[NODE_CHUNK_SIZE];
+    struct NodeChunk *next;
+    int               used;
+} NodeChunk;
+
+static NodeChunk *chunk_head = NULL;
+static int        pool_idx   = 0; /* total allocated (for save/restore) */
+
+static void pool_ensure(void){
+    if(chunk_head && chunk_head->used < NODE_CHUNK_SIZE) return;
+    NodeChunk *nc = (NodeChunk*)calloc(1, sizeof(NodeChunk));
+    if(!nc){ fprintf(stderr,"ys: out of memory (node pool)\n"); return; }
+    nc->next = chunk_head;
+    nc->used = 0;
+    chunk_head = nc;
+}
 
 /* statement pointer pool — avoids static array re-entry bug */
 static Node *stmt_pool[8192];
 static int   stmt_pool_idx=0;
+/* v1.9: persistent array element pool — never reset by save/restore */
+#define ARR_ELEM_POOL 65536
+static Node *arr_elem_pool[ARR_ELEM_POOL];
+static int   arr_elem_idx = 0;
+
+
 static Node **alloc_stmts(int n){
+    if(stmt_pool_idx+n>=8192) stmt_pool_idx=0; /* wrap-around safety */
     Node **p=&stmt_pool[stmt_pool_idx];
-    stmt_pool_idx+=n; if(stmt_pool_idx>4096)stmt_pool_idx=4096;
+    stmt_pool_idx+=n;
     return p;
 }
 static Node *alloc_node(NodeKind k){
-    if(pool_idx>=512) return pool; /* out of nodes */
-    Node *n=&pool[pool_idx++];
-    for(int i=0;i<(int)sizeof(Node);i++) ((char*)n)[i]=0;
+    pool_ensure();
+    if(!chunk_head) return NULL;
+    Node *n = &chunk_head->nodes[chunk_head->used++];
+    pool_idx++;
+    memset(n, 0, sizeof(Node));
     n->kind=k;
     return n;
 }
@@ -237,13 +264,21 @@ static Node *parse_primary(Lexer *l){
     if(t.kind==TK_LBRACKET){
         eat(l);
         Node *arr=alloc_node(ND_ARRAY);
-        int cnt=0;
-        while(!check(l,TK_RBRACKET)&&!check(l,TK_EOF)&&cnt<16){
-            arr->arg_data[cnt++]=parse_expr(l);
+        /* v1.9: arr_elem_pool — persistent, never reset by string interp save/restore */
+        int _ae_base = arr_elem_idx;
+        Node **elems = &arr_elem_pool[_ae_base]; int ec=0;
+        if(_ae_base + 1024 < ARR_ELEM_POOL) arr_elem_idx += 1024; /* reserve space */
+        while(!check(l,TK_RBRACKET)&&!check(l,TK_EOF)&&ec<1024){
+            while(check(l,TK_NL)) eat(l);
+            if(check(l,TK_RBRACKET)) break;
+            elems[ec++]=parse_expr(l);
+            while(check(l,TK_NL)) eat(l);
             if(!match_tk(l,TK_COMMA)) break;
         }
         if(check(l,TK_RBRACKET)) eat(l);
-        arr->args=arr->arg_data; arr->argc=cnt;
+        arr_elem_idx = _ae_base + ec; /* release unused reservation */
+        arr->stmts=elems; arr->stmtc=ec;
+        arr->args=NULL; arr->argc=0;
         return arr;
     }
     /* anonymous fn literal: fn(params) { body } */
@@ -754,6 +789,7 @@ Node *parse_program(Lexer *l){
     return prog;
 }
 /* Pool checkpoint for sub-parses (e.g. string interpolation) */
+/* v1.9: chunk allocator — save/restore just tracks stmt_pool for interp strings */
 static int pool_save_idx=0;
 static int stmt_pool_save_idx=0;
 void parser_pool_save(void){

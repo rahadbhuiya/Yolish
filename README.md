@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.1-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.3-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -22,7 +22,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v1.7 |
+| **Version** | v2.3 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -223,7 +223,7 @@ fn fetch_and_save(url, path) { ... }
 | `for ch in string` character loop | Done |
 | `match` expression + guards + binding | Done |
 | **Enums** (`enum Direction { N S E W }`) | Done **v2.2** |
-| Arrays (dynamic, max 512 elements) | Done |
+| Arrays (dynamic, max 1024 elements, O(1) amortized push) | Done |
 | Structs + `impl` methods + `self` | Done |
 | Method chaining | Done |
 | Closures / first-class functions | Done |

@@ -37,6 +37,7 @@ Exploidus — readable, safe, and practical.
 | **v1.7** | **Stdlib expansion — `y.json`, `y.time`, `y.env`, `y.path`** |
 | **v2.1** | **Tooling — `ys test` (test runner), `ys fmt` (formatter), `ys check` (static analysis)** |
 | **v2.2** | **Enums — `enum Status { Ok NotFound Error }` with match integration** |
+| **v2.3** | **Scalability — dynamic (chunk-based) node pool, unlimited import size, 1024-element arrays, O(1) amortized push/pop, immutable array semantics fix** |
 
 ---
 

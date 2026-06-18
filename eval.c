@@ -145,6 +145,7 @@ static void gc_maybe(void){
     if(gc_alloc_count >= gc_threshold) gc_collect();
 }
 
+
 /* v1.5: alloc_arr and alloc_fld now route through GC allocator */
 static Val *alloc_arr(int n){ return gc_alloc(n); }
 static Val *alloc_fld(int n){ return gc_alloc(n); }
@@ -580,11 +581,17 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
 
     /*  Array literal  */
     case ND_ARRAY:{
+        int nc = (n->stmtc > 0) ? n->stmtc : n->argc;
+        /* v1.9: allocate with extra cap for future pushes */
+        int cap = nc > 0 ? nc * 2 : 4;
         Val v=make_nil(); v.type=YS_ARR;
-        v.arr_len=n->argc;
-        v.arr_data=alloc_arr(n->argc);
-        for(int i=0;i<n->argc;i++)
-            v.arr_data[i]=eval_node(n->args[i],env);
+        v.arr_len=nc; v.arr_cap=cap;
+        v.arr_data=alloc_arr(cap);
+        for(int i=0;i<nc;i++){
+            Node *el = (n->stmtc > 0) ? n->stmts[i] : n->args[i];
+            v.arr_data[i]=eval_node(el,env);
+            if(g_throwing) break;
+        }
         return v;
     }
 
@@ -1176,11 +1183,14 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         if(icached(resolved)) return make_nil();
         if(icirc(resolved)){ys_error(g_cur_line,0,"circular import");return make_nil();}
         ipush(resolved);
-        static char import_src[65536];
+        /* v1.9: unlimited import file size */
         FILE *impf=fopen(resolved,"r");
         if(!impf){char em[300];snprintf(em,sizeof(em),"cannot import: %s",resolved);
                   ys_error(g_cur_line,0,em);ipop();return make_nil();}
-        int sz=(int)fread(import_src,1,sizeof(import_src)-1,impf);
+        fseek(impf,0,SEEK_END); long fsz=ftell(impf); fseek(impf,0,SEEK_SET);
+        char *import_src=(char*)malloc((size_t)fsz+1);
+        if(!import_src){fclose(impf);ys_error(g_cur_line,0,"out of memory");return make_nil();}
+        int sz=(int)fread(import_src,1,(size_t)fsz,impf);
         fclose(impf); import_src[sz]=0;
         extern char g_src_dir[512];
         char odir[512],ofile[512];
@@ -2063,29 +2073,41 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     }
     /* y.array.sort → redirect to y.sort (handled above) */
 
-    /* y.push(arr, val) */
+    /* y.push(arr, val) — v1.9: returns NEW array with amortized 2x growth, never mutates original */
     if(strcmp_u(name,"y.push")==0||strcmp_u(name,"push")==0){
         int s=(argc>2)?1:0;
         Val arr=eval_node(args[s],env);
-        Val val=eval_node(args[s+1],env);
-        if(arr.type!=YS_ARR) return make_nil();
-        Val *newdata=alloc_arr(arr.arr_len+1);
-        for(int i=0;i<arr.arr_len;i++) newdata[i]=arr.arr_data[i];
-        newdata[arr.arr_len]=val;
-        arr.arr_data=newdata; arr.arr_len++;
-        if(args[s]->kind==ND_IDENT) env_set(env,args[s]->name,arr);
-        return arr;
+        Val el=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        if(arr.type!=YS_ARR||!arr.arr_data){
+            arr.type=YS_ARR; arr.arr_len=0; arr.arr_cap=0;
+        }
+        Val result=make_nil(); result.type=YS_ARR;
+        int new_len=arr.arr_len+1;
+        int new_cap=(arr.arr_cap>arr.arr_len)?arr.arr_cap:(arr.arr_len>0?arr.arr_len*2:4);
+        if(new_cap<new_len) new_cap=new_len;
+        result.arr_data=alloc_arr(new_cap);
+        result.arr_len=new_len;
+        result.arr_cap=new_cap;
+        for(int i=0;i<arr.arr_len;i++) result.arr_data[i]=arr.arr_data[i];
+        result.arr_data[arr.arr_len]=el;
+        return result;
     }
-    /* y.pop(arr) */
+
+    /* y.pop(arr) — v1.9: returns NEW array (one shorter), never mutates original */
     if(strcmp_u(name,"y.pop")==0||strcmp_u(name,"pop")==0){
         int s=(argc>1)?1:0;
         Val arr=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
         if(arr.type!=YS_ARR||arr.arr_len==0) return make_nil();
-        Val last=arr.arr_data[arr.arr_len-1];
-        arr.arr_len--;
-        if(args[s]->kind==ND_IDENT) env_set(env,args[s]->name,arr);
-        return last;
+        Val result=make_nil(); result.type=YS_ARR;
+        result.arr_len=arr.arr_len-1;
+        result.arr_cap=result.arr_len;
+        result.arr_data=alloc_arr(result.arr_len>0?result.arr_len:1);
+        for(int i=0;i<result.arr_len;i++) result.arr_data[i]=arr.arr_data[i];
+        return result;
     }
+
     /* y.exit */
     if(strcmp_u(name,"y.exit")==0||strcmp_u(name,"exit")==0){
         int s=(argc>1)?1:0;
@@ -2275,9 +2297,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #endif
     }
 
-/* ================================================================
+/* 
    v1.3  —  Process & System  (process.* / sys.*)
-   ================================================================ */
+*/
 
     /* process.spawn(cmd) → string (stdout captured) */
     if(strcmp_u(name,"process.spawn")==0){
