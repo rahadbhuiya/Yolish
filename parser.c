@@ -53,6 +53,18 @@ static Node *alloc_node(NodeKind k){
     return n;
 }
 
+/* v2.4: heap-allocate a Node's sval from a (possibly non-null-terminated)
+   source span. Parse-time strings live for the lifetime of the process
+   (the AST is never freed mid-run), so a plain malloc is sufficient —
+   no GC tracking needed here, unlike runtime Val strings. */
+static void node_set_sval(Node *n, const char *src, int len){
+    if(len<0) len=0;
+    n->sval=(char*)malloc((size_t)len+1);
+    if(!n->sval) return;
+    for(int i=0;i<len;i++) n->sval[i]=src[i];
+    n->sval[len]=0;
+}
+
 static Token cur(Lexer *l){ return l->cur; }
 static Token eat(Lexer *l){
     Token t=l->cur;
@@ -153,9 +165,8 @@ static Node *parse_primary(Lexer *l){
         eat(l); Node*n=alloc_node(ND_BOOL);n->ival=t.ival;return n;}
     if(t.kind==TK_STR){
         Node*n=alloc_node(ND_STR);
-        int len=t.len<8191?t.len:8191;
-        for(int i=0;i<len;i++) n->sval[i]=t.start[i];
-        n->sval[len]=0;
+        /* v2.4: no length cap — string literals can be any size */
+        node_set_sval(n, t.start, t.len);
         eat(l);
         return n;
     }
@@ -498,8 +509,7 @@ static Node *parse_stmt(Lexer *l){
         /* description string */
         if(check(l,TK_STR)){
             Token dt=eat(l);
-            int dl=dt.len<8190?dt.len:8190;
-            for(int i=0;i<dl;i++){n->sval[i]=dt.start[i];} n->sval[dl]=0;
+            node_set_sval(n, dt.start, dt.len);
         }
         /* test body block */
         n->body=parse_block(l);
@@ -579,8 +589,7 @@ static Node *parse_stmt(Lexer *l){
         /* copy annotation into node */
         for(int i=0;ann_name[i]&&i<31;i++) n->type[i]=ann_name[i];
         n->type[31]=0;
-        for(int i=0;ann_arg[i]&&i<8191;i++) n->sval[i]=ann_arg[i];
-        n->sval[8191]=0;
+        node_set_sval(n, ann_arg, (int)strlen(ann_arg));
         /* parse rest of fn (name, params, body) */
         Token nm=expect(l,TK_IDENT);
         int nl2=nm.len<63?nm.len:63;
@@ -750,9 +759,7 @@ static Node *parse_stmt(Lexer *l){
         Node *n=alloc_node(ND_IMPORT);
         if(check(l,TK_STR)){
             Token pt=eat(l);
-            int pl=pt.len<255?pt.len:255;
-            for(int i=0;i<pl;i++) n->sval[i]=pt.start[i];
-            n->sval[pl]=0;
+            node_set_sval(n, pt.start, pt.len);
         }
         /* optional: as namespace_name → ND_MODULE */
         if(check(l,TK_AS)){

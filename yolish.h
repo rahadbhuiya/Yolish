@@ -8,8 +8,13 @@
 static inline void ys_puts(const char *s){ fputs(s,stdout); fflush(stdout); }
 #define puts(s) ys_puts(s)
 static inline void ys_print(const char *s){ fputs(s,stdout); fflush(stdout); }
-static inline int strcmp_u(const char *a,const char *b){ return strcmp(a,b); }
-static inline int str_len_u(const char *s){ int n=0; while(s[n])n++; return n; }
+/* v2.4: NULL-safe — dynamic strings may be NULL before first assignment */
+static inline int strcmp_u(const char *a,const char *b){
+    if(!a) a="";
+    if(!b) b="";
+    return strcmp(a,b);
+}
+static inline int str_len_u(const char *s){ if(!s) return 0; int n=0; while(s[n])n++; return n; }
 
 /* Capability permissions */
 #define CAP_READ  1
@@ -65,7 +70,7 @@ struct Node {
     NodeKind  kind;
     int64_t   ival;
     double    fval;
-    char      sval[8192];
+    char     *sval;    /* v2.4: dynamic — was char[8192], parse-time string storage */
     int       op;
     Node     *left;
     Node     *right;
@@ -96,7 +101,8 @@ struct Val {
     int64_t  ival;
     double   fval;
     int      bval;
-    char     sval[8192];
+    char    *sval;     /* v2.4: dynamic heap string — never embed array */
+    int      slen;     /* cached strlen(sval), avoids repeated scans */
     Node    *fn_node;
     void    *fn_env;
     int64_t  cap_fd;

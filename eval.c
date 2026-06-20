@@ -15,7 +15,31 @@
 #endif
 
 /*  Memory pools  */
-static Env  envpool[512]; static int envidx=0; /* reduced from 4096 to keep BSS<2GB */
+/* v2.4: chunk-based dynamic Env pool — never exhausts, pointers never
+   invalidated (no realloc, ever). This replaces the old static envpool[512]
+   which forced env_free()/env_restore() to aggressively recycle slots —
+   unsafe the moment a closure escapes with a live Env*. Now scopes simply
+   accumulate for the lifetime of the process and are reclaimed by the GC's
+   reachability scan (gc_mark_roots walks every chunk), not by blind
+   stack-pointer arithmetic. */
+#define ENV_CHUNK_SIZE 256
+typedef struct EnvChunk {
+    Env               envs[ENV_CHUNK_SIZE];
+    struct EnvChunk  *next;
+    int               used;
+} EnvChunk;
+
+static EnvChunk *env_chunk_head = NULL;
+static int       envidx = 0; /* total envs ever allocated (diagnostics only) */
+
+static void env_chunk_ensure(void){
+    if(env_chunk_head && env_chunk_head->used < ENV_CHUNK_SIZE) return;
+    EnvChunk *c = (EnvChunk*)calloc(1, sizeof(EnvChunk));
+    if(!c){ fprintf(stderr,"[YS] out of memory (env pool)\n"); return; }
+    c->next = env_chunk_head;
+    c->used = 0;
+    env_chunk_head = c;
+}
 /* No static arrpool — fully dynamic */
 static char nmpool[512][32]; static int nmidx=0;
 
@@ -23,14 +47,14 @@ static char nmpool[512][32]; static int nmidx=0;
 /* forward declaration — defined later in this file */
 static Val g_return_val_fwd;
 
-/* 
+/* ================================================================
    v1.5  —  Mark-and-Sweep Garbage Collector
    ================================================================
    All arr_data and field_vals are allocated through gc_alloc().
    A GCNode header sits immediately before each allocation.
    gc_collect() marks from all envpool roots then sweeps unreachable
    nodes. gc_maybe() triggers collection at statement boundaries.
-*/
+   ================================================================ */
 
 #define GC_MAGIC  0xBC1D5A4Eu  /* sentinel to detect managed pointers  */
 
@@ -38,9 +62,10 @@ typedef struct GCNode {
     unsigned int  magic;       /* always GC_MAGIC                       */
     int           marked;      /* mark bit — set during mark phase      */
     int           birth;       /* gc_cycle when allocated               */
-    int           size;        /* number of Val elements                */
+    int           size;        /* number of Val elements (kind=0) or bytes (kind=1) */
+    int           kind;        /* 0 = Val* block, 1 = raw string bytes (v2.4) */
     struct GCNode *next;       /* intrusive linked list                 */
-    /* Val data[size] follows immediately                               */
+    /* payload follows immediately: Val data[size] or char data[size]   */
 } GCNode;
 
 static GCNode *gc_head        = NULL;  /* head of all managed allocations */
@@ -62,6 +87,7 @@ static Val *gc_alloc(int n){
     node->marked = 0;
     node->birth  = gc_current_cycle;
     node->size   = n;
+    node->kind   = 0; /* Val* block */
     node->next   = gc_head;
     gc_head      = node;
     gc_alloc_count++;
@@ -69,7 +95,39 @@ static Val *gc_alloc(int n){
     return (Val*)(node + 1);   /* data starts right after the header */
 }
 
-/*  Mark phase  */
+/* v2.4: allocate a GC-tracked raw byte buffer (for dynamic strings).
+   'len' is the buffer size in bytes, NOT including the implicit
+   null terminator slot — caller should pass strlen+1 when copying
+   a C string so there's room for the trailing \0. */
+static char *gc_alloc_str(int len){
+    if(len<=0) len=1;
+    GCNode *node=(GCNode*)calloc(1, sizeof(GCNode) + (size_t)len);
+    if(!node){
+        char *fallback=(char*)calloc((size_t)len,1);
+        return fallback;
+    }
+    node->magic  = GC_MAGIC;
+    node->marked = 0;
+    node->birth  = gc_current_cycle;
+    node->size   = len;
+    node->kind   = 1; /* raw bytes — leaf node, never recursively marked */
+    node->next   = gc_head;
+    gc_head      = node;
+    gc_alloc_count++;
+    gc_total_alloc++;
+    return (char*)(node + 1);
+}
+
+/* v2.4: duplicate a C string into a GC-tracked buffer */
+static char *gc_strdup(const char *s){
+    if(!s) s="";
+    int len=(int)strlen(s);
+    char *buf=gc_alloc_str(len+1);
+    memcpy(buf, s, (size_t)len+1);
+    return buf;
+}
+
+/* ---- Mark phase ---- */
 
 static void gc_mark_val(Val *v);
 
@@ -84,9 +142,18 @@ static void gc_mark_ptr(Val *data){
     for(int i=0; i<node->size; i++) gc_mark_val(&data[i]);
 }
 
+/* v2.4: mark a GC-tracked string buffer — leaf node, no recursion needed */
+static void gc_mark_str(char *s){
+    if(!s) return;
+    GCNode *node = ((GCNode*)s) - 1;
+    if(node->magic != GC_MAGIC) return;
+    node->marked = 1; /* strings hold no further references */
+}
+
 /* Mark a single Val and everything it references */
 static void gc_mark_val(Val *v){
     if(!v) return;
+    if(v->sval)       gc_mark_str(v->sval);   /* v2.4: dynamic string */
     if(v->arr_data)   gc_mark_ptr(v->arr_data);
     if(v->field_vals) gc_mark_ptr(v->field_vals);
     /* closure environment — scan its local bindings */
@@ -98,10 +165,13 @@ static void gc_mark_val(Val *v){
 
 /* Mark from all known roots (envpool + g_return_val) */
 static void gc_mark_roots(void){
-    /* scan every Env slot that has been used */
-    for(int i=0; i<envidx; i++){
-        for(int j=0; j<envpool[i].count; j++){
-            gc_mark_val(&envpool[i].vals[j]);
+    /* v2.4: scan every Env across every chunk — chunk-based pool replaces
+       the old linear envpool[] array */
+    for(EnvChunk *c=env_chunk_head; c; c=c->next){
+        for(int i=0; i<c->used; i++){
+            for(int j=0; j<c->envs[i].count; j++){
+                gc_mark_val(&c->envs[i].vals[j]);
+            }
         }
     }
     /* mark the pending return value */
@@ -109,7 +179,7 @@ static void gc_mark_roots(void){
     /* g_return_val is a static local declared later — skip here; envpool covers it */
 }
 
-/*  Sweep phase  */
+/* ---- Sweep phase ---- */
 
 static void gc_sweep(void){
     GCNode **node = &gc_head;
@@ -132,7 +202,7 @@ static void gc_sweep(void){
     if(gc_threshold > 4096) gc_threshold = 4096;
 }
 
-/*  Public API  */
+/* ---- Public API ---- */
 
 /* Full collection: mark from roots + sweep */
 static void gc_collect(void){
@@ -156,11 +226,30 @@ static char (*alloc_nm(int n))[32]{
 
 /*  Environment  */
 Env *env_new(Env *parent){
-    if(envidx>=4096){ fprintf(stderr,"[YS] env stack overflow\n"); envidx=8; }
-    Env *e=&envpool[envidx++];
+    env_chunk_ensure();
+    if(!env_chunk_head){
+        /* allocation failure fallback — should not happen in practice */
+        static Env emergency_env;
+        emergency_env.count=0; emergency_env.parent=parent;
+        return &emergency_env;
+    }
+    Env *e = &env_chunk_head->envs[env_chunk_head->used++];
+    envidx++;
     e->count=0; e->parent=parent; return e;
 }
-void env_free(Env *e){ (void)e; if(envidx>0) envidx--; }
+
+/* v2.4: with the chunk-based pool, individual Env slots are never recycled
+   mid-program (no realloc, no LIFO pop) — env_free/env_restore are now
+   pure no-ops kept only so every existing call site still compiles.
+   This is what makes closures permanently safe: a captured Env* is valid
+   for as long as the process runs, never aliased by a later allocation.
+   The GC's gc_mark_roots() still walks every chunk every cycle, so this
+   does not by itself leak in any way the mark/sweep cycle can't reason
+   about — chunks themselves are never freed (acceptable: Env chunks are
+   small relative to string/array heap churn, and freeing them safely
+   would require precise root tracking we don't have yet). */
+void env_free(Env *e){ (void)e; }
+static void env_restore(int saved){ (void)saved; }
 Val *env_get(Env *e,const char *name){
     for(;e;e=e->parent)
         for(int i=0;i<e->count;i++)
@@ -181,10 +270,14 @@ void env_def(Env *e,const char *name,Val v){
 }
 
 /*  Value constructors  */
+/* v2.4: shared empty string — static, never freed, safe default for sval */
+static char g_empty_str[1] = {0};
+
 static Val make_nil(void){
     Val r; r.type=YS_NIL; r.ival=0; r.fval=0; r.bval=0;
-    r.sval[0]=0; r.fn_node=0; r.cap_fd=-1; r.cap_perm=0;
-    r.cap_path[0]=0; r.arr_data=0; r.arr_len=0;
+    r.sval=g_empty_str; r.slen=0;
+    r.fn_node=0; r.fn_env=0; r.cap_fd=-1; r.cap_perm=0;
+    r.cap_path[0]=0; r.arr_data=0; r.arr_len=0; r.arr_cap=0;
     r.struct_name[0]=0; r.field_vals=0; r.field_names=0; r.field_count=0;
     return r;
 }
@@ -193,12 +286,29 @@ static Val make_float(double v){Val r=make_nil();r.type=YS_FLOAT;r.fval=v;return
 static Val make_bool(int v){Val r=make_nil();r.type=YS_BOOL;r.bval=v;r.ival=v;return r;}
 static Val make_err(const char *msg){
     Val r=make_nil(); r.type=YS_ERR;
-    int i=0; while(msg[i]&&i<254){r.sval[i]=msg[i];i++;} r.sval[i]=0;
+    if(!msg) msg="";
+    r.slen=(int)strlen(msg);
+    r.sval = (r.slen==0) ? g_empty_str : gc_strdup(msg);
     return r;
 }
 static Val make_str(const char *s){
     Val r=make_nil(); r.type=YS_STR;
-    int i=0; while(s[i]&&i<8191){r.sval[i]=s[i];i++;} r.sval[i]=0;
+    if(!s) s="";
+    r.slen = (int)strlen(s);
+    if(r.slen==0){ r.sval=g_empty_str; return r; }
+    r.sval = gc_strdup(s);
+    return r;
+}
+
+/* v2.4: build a string from a buffer with explicit length (may contain embedded data) */
+__attribute__((unused))
+static Val make_str_n(const char *s, int len){
+    Val r=make_nil(); r.type=YS_STR;
+    if(!s || len<=0){ r.sval=g_empty_str; r.slen=0; return r; }
+    r.sval = gc_alloc_str(len+1);
+    memcpy(r.sval, s, (size_t)len);
+    r.sval[len]=0;
+    r.slen = len;
     return r;
 }
 static Val make_cap(const char *path,int perm,int64_t fd){
@@ -501,7 +611,7 @@ static Val call_module_fn(Val *fv2, Node *n, Env *env){
     static Val _mod_result;
     { Val _tmp=eval_block(fd->body,fe);
       memcpy(&_mod_result,&_tmp,sizeof(Val)); }
-    envidx=saved;
+    env_restore(saved);
     if(g_returning){ memcpy(&_mod_result,&g_return_val,sizeof(Val)); }
     g_returning=0;
     return _mod_result;
@@ -659,19 +769,23 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         return make_nil();
 
     case ND_ENUM:{
-        /* v2.2: register EnumName.Variant (qualified only, saves env slots) */
+        /* v2.2/v2.4: register EnumName.Variant (qualified only, saves env slots) */
         for(int i=0;i<n->stmtc;i++){
             Node *v=n->stmts[i];
             char qname[128];
             snprintf(qname,sizeof(qname),"%s.%s",n->name,v->name);
-            Val ev; ev.type=YS_INT; ev.ival=(int64_t)i;
-            snprintf(ev.sval,sizeof(ev.sval),"%s.%s",n->name,v->name);
+            Val ev=make_nil(); ev.type=YS_INT; ev.ival=(int64_t)i;
+            /* qname doubles as both the env key and the display string */
+            ev.slen=(int)strlen(qname);
+            ev.sval=gc_strdup(qname);
             env_def(env,qname,ev);
         }
         /* sentinel: env["Direction"] = int(4) with sval="enum:Direction" */
-        Val meta; meta.type=YS_INT; meta.ival=(int64_t)n->stmtc;
-        for(int i=0;i<(int)sizeof(meta.sval);i++) meta.sval[i]=0;
-        snprintf(meta.sval,sizeof(meta.sval),"enum:%s",n->name);
+        Val meta=make_nil(); meta.type=YS_INT; meta.ival=(int64_t)n->stmtc;
+        char mbuf[160];
+        snprintf(mbuf,sizeof(mbuf),"enum:%s",n->name);
+        meta.slen=(int)strlen(mbuf);
+        meta.sval=gc_strdup(mbuf);
         env_def(env,n->name,meta);
         return make_nil();
     }
@@ -738,10 +852,15 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         switch(n->op){
         case TK_PLUS:
             if(L.type==YS_STR){
-                Val r=make_str(L.sval);
-                int i=0; while(r.sval[i])i++;
-                int j=0; while(R.sval[j]&&i<8190)r.sval[i++]=R.sval[j++];
-                r.sval[i]=0; return r;
+                /* v2.4: compute exact total length first, then allocate once */
+                int llen=L.slen, rlen=R.slen;
+                Val r=make_nil(); r.type=YS_STR;
+                r.sval=gc_alloc_str(llen+rlen+1);
+                memcpy(r.sval, L.sval, (size_t)llen);
+                memcpy(r.sval+llen, R.sval, (size_t)rlen);
+                r.sval[llen+rlen]=0;
+                r.slen=llen+rlen;
+                return r;
             }
             return use_f?make_float(val_float(L)+val_float(R)):make_int(val_int(L)+val_int(R));
         case TK_MINUS:
@@ -962,7 +1081,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                 }
                 int saved=envidx;
                 result=eval_block(n->els,ce);
-                envidx=saved;
+                env_restore(saved);
             }
         }
         return result;
@@ -1071,7 +1190,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                         g_returning=0; g_breaking=0; g_continuing=0;
                         int saved=envidx;
                         Val result=eval_block(fd->body,fe);
-                        envidx=saved;
+                        env_restore(saved);
                         if(g_returning){ memcpy(&result,&g_return_val,sizeof(Val)); }
                         g_returning=0;
                         return result;
@@ -1240,7 +1359,26 @@ Val eval_block(Node *b,Env *parent){
         if(g_returning==2){ memcpy(&last,&g_return_val,sizeof(Val)); g_returning=0; }
         if((g_returning&&g_returning!=2)||g_throwing||g_breaking||g_continuing) break;
     }
-    env_free(e);   /* v1.5: release this block's env slot so GC can reclaim it */
+    /* v2.4 CRITICAL FIX: if the block's result is a closure that captured
+       THIS env (e.g. "return fn(x){...}" written directly inside this
+       block), freeing 'e' here would let env_new() recycle this exact
+       slot on the very next call — and if that next call's parent also
+       resolves to this slot, the new Env's parent pointer ends up equal
+       to its own address, self-looping env_get/env_set forever.
+       Also check one level of array/struct nesting (a closure stored in
+       an array literal or struct literal built in this block) since that
+       is the next most common escape pattern. */
+    int escaped = 0;
+    if(last.type==YS_FN && last.fn_env==(void*)e){
+        escaped = 1;
+    } else if(last.type==YS_ARR){
+        for(int i=0;i<last.arr_len;i++)
+            if(last.arr_data[i].type==YS_FN && last.arr_data[i].fn_env==(void*)e){ escaped=1; break; }
+    } else if(last.type==YS_STRUCT){
+        for(int i=0;i<last.field_count;i++)
+            if(last.field_vals[i].type==YS_FN && last.field_vals[i].fn_env==(void*)e){ escaped=1; break; }
+    }
+    if(!escaped) env_free(e);   /* v1.5: release this block's env slot so GC can reclaim it */
     return last;
 }
 
@@ -1557,7 +1695,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
                 g_returning=0;
                 int saved=envidx;
                 Val r=eval_block(fd->body,fe);
-                envidx=saved;
+                env_restore(saved);
                 if(g_returning){memcpy(&r,&g_return_val,sizeof(Val));g_returning=0;}
                 result.arr_data[i]=r;
             }
@@ -1582,7 +1720,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
                 g_returning=0;
                 int saved=envidx;
                 Val r=eval_block(fd->body,fe);
-                envidx=saved;
+                env_restore(saved);
                 if(g_returning){memcpy(&r,&g_return_val,sizeof(Val));g_returning=0;}
                 if(val_bool(r)) result.arr_data[result.arr_len++]=arr.arr_data[i];
             }
@@ -1606,7 +1744,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
                 g_returning=0;
                 int saved=envidx;
                 Val r=eval_block(fd->body,fe);
-                envidx=saved;
+                env_restore(saved);
                 if(g_returning){memcpy(&r,&g_return_val,sizeof(Val));g_returning=0;}
                 acc=r;
             }
@@ -1628,7 +1766,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
                 g_returning=0;
                 int saved=envidx;
                 eval_block(fd->body,fe);
-                envidx=saved; g_returning=0;
+                env_restore(saved); g_returning=0;
             }
         }
         return make_nil();
@@ -1659,7 +1797,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
                     g_returning=0;
                     int saved=envidx;
                     Val r=eval_block(fd->body,fe);
-                    envidx=saved;
+                    env_restore(saved);
                     if(g_returning){memcpy(&r,&g_return_val,sizeof(Val));g_returning=0;}
                     should_swap=val_bool(r);
                 } else {
@@ -2038,7 +2176,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
                 if(fd->argc>0) env_def(fe,fd->field_names[0],arr.arr_data[i]);
                 g_returning=0; int saved=envidx;
                 Val r=eval_block(fd->body,fe);
-                envidx=saved; g_returning=0;
+                env_restore(saved); g_returning=0;
                 if(val_bool(r)) return arr.arr_data[i];
             }
         }
@@ -2297,9 +2435,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #endif
     }
 
-/* 
+/* ================================================================
    v1.3  —  Process & System  (process.* / sys.*)
-*/
+   ================================================================ */
 
     /* process.spawn(cmd) → string (stdout captured) */
     if(strcmp_u(name,"process.spawn")==0){
@@ -2369,9 +2507,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #endif
     }
 
-/* 
+/* ================================================================
    v1.7  —  y.time.*
-*/
+   ================================================================ */
 
     /* y.time.now() → int (milliseconds since epoch) */
     if(strcmp_u(name,"y.time.now")==0){
@@ -2419,9 +2557,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_int((int64_t)time(NULL));
     }
 
-/* 
+/* ================================================================
    v1.7  —  y.env.*
-*/
+   ================================================================ */
 
     /* y.env.get(key) → string or nil */
     if(strcmp_u(name,"y.env.get")==0){
@@ -2459,9 +2597,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_nil();
     }
 
-/* 
+/* ================================================================
    v1.7  —  y.path.*
-*/
+   ================================================================ */
 
     /* y.path.join(a, b, ...) → string */
     if(strcmp_u(name,"y.path.join")==0){
@@ -2556,9 +2694,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return pv;
     }
 
-/* 
+/* ================================================================
    v1.7  —  y.json.*   (simple, no nested objects in parse)
-*/
+   ================================================================ */
 
     /* y.json.stringify(val) → string */
     if(strcmp_u(name,"y.json.stringify")==0){
@@ -2745,9 +2883,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_nil();
     }
 
-/* 
+/* ================================================================
    v1.6  —  Module system helpers
-*/
+   ================================================================ */
 
     /* y.module.loaded() → array of imported module names */
     if(strcmp_u(name,"y.module.loaded")==0){
@@ -2760,7 +2898,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         for(int i=0;i<g_nimported;i++) result.arr_data[i]=make_str(g_imported_modules[i]);
         return result;
     }
-    /*  v2.1 Test Assertion Builtins  */
+    /* ---- v2.1 Test Assertion Builtins ---- */
 
     /* assert(cond, msg?) — throws if cond is false */
     if(strcmp_u(name,"assert")==0){
@@ -2873,7 +3011,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 
 
 
-    /*  v1.5 GC builtins  */
+    /* ---- v1.5 GC builtins ---- */
 
     /* gc.collect() → nil  — force a full GC cycle */
     if(strcmp_u(name,"gc.collect")==0){

@@ -1,5 +1,23 @@
 #include "yolish.h"
 
+
+/* v2.4: dynamic growable buffer shared by all string-literal lexing paths
+   (regular "...", raw r"...", and multiline `...`). Replaces three fixed
+   8192-byte static buffers, removing the source-literal length cap.
+   Safe to share a single buffer because the lexer only ever has one
+   string token "in flight" at a time — the parser copies Token.start
+   into the AST node (node_set_sval) before the next lex_next() call. */
+static char *s_growbuf = NULL;
+static int   s_growcap = 0;
+
+static void s_grow_ensure(int need){
+    if(s_growcap >= need) return;
+    int newcap = s_growcap ? s_growcap*2 : 4096;
+    while(newcap < need) newcap *= 2;
+    char *nb = (char*)realloc(s_growbuf, (size_t)newcap);
+    if(nb){ s_growbuf = nb; s_growcap = newcap; }
+}
+
 static int is_alpha(char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_';}
 static int is_digit(char c){return c>='0'&&c<='9';}
 static int is_alnum(char c){return is_alpha(c)||is_digit(c);}
@@ -80,22 +98,25 @@ Token lex_next(Lexer *l){
     /* string: "..." */
     if(s[*p]=='"'){
         (*p)++;
-        static char strbuf[8192]; int slen=0;
+        /* v2.4: dynamic — grow as needed, no length cap */
+        int cap_guess = (end - *p) + 16;
+        s_grow_ensure(cap_guess);
+        int slen=0;
         while(*p<end&&s[*p]!='"'){
             if(s[*p]=='\n'){ l->line++; l->line_start=*p+1; }
+            s_grow_ensure(slen+4);
             if(s[*p]=='\\'&&*p+1<end){
                 (*p)++;
-                if(slen<8189){
-                    if(s[*p]=='n')      strbuf[slen++]='\n';
-                    else if(s[*p]=='t') strbuf[slen++]='\t';
-                    else if(s[*p]=='r') strbuf[slen++]='\r';
-                    else                strbuf[slen++]=s[*p];
-                }
-            } else { if(slen<8190) strbuf[slen++]=s[*p]; }
+                if(s[*p]=='n')      s_growbuf[slen++]='\n';
+                else if(s[*p]=='t') s_growbuf[slen++]='\t';
+                else if(s[*p]=='r') s_growbuf[slen++]='\r';
+                else                s_growbuf[slen++]=s[*p];
+            } else { s_growbuf[slen++]=s[*p]; }
             (*p)++;
         }
-        strbuf[slen]=0;
-        t.kind=TK_STR; t.start=strbuf; t.len=slen;
+        s_grow_ensure(slen+1);
+        s_growbuf[slen]=0;
+        t.kind=TK_STR; t.start=s_growbuf; t.len=slen;
         if(*p<end)(*p)++;
         return t;
     }
@@ -103,15 +124,19 @@ Token lex_next(Lexer *l){
     /* raw string r"..." */
     if(s[*p]=='r' && *p+1<end && s[*p+1]=='"'){
         (*p)+=2;
-        static char rawbuf[8193]; int rlen=0;
-        rawbuf[rlen++]='\x01';
+        int cap_guess = (end - *p) + 16;
+        s_grow_ensure(cap_guess);
+        int rlen=0;
+        s_growbuf[rlen++]='\x01';
         while(*p<end&&s[*p]!='"'){
             if(s[*p]=='\n'){ l->line++; l->line_start=*p+1; }
-            if(rlen<8191) rawbuf[rlen++]=s[*p];
+            s_grow_ensure(rlen+4);
+            s_growbuf[rlen++]=s[*p];
             (*p)++;
         }
-        rawbuf[rlen]=0;
-        t.kind=TK_STR; t.start=rawbuf; t.len=rlen;
+        s_grow_ensure(rlen+1);
+        s_growbuf[rlen]=0;
+        t.kind=TK_STR; t.start=s_growbuf; t.len=rlen;
         if(*p<end)(*p)++;
         return t;
     }
@@ -119,15 +144,19 @@ Token lex_next(Lexer *l){
     /* multiline string `...` — raw, no interpolation */
     if(s[*p]=='`'){
         (*p)++;
-        static char mlbuf[8192]; int mlen=0;
-        mlbuf[mlen++]='\x01'; /* raw string sentinel: skip interpolation */
+        int cap_guess = (end - *p) + 16;
+        s_grow_ensure(cap_guess);
+        int mlen=0;
+        s_growbuf[mlen++]='\x01'; /* raw string sentinel: skip interpolation */
         while(*p<end&&s[*p]!='`'){
             if(s[*p]=='\n'){ l->line++; l->line_start=*p+1; }
-            if(mlen<8190) mlbuf[mlen++]=s[*p];
+            s_grow_ensure(mlen+4);
+            s_growbuf[mlen++]=s[*p];
             (*p)++;
         }
-        mlbuf[mlen]=0;
-        t.kind=TK_STR; t.start=mlbuf; t.len=mlen;
+        s_grow_ensure(mlen+1);
+        s_growbuf[mlen]=0;
+        t.kind=TK_STR; t.start=s_growbuf; t.len=mlen;
         if(*p<end)(*p)++;
         return t;
     }

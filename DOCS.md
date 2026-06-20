@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.3  
+**Version:** v2.4  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -50,6 +50,7 @@
 40. [Testing — ys test](#40-testing--ys-test)
 41. [Static Checker — ys check](#41-static-checker--ys-check)
 42. [Formatter — ys fmt](#42-formatter--ys-fmt)
+
 ---
 
 ## 1. Variables
@@ -85,7 +86,7 @@ i = i + 1
 | `float` | `3.14`, `-0.5` | IEEE 754 double precision (~15 significant digits) |
 | `str` | `"hello"` | Max 1023 chars. Escapes: `\n` `\t` `\\` `\"` |
 | `bool` | `true`, `false` | |
-| `array` | `[1, 2, 3]` | Dynamic, mixed types allowed. Max 512 elements |
+| `array` | `[1, 2, 3]` | Dynamic, mixed types allowed. Max 1024 elements |
 | `struct` | `Point { x: 1, y: 2 }` | User-defined |
 | `nil` | — | Zero value, unset variable |
 
@@ -508,6 +509,16 @@ y.println(y.len(a))   -- 3  (a is unchanged)
 y.println(y.len(b))   -- 4
 ```
 
+**Strings have no size limit (v2.4).** They are heap-allocated and
+garbage-collected, so file contents, JSON payloads, and large concatenations
+all work without truncation — both as literals in source code and as
+values built at runtime.
+
+```yolish
+let big = "x" * 1   -- conceptually: any length works
+let s = y.fs.read("large_file.txt")   -- no truncation, however large the file is
+```
+
 
 ### Create
 
@@ -557,7 +568,7 @@ y.slice(arr, 1, 3)    -- elements at index 1 and 2
 
 ### Notes
 
-- Max 512 elements per array.
+- Max 1024 elements per array literal (v2.3).
 - Element types can be mixed.
 
 ---
@@ -1436,7 +1447,7 @@ Multi-line block comments:
 Max **1023 characters**. Longer strings are silently truncated at the lexer.
 
 ### Array size
-Max **512 elements** per array literal. The interpreter uses a shared pool of up to **8192 array objects** total.
+Max **1024 elements** per array literal (v2.3). Strings have no size limit (v2.4) — they are heap-allocated and garbage-collected.
 
 ### Float precision
 Floats use native `double` (IEEE 754, ~15 significant digits):
@@ -1995,11 +2006,11 @@ y.println((after.freed * 100) / after.alloc)  -- > 50%
 
 | Situation | Reclaimed? |
 |-----------|------------|
-| Array overwritten by new assignment |  Yes |
-| Struct created in loop, overwritten |  Yes |
-| Temporary arrays inside functions |  Yes (after function returns) |
-| Array stored in a live variable |  No (correctly kept alive) |
-| Array returned from a function |  No (correctly kept alive) |
+| Array overwritten by new assignment | ✅ Yes |
+| Struct created in loop, overwritten | ✅ Yes |
+| Temporary arrays inside functions | ✅ Yes (after function returns) |
+| Array stored in a live variable | ❌ No (correctly kept alive) |
+| Array returned from a function | ❌ No (correctly kept alive) |
 
 ### Notes
 
@@ -2123,13 +2134,13 @@ ys check src/main.y && ys test src/main.y
 
 | Check | Status |
 |-------|--------|
-| Undefined variables | Done |
-| Undefined functions (non-dotted names) | Done |
-| Function parameters defined in scope | Done |
-| Enum variant names defined | Done |
-| Struct names defined | Done |
-| Import paths |  planned |
-| Type mismatches |  planned |
+| Undefined variables | ✅ |
+| Undefined functions (non-dotted names) | ✅ |
+| Function parameters defined in scope | ✅ |
+| Enum variant names defined | ✅ |
+| Struct names defined | ✅ |
+| Import paths | ⏳ planned |
+| Type mismatches | ⏳ planned |
 
 ---
 
