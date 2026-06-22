@@ -113,6 +113,14 @@ y.println("ok")' | ./ys /dev/stdin | grep -q "ok"
 
       - name: Run examples
         run: |
+          # </dev/null is critical: a few examples (e.g. input_and_types.y)
+          # call y.input()/y.input_int()/y.input_float(), which block on
+          # fread(stdin) waiting for a line. Without an explicit redirect,
+          # the step inherits the runner's stdin, which may not signal EOF
+          # immediately — that hung this exact job, with no error output,
+          # until the workflow timed out. Forcing /dev/null guarantees an
+          # instant EOF so input() returns an empty/default value instead
+          # of blocking forever.
           for f in examples/*.y; do
-            ./ys "$f" > /dev/null 2>&1 && echo "✓ $f" || echo "✗ $f (non-zero exit)"
+            timeout 30 ./ys "$f" < /dev/null > /dev/null 2>&1 && echo "✓ $f" || echo "✗ $f (non-zero exit)"
           done

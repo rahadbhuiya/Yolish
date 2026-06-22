@@ -39,6 +39,7 @@ Exploidus — readable, safe, and practical.
 | **v2.2** | **Enums — `enum Status { Ok NotFound Error }` with match integration** |
 | **v2.3** | **Scalability — dynamic (chunk-based) node pool, unlimited import size, 1024-element arrays, O(1) amortized push/pop, immutable array semantics fix** |
 | **v2.4** | **Unlimited strings — `Val.sval`/`Node.sval` moved to heap (GC-tracked); dynamic lexer string buffers; fixed a critical closure-corruption bug (self-referencing env parent chain) that had existed since v1.5's GC introduction** |
+| **v2.5** | **Unlimited variables per scope — `Env.names`/`Env.vals` converted from a fixed 48-slot array to a dynamically-growing heap array (removes the old `ENV_MAX` cap entirely, and is *faster* for small scopes since they no longer pay for an oversized fixed allocation). Also fixed seven builtin short-name aliases (`y.replace`, `y.join`, `y.repeat`, `y.starts_with`, `y.ends_with`, `y.reverse`, `y.index_of`) that were documented but silently returned `nil` because only their namespaced forms (`y.string.replace`, `y.array.join`, ...) were registered** |
 
 ---
 

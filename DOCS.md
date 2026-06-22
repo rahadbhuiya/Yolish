@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.4  
+**Version:** v2.5  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2006,11 +2006,11 @@ y.println((after.freed * 100) / after.alloc)  -- > 50%
 
 | Situation | Reclaimed? |
 |-----------|------------|
-| Array overwritten by new assignment | ✅ Yes |
-| Struct created in loop, overwritten | ✅ Yes |
-| Temporary arrays inside functions | ✅ Yes (after function returns) |
-| Array stored in a live variable | ❌ No (correctly kept alive) |
-| Array returned from a function | ❌ No (correctly kept alive) |
+| Array overwritten by new assignment |  Yes |
+| Struct created in loop, overwritten |  Yes |
+| Temporary arrays inside functions |  Yes (after function returns) |
+| Array stored in a live variable |  No (correctly kept alive) |
+| Array returned from a function |  No (correctly kept alive) |
 
 ### Notes
 
@@ -2134,13 +2134,13 @@ ys check src/main.y && ys test src/main.y
 
 | Check | Status |
 |-------|--------|
-| Undefined variables | ✅ |
-| Undefined functions (non-dotted names) | ✅ |
-| Function parameters defined in scope | ✅ |
-| Enum variant names defined | ✅ |
-| Struct names defined | ✅ |
-| Import paths | ⏳ planned |
-| Type mismatches | ⏳ planned |
+| Undefined variables | Done |
+| Undefined functions (non-dotted names) | Done |
+| Function parameters defined in scope | Done |
+| Enum variant names defined | Done |
+| Struct names defined | Done |
+| Import paths |  planned |
+| Type mismatches |  planned |
 
 ---
 

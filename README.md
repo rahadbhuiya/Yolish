@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.4-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.5-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -22,7 +22,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.4 |
+| **Version** | v2.5 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -214,53 +214,53 @@ fn fetch_and_save(url, path) { ... }
 
 | Feature | Status |
 |---------|--------|
-| Variables (`let` / `var`) | ✅ |
-| Functions + recursion | ✅ |
-| `if` / `else if` / `else` | ✅ |
-| `while` loop + `break` / `continue` | ✅ |
-| `for i in lo..hi` range loop | ✅ |
-| `for item in array` loop | ✅ |
-| `for ch in string` character loop | ✅ |
-| `match` expression + guards + binding | ✅ |
-| **Enums** (`enum Direction { N S E W }`) | ✅ **v2.2** |
-| Arrays (dynamic, max 1024 elements, O(1) amortized push) | ✅ |
-| Strings (dynamic heap-allocated, unlimited size) | ✅ **v2.4** |
-| Structs + `impl` methods + `self` | ✅ |
-| Method chaining | ✅ |
-| Closures / first-class functions | ✅ |
-| `try` / `catch` / `throw` | ✅ |
-| String interpolation `"Hello {name}"` | ✅ |
-| Backtick strings (raw, multiline) | ✅ |
-| Raw strings `r"..."` | ✅ |
-| `y.map` / `y.filter` / `y.reduce` / `y.each` | ✅ |
-| `y.sort` / `y.zip` / `y.flatten` / `y.sum` / `y.range` | ✅ |
-| `y.math.*` — sqrt, pow, sin, cos, pi, ... | ✅ |
-| `y.string.*` — upper, lower, split, join, trim, ... | ✅ |
-| `y.input` / `y.input_int` / `y.input_float` | ✅ |
-| Type system — `y.typeof`, `y.is_*`, conversions | ✅ |
-| Capability system `@cap`, `@intent`, `@audit` | ✅ |
-| Module / import system + relative paths + caching | ✅ **v1.6** |
-| Error objects `y.error(msg, code)` | ✅ |
-| Better errors — `file:line:col` + typo suggestion | ✅ **v1.4** |
-| REPL with colored banner | ✅ |
-| **Float arithmetic** (SSE2 native) | ✅ **v1.1** |
-| **Arrays in native compiler** | ✅ **v1.1** |
-| **File I/O** (`y.fs.*` — 10 functions) | ✅ **v1.2** |
-| **Process & System** (`process.*`, `sys.*`) | ✅ **v1.3** |
-| **JSON** (`y.json.parse`, `y.json.stringify`) | ✅ **v1.7** |
-| **Time** (`y.time.now`, `sleep`, `format`) | ✅ **v1.7** |
-| **Path** (`y.path.join`, `basename`, `ext`, ...) | ✅ **v1.7** |
-| **Env** (`y.env.get`, `y.env.set`) | ✅ **v1.7** |
-| **Native x86-64 compiler** | ✅ **v1.0** |
-| Native → Linux ELF64 | ✅ |
-| Native → Windows PE32+ (with icon) | ✅ |
-| Native → macOS Mach-O | ✅ |
-| Native → Exploidus | ⏳ v1.8 |
-| **Garbage Collector** (mark-and-sweep, `gc.collect`, `gc.stats`) | ✅ **v1.5** |
-| **Built-in test runner** (`ys test`, `test` blocks, `assert*`) | ✅ **v2.1** |
-| **Static checker** (`ys check` — undefined vars, type hints) | ✅ **v2.1** |
-| **Code formatter** (`ys fmt` — prints formatted source) | ✅ **v2.1** |
-| Self-hosting (Yolish compiles Yolish) | ⏳ v2.0 |
+| Variables (`let` / `var`) | Done |
+| Functions + recursion | Done |
+| `if` / `else if` / `else` | Done |
+| `while` loop + `break` / `continue` | Done |
+| `for i in lo..hi` range loop | Done |
+| `for item in array` loop | Done |
+| `for ch in string` character loop | Done |
+| `match` expression + guards + binding | Done |
+| **Enums** (`enum Direction { N S E W }`) | Done **v2.2** |
+| Arrays (dynamic, max 1024 elements, O(1) amortized push) | Done |
+| Strings (dynamic heap-allocated, unlimited size) | Done **v2.4** |
+| Structs + `impl` methods + `self` | Done |
+| Method chaining | Done |
+| Closures / first-class functions | Done |
+| `try` / `catch` / `throw` | Done |
+| String interpolation `"Hello {name}"` | Done |
+| Backtick strings (raw, multiline) | Done |
+| Raw strings `r"..."` | Done |
+| `y.map` / `y.filter` / `y.reduce` / `y.each` | Done |
+| `y.sort` / `y.zip` / `y.flatten` / `y.sum` / `y.range` | Done |
+| `y.math.*` — sqrt, pow, sin, cos, pi, ... | Done |
+| `y.string.*` — upper, lower, split, join, trim, ... | Done |
+| `y.input` / `y.input_int` / `y.input_float` | Done |
+| Type system — `y.typeof`, `y.is_*`, conversions | Done |
+| Capability system `@cap`, `@intent`, `@audit` | Done |
+| Module / import system + relative paths + caching | Done **v1.6** |
+| Error objects `y.error(msg, code)` | Done |
+| Better errors — `file:line:col` + typo suggestion | Done **v1.4** |
+| REPL with colored banner | Done |
+| **Float arithmetic** (SSE2 native) | Done **v1.1** |
+| **Arrays in native compiler** | Done **v1.1** |
+| **File I/O** (`y.fs.*` — 10 functions) | Done **v1.2** |
+| **Process & System** (`process.*`, `sys.*`) | Done **v1.3** |
+| **JSON** (`y.json.parse`, `y.json.stringify`) | Done **v1.7** |
+| **Time** (`y.time.now`, `sleep`, `format`) | Done **v1.7** |
+| **Path** (`y.path.join`, `basename`, `ext`, ...) | Done **v1.7** |
+| **Env** (`y.env.get`, `y.env.set`) | Done **v1.7** |
+| **Native x86-64 compiler** | Done **v1.0** |
+| Native → Linux ELF64 | Done |
+| Native → Windows PE32+ (with icon) | Done |
+| Native → macOS Mach-O | Done |
+| Native → Exploidus | Pending v1.8 |
+| **Garbage Collector** (mark-and-sweep, `gc.collect`, `gc.stats`) | Done **v1.5** |
+| **Built-in test runner** (`ys test`, `test` blocks, `assert*`) | Done **v2.1** |
+| **Static checker** (`ys check` — undefined vars, type hints) | Done **v2.1** |
+| **Code formatter** (`ys fmt` — prints formatted source) | Done **v2.1** |
+| Self-hosting (Yolish compiles Yolish) | Pending v2.0 |
 
 ---
 
@@ -268,10 +268,10 @@ fn fetch_and_save(url, path) { ... }
 
 | Platform | Interpreter | Native Compiler Output |
 |----------|-------------|------------------------|
-| Linux       | ✅ | ELF64 static binary     |
-| macOS       | ✅ | Mach-O 64-bit           |
-| Windows     | ✅ | PE32+ with icon         |
-| Exploidus OS| ✅ | coming v1.8             |
+| Linux       | Done | ELF64 static binary     |
+| macOS       | Done | Mach-O 64-bit           |
+| Windows     | Done | PE32+ with icon         |
+| Exploidus OS| Done | coming v1.8             |
 
 ---
 

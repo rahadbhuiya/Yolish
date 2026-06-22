@@ -47,14 +47,14 @@ static char nmpool[512][32]; static int nmidx=0;
 /* forward declaration — defined later in this file */
 static Val g_return_val_fwd;
 
-/* ================================================================
+/* 
    v1.5  —  Mark-and-Sweep Garbage Collector
    ================================================================
    All arr_data and field_vals are allocated through gc_alloc().
    A GCNode header sits immediately before each allocation.
    gc_collect() marks from all envpool roots then sweeps unreachable
    nodes. gc_maybe() triggers collection at statement boundaries.
-   ================================================================ */
+*/
 
 #define GC_MAGIC  0xBC1D5A4Eu  /* sentinel to detect managed pointers  */
 
@@ -127,7 +127,7 @@ static char *gc_strdup(const char *s){
     return buf;
 }
 
-/* ---- Mark phase ---- */
+/*  Mark phase */
 
 static void gc_mark_val(Val *v);
 
@@ -179,7 +179,7 @@ static void gc_mark_roots(void){
     /* g_return_val is a static local declared later — skip here; envpool covers it */
 }
 
-/* ---- Sweep phase ---- */
+/* Sweep phase  */
 
 static void gc_sweep(void){
     GCNode **node = &gc_head;
@@ -202,7 +202,7 @@ static void gc_sweep(void){
     if(gc_threshold > 4096) gc_threshold = 4096;
 }
 
-/* ---- Public API ---- */
+/*  Public API  */
 
 /* Full collection: mark from roots + sweep */
 static void gc_collect(void){
@@ -230,12 +230,19 @@ Env *env_new(Env *parent){
     if(!env_chunk_head){
         /* allocation failure fallback — should not happen in practice */
         static Env emergency_env;
-        emergency_env.count=0; emergency_env.parent=parent;
+        emergency_env.count=0; emergency_env.cap=0;
+        emergency_env.names=NULL; emergency_env.vals=NULL;
+        emergency_env.parent=parent;
         return &emergency_env;
     }
     Env *e = &env_chunk_head->envs[env_chunk_head->used++];
     envidx++;
-    e->count=0; e->parent=parent; return e;
+    /* v2.5: lazy allocation — names/vals start NULL and grow on first
+       env_def() call. Most scopes bind only a few variables, so this
+       keeps the common case cheap; env_grow() doubles capacity as needed
+       with no fixed upper bound (replaces the old ENV_MAX cap). */
+    e->count=0; e->cap=0; e->names=NULL; e->vals=NULL; e->parent=parent;
+    return e;
 }
 
 /* v2.4: with the chunk-based pool, individual Env slots are never recycled
@@ -262,8 +269,20 @@ void env_set(Env *e,const char *name,Val v){
             if(strcmp_u(s->names[i],name)==0){s->vals[i]=v;return;}
     env_def(e,name,v);
 }
+/* v2.5: grow names/vals — starts at 8, doubles each time. Never freed
+   (matches the rest of the Env lifetime model from v2.4); this is a
+   small, bounded cost per scope, not per allocation, since most scopes
+   only ever grow once or twice. */
+static void env_grow(Env *e){
+    int newcap = e->cap ? e->cap*2 : 8;
+    char (*nn)[64] = (char(*)[64])realloc(e->names, (size_t)newcap*64);
+    Val  *nv        = (Val*)realloc(e->vals, (size_t)newcap*sizeof(Val));
+    if(!nn || !nv){ fprintf(stderr,"[YS] out of memory (env)\n"); return; }
+    e->names = nn; e->vals = nv; e->cap = newcap;
+}
 void env_def(Env *e,const char *name,Val v){
-    if(e->count>=ENV_MAX) return;
+    if(e->count>=e->cap) env_grow(e);
+    if(e->count>=e->cap) return; /* grow failed — drop silently, same as before */
     int n=0; while(name[n]&&n<63){e->names[e->count][n]=name[n];n++;}
     e->names[e->count][n]=0;
     e->vals[e->count++]=v;
@@ -1386,6 +1405,70 @@ Val eval_block(Node *b,Env *parent){
 static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     if(g_throwing) return make_nil();
 
+    /* v2.5: short-name aliases — README/DOCS document these without a
+       sub-namespace (y.replace, y.join, ...) but the implementations
+       below are registered under y.string.* / y.array.*. Redirect here
+       so both spellings work, instead of silently falling through to
+       the nil default at the bottom of this function. */
+    if(strcmp_u(name,"y.replace")==0)
+        return call_builtin("y.string.replace",args,argc,env);
+    if(strcmp_u(name,"y.join")==0)
+        return call_builtin("y.array.join",args,argc,env);
+    if(strcmp_u(name,"y.repeat")==0)
+        return call_builtin("y.string.repeat",args,argc,env);
+    if(strcmp_u(name,"y.starts_with")==0)
+        return call_builtin("y.string.starts_with",args,argc,env);
+    if(strcmp_u(name,"y.ends_with")==0)
+        return call_builtin("y.string.ends_with",args,argc,env);
+    if(strcmp_u(name,"y.index_of")==0){
+        /* v2.5: works for both arrays and strings — single eval, no re-dispatch */
+        int s0=(argc>1)?1:0;
+        Val v0=eval_node(args[s0],env);
+        if(g_throwing) return make_nil();
+        if(v0.type==YS_STR){
+            Val needle=make_nil(); if(argc>s0+1) needle=eval_node(args[s0+1],env);
+            if(g_throwing) return make_nil();
+            char *found=strstr(v0.sval, needle.sval?needle.sval:"");
+            if(!found) return make_int(-1);
+            return make_int((int64_t)(found - v0.sval));
+        }
+        /* array path: linear search for matching element */
+        Val needle=make_nil(); if(argc>s0+1) needle=eval_node(args[s0+1],env);
+        if(g_throwing) return make_nil();
+        for(int i=0;i<v0.arr_len;i++){
+            Val *el=&v0.arr_data[i];
+            int eq=(el->type==needle.type);
+            if(eq){
+                if(el->type==YS_INT)        eq=(el->ival==needle.ival);
+                else if(el->type==YS_FLOAT)  eq=(el->fval==needle.fval);
+                else if(el->type==YS_BOOL)   eq=(el->bval==needle.bval);
+                else if(el->type==YS_STR)    eq=(strcmp_u(el->sval,needle.sval)==0);
+                else eq=0;
+            }
+            if(eq) return make_int(i);
+        }
+        return make_int(-1);
+    }
+    if(strcmp_u(name,"y.reverse")==0){
+        /* v2.5: works for both arrays and strings — single eval, no re-dispatch */
+        int s0=(argc>1)?1:0;
+        Val v0=eval_node(args[s0],env);
+        if(g_throwing) return make_nil();
+        if(v0.type==YS_STR){
+            int sl=v0.slen;
+            char *buf=gc_alloc_str(sl+1);
+            for(int i=0;i<sl;i++) buf[i]=v0.sval[sl-1-i];
+            buf[sl]=0;
+            Val r=make_nil(); r.type=YS_STR; r.sval=buf; r.slen=sl;
+            return r;
+        }
+        Val result=make_nil(); result.type=YS_ARR;
+        result.arr_data=alloc_arr(v0.arr_len>0?v0.arr_len:1);
+        result.arr_len=v0.arr_len; result.arr_cap=v0.arr_len;
+        for(int i=0;i<v0.arr_len;i++) result.arr_data[i]=v0.arr_data[v0.arr_len-1-i];
+        return result;
+    }
+
     /* y.print */
     if(strcmp_u(name,"y.print")==0||strcmp_u(name,"print")==0){
         int s=(argc>1)?1:0;
@@ -2435,9 +2518,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #endif
     }
 
-/* ================================================================
+/* 
    v1.3  —  Process & System  (process.* / sys.*)
-   ================================================================ */
+*/
 
     /* process.spawn(cmd) → string (stdout captured) */
     if(strcmp_u(name,"process.spawn")==0){
@@ -2507,9 +2590,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #endif
     }
 
-/* ================================================================
+/* 
    v1.7  —  y.time.*
-   ================================================================ */
+*/
 
     /* y.time.now() → int (milliseconds since epoch) */
     if(strcmp_u(name,"y.time.now")==0){
@@ -2557,9 +2640,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_int((int64_t)time(NULL));
     }
 
-/* ================================================================
+/* 
    v1.7  —  y.env.*
-   ================================================================ */
+*/
 
     /* y.env.get(key) → string or nil */
     if(strcmp_u(name,"y.env.get")==0){
@@ -2597,9 +2680,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_nil();
     }
 
-/* ================================================================
+/* 
    v1.7  —  y.path.*
-   ================================================================ */
+*/
 
     /* y.path.join(a, b, ...) → string */
     if(strcmp_u(name,"y.path.join")==0){
@@ -2694,9 +2777,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return pv;
     }
 
-/* ================================================================
+/* 
    v1.7  —  y.json.*   (simple, no nested objects in parse)
-   ================================================================ */
+*/
 
     /* y.json.stringify(val) → string */
     if(strcmp_u(name,"y.json.stringify")==0){
@@ -2883,9 +2966,9 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_nil();
     }
 
-/* ================================================================
+/* 
    v1.6  —  Module system helpers
-   ================================================================ */
+*/
 
     /* y.module.loaded() → array of imported module names */
     if(strcmp_u(name,"y.module.loaded")==0){
@@ -3011,7 +3094,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 
 
 
-    /* ---- v1.5 GC builtins ---- */
+    /*  v1.5 GC builtins  */
 
     /* gc.collect() → nil  — force a full GC cycle */
     if(strcmp_u(name,"gc.collect")==0){

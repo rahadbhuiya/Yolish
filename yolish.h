@@ -130,13 +130,22 @@ struct Val {
 #define YS_ERR    9
 
 /* Environment */
-#define ENV_MAX 48
+/* v2.5: names/vals are now dynamically grown (start small, double on demand)
+   instead of a fixed ENV_MAX-sized array embedded in every scope. This
+   removes the per-scope variable-count limit entirely AND keeps small
+   scopes (the overwhelming majority — most functions bind a handful of
+   variables) cheap, since the old fixed-size design meant every single
+   scope paid for the worst case up front. Combined with the v2.4 fix
+   that lets scopes accumulate for the process lifetime, this matters:
+   a large fixed ENV_MAX made every accumulated scope expensive instead
+   of just the ones that actually needed many variables. */
 typedef struct Env Env;
 struct Env {
-    char  names[ENV_MAX][64];
-    Val   vals [ENV_MAX];
-    int   count;
-    Env  *parent;
+    char (*names)[64]; /* heap array, grows via env_grow() */
+    Val   *vals;        /* heap array, grows in lockstep with names */
+    int    count;
+    int    cap;         /* allocated capacity of names/vals */
+    Env   *parent;
 };
 
 /* Lexer */
