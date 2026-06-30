@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.5  
+**Version:** v2.6  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -50,6 +50,7 @@
 40. [Testing — ys test](#40-testing--ys-test)
 41. [Static Checker — ys check](#41-static-checker--ys-check)
 42. [Formatter — ys fmt](#42-formatter--ys-fmt)
+43. [Bytecode VM — ys vm (experimental)](#43-bytecode-vm--ys-vm-experimental)
 
 ---
 
@@ -2042,9 +2043,9 @@ Output:
 ```
 Running tests in math.y
 
-  ✓  addition (3 assertions)
-  ✓  factorial (3 assertions)
-  ✗  broken test
+  PASS  addition (3 assertions)
+  PASS  factorial (3 assertions)
+  FAIL  broken test
     assertion failed: expected [5], got [6]
 
 2 passed, 1 failed
@@ -2174,3 +2175,92 @@ fn greet(name) {
 ```
 
 Note: `ys fmt` preserves all string content unchanged (raw strings, backtick strings, comments).
+
+---
+
+## 43. Bytecode VM — ys vm (experimental)
+
+```bash
+ys vm file.y
+```
+
+v2.0 introduces an experimental **stack-based bytecode VM** as an alternative
+execution path to the AST interpreter. The source is compiled to bytecode
+once, then executed by a tight dispatch loop — no AST tree-walking per
+statement, no environment-chain allocation per scope. On recursion-heavy
+workloads this is dramatically faster:
+
+```
+fib(27) — recursive Fibonacci, ~832K calls
+
+  ys file.y      10.8s   (AST interpreter)
+  ys vm file.y    0.3s   (bytecode VM)   — ~36x faster
+```
+
+### What's supported in v2.0
+
+| Feature | Supported |
+|---------|-----------|
+| Literals (int, float, bool, string) | Yes |
+| Arithmetic, comparison, logical operators | Yes |
+| `let` / `var`, local and global scope | Yes |
+| `if` / `else` | Yes |
+| `while` | Yes |
+| User-defined functions, recursion | Yes |
+| Array literals, indexing (read + write) | Yes |
+| String concatenation | Yes |
+| All existing builtins (`y.*`, `process.*`, `sys.*`, `gc.*`, `cap.*`, test assertions) | Yes |
+| Auto-calling `fn main()` | Yes |
+
+### What falls back to the AST interpreter
+
+The VM is a **subset compiler** for v2.0 — it recognizes constructs it
+doesn't yet support and automatically falls back to running the whole
+program through the standard AST interpreter, rather than producing
+incorrect output:
+
+| Feature | Status |
+|---------|--------|
+| Structs and `impl` methods | Falls back |
+| Closures that capture outer variables | Falls back |
+| `match` expressions | Falls back |
+| `try` / `catch` / `throw` | Falls back |
+| `enum` | Falls back |
+| `@intent` / `@audit` annotations | Falls back |
+| `import` | Falls back |
+| String interpolation (`"Hello {name}"`) | Falls back |
+
+When a fallback happens, `ys vm` prints which construct triggered it to
+stderr, then transparently runs the whole file through `eval_program()` —
+the program's behavior and output are identical either way; only the
+execution path differs.
+
+```yolish
+-- this runs entirely on the VM, ~36x faster on deep recursion
+fn fib(n) {
+    if n <= 1 { return n }
+    return fib(n-1) + fib(n-2)
+}
+y.println(fib(27))
+```
+
+```yolish
+-- this falls back to the AST interpreter (struct + impl not yet
+-- supported by the VM's bcompiler.c) — output is still correct
+struct Point { x  y }
+impl Point {
+    fn dist(self) { return y.math.sqrt(self.x*self.x + self.y*self.y) }
+}
+let p = Point { x: 3  y: 4 }
+y.println(p.dist())
+```
+
+### Notes
+
+- `ys vm` is experimental — use `ys file.y` (the AST interpreter) for
+  anything going to production until full language coverage lands
+- Closures, structs, match, and the rest of the fallback list are
+  planned for future v2.0.x point releases as the bcompiler subset grows
+- The VM shares the exact same GC, `Val` representation, and the
+  complete builtin table with the AST interpreter — there are no
+  separate implementations to keep in sync for *those* parts

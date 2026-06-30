@@ -22,7 +22,7 @@ void ys_format(const char *src, int len) {
     while(i <= len) {
         char c = (i < len) ? src[i] : '\n';  /* flush at EOF */
 
-        /* --- handle newline: flush current line --- */
+        /*  handle newline: flush current line  */
         if(c == '\n' || i == len) {
             /* trim trailing whitespace */
             while(llen > 0 && (line_buf[llen-1]==' ' || line_buf[llen-1]=='\t')) llen--;
@@ -54,12 +54,12 @@ void ys_format(const char *src, int len) {
             i++; continue;
         }
 
-        /* --- track comment state --- */
+        /* track comment state  */
         if(!in_str && !in_raw && !in_mstr && !in_cmt) {
             if(c == '-' && i+1<len && src[i+1]=='-') in_cmt = 1;
         }
 
-        /* --- track string state --- */
+        /*  track string state  */
         if(!in_cmt) {
             if(!in_str && !in_raw && !in_mstr) {
                 if(c == '`')              { in_mstr = 1; }
@@ -70,7 +70,7 @@ void ys_format(const char *src, int len) {
             else if(in_mstr && c=='`') { in_mstr = 0; }
         }
 
-        /* --- track indent level from { } --- */
+        /*  track indent level from { }  */
         if(!in_str && !in_raw && !in_mstr && !in_cmt) {
             if(c == '{') indent++;
             if(c == '}') { /* indent decremented when we flush the line */ }

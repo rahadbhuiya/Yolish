@@ -127,7 +127,7 @@ static char *gc_strdup(const char *s){
     return buf;
 }
 
-/*  Mark phase */
+/*  Mark phase  */
 
 static void gc_mark_val(Val *v);
 
@@ -179,7 +179,7 @@ static void gc_mark_roots(void){
     /* g_return_val is a static local declared later — skip here; envpool covers it */
 }
 
-/* Sweep phase  */
+/*  Sweep phase  */
 
 static void gc_sweep(void){
     GCNode **node = &gc_head;
@@ -217,7 +217,7 @@ static void gc_maybe(void){
 
 
 /* v1.5: alloc_arr and alloc_fld now route through GC allocator */
-static Val *alloc_arr(int n){ return gc_alloc(n); }
+Val *alloc_arr(int n){ return gc_alloc(n); }
 static Val *alloc_fld(int n){ return gc_alloc(n); }
 static char (*alloc_nm(int n))[32]{
     if(nmidx+n>=512) return nmpool;
@@ -292,7 +292,7 @@ void env_def(Env *e,const char *name,Val v){
 /* v2.4: shared empty string — static, never freed, safe default for sval */
 static char g_empty_str[1] = {0};
 
-static Val make_nil(void){
+Val make_nil(void){
     Val r; r.type=YS_NIL; r.ival=0; r.fval=0; r.bval=0;
     r.sval=g_empty_str; r.slen=0;
     r.fn_node=0; r.fn_env=0; r.cap_fd=-1; r.cap_perm=0;
@@ -300,9 +300,9 @@ static Val make_nil(void){
     r.struct_name[0]=0; r.field_vals=0; r.field_names=0; r.field_count=0;
     return r;
 }
-static Val make_int(int64_t v){Val r=make_nil();r.type=YS_INT;r.ival=v;return r;}
-static Val make_float(double v){Val r=make_nil();r.type=YS_FLOAT;r.fval=v;return r;}
-static Val make_bool(int v){Val r=make_nil();r.type=YS_BOOL;r.bval=v;r.ival=v;return r;}
+Val make_int(int64_t v){Val r=make_nil();r.type=YS_INT;r.ival=v;return r;}
+Val make_float(double v){Val r=make_nil();r.type=YS_FLOAT;r.fval=v;return r;}
+Val make_bool(int v){Val r=make_nil();r.type=YS_BOOL;r.bval=v;r.ival=v;return r;}
 static Val make_err(const char *msg){
     Val r=make_nil(); r.type=YS_ERR;
     if(!msg) msg="";
@@ -310,7 +310,7 @@ static Val make_err(const char *msg){
     r.sval = (r.slen==0) ? g_empty_str : gc_strdup(msg);
     return r;
 }
-static Val make_str(const char *s){
+Val make_str(const char *s){
     Val r=make_nil(); r.type=YS_STR;
     if(!s) s="";
     r.slen = (int)strlen(s);
@@ -338,7 +338,7 @@ static Val make_cap(const char *path,int perm,int64_t fd){
 }
 
 /*  Value helpers  */
-static int64_t val_int(Val v){
+int64_t val_int(Val v){
     if(v.type==YS_INT)   return v.ival;
     if(v.type==YS_FLOAT) return (int64_t)v.fval;
     if(v.type==YS_BOOL)  return v.bval;
@@ -346,11 +346,11 @@ static int64_t val_int(Val v){
     if(v.type==YS_ARR)   return v.arr_len;
     return 0;
 }
-static double val_float(Val v){
+double val_float(Val v){
     if(v.type==YS_FLOAT) return v.fval;
     return (double)val_int(v);
 }
-static int val_bool(Val v){
+int val_bool(Val v){
     if(v.type==YS_BOOL) return v.bval;
     if(v.type==YS_INT)  return v.ival!=0;
     if(v.type==YS_STR)  return v.sval[0]!=0;
@@ -786,6 +786,12 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         /* In normal interpreter mode, test blocks are skipped.
            Use  ys test file.y  to run them. */
         return make_nil();
+
+    case ND_VM_VALUE:
+        /* v2.0: bridge from the bytecode VM — n->left holds a Val*
+           pointing at an already-evaluated value (see
+           call_builtin_public below). Just hand it back. */
+        return *(Val*)(void*)(n->left);
 
     case ND_ENUM:{
         /* v2.2/v2.4: register EnumName.Variant (qualified only, saves env slots) */
@@ -2981,7 +2987,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         for(int i=0;i<g_nimported;i++) result.arr_data[i]=make_str(g_imported_modules[i]);
         return result;
     }
-    /* ---- v2.1 Test Assertion Builtins ---- */
+    /*  v2.1 Test Assertion Builtins  */
 
     /* assert(cond, msg?) — throws if cond is false */
     if(strcmp_u(name,"assert")==0){
@@ -3141,4 +3147,50 @@ Val eval_program(Node *prog,Env *env){
         return eval_block(mf->fn_node->body,fe);
     }
     return last;
+}
+
+/* 
+   v2.0  —  bytecode VM bridge
+   ================================================================
+   call_builtin() above is static and expects Node* args that it will
+   eval_node() itself. The VM already has fully-evaluated Val arguments
+   sitting on its stack — there is no AST to re-evaluate. Rather than
+   forking every one of the 190+ builtin call sites into a Val-taking
+   variant (massive duplication, massive bug surface), we wrap each Val
+   in a trivial ND_VM_VALUE node that eval_node() just unwraps, and feed
+   those into the *same* call_builtin(). This keeps every builtin —
+   string/array/fs/json/time/path/env/process/gc/test-assertions — working
+   identically under the VM with zero duplicated logic, at the cost of a
+   small stack-allocated Node per call (cheap; Node is not GC-tracked).
+*/
+Val call_builtin_public(const char *name, Val *argv, int argc){
+    enum { MAX_BRIDGE_ARGS = 17 }; /* +1 for the synthetic receiver slot */
+    Node nodes[MAX_BRIDGE_ARGS];
+    Node *args[MAX_BRIDGE_ARGS];
+    /* call_builtin() mirrors the AST path's calling convention, where a
+       namespaced call's args[0] is always a duplicate "receiver" (the
+       object before the dot) that every such builtin skips internally
+       via `int s=(argc>1)?1:0;`. The VM's compiler (bcompiler.c) has
+       already stripped that receiver out before calling here — argv[]
+       holds ONLY the real arguments. Without re-adding a placeholder,
+       call_builtin() would skip the first REAL argument, believing it
+       to be the receiver (this caused y.path.join("/home","x","y") to
+       silently drop "/home", among others). Prepend a throwaway nil. */
+    static Val dummy_receiver;
+    dummy_receiver=make_nil();
+    memset(&nodes[0],0,sizeof(Node));
+    nodes[0].kind=ND_VM_VALUE;
+    nodes[0].left=(Node*)(void*)&dummy_receiver;
+    args[0]=&nodes[0];
+
+    int n = argc>MAX_BRIDGE_ARGS-1 ? MAX_BRIDGE_ARGS-1 : argc;
+    for(int i=0;i<n;i++){
+        memset(&nodes[i+1],0,sizeof(Node));
+        nodes[i+1].kind=ND_VM_VALUE;
+        nodes[i+1].left=(Node*)(void*)&argv[i];
+        args[i+1]=&nodes[i+1];
+    }
+    static Env *bridge_env=NULL;
+    if(!bridge_env) bridge_env=env_new(NULL);
+    return call_builtin(name, args, n+1, bridge_env);
 }

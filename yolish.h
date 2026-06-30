@@ -63,6 +63,11 @@ typedef enum {
     ND_MATCH_ARM,
     ND_ENUM,  /* v2.2: enum declaration */
     ND_TEST,  /* v2.1: test block */
+    ND_VM_VALUE, /* v2.0: wraps an already-evaluated Val* (from the VM's
+                    stack) so call_builtin() can be reused as-is without
+                    every builtin needing a Val-based variant. The Val*
+                    lives in fn_node, cast back on use — see eval_node's
+                    ND_VM_VALUE case and call_builtin_public() in eval.c. */
 } NodeKind;
 
 typedef struct Node Node;
@@ -183,5 +188,21 @@ extern int  g_throwing;
 extern int  g_returning;
 extern char g_throw_msg[512];
 Val eval_block(Node *b, Env *parent);
+
+/* v2.0: bytecode VM bridge into the existing builtin table (see eval.c) */
+Val call_builtin_public(const char *name, Val *argv, int argc);
+
+/* v2.0: Val constructors and helpers, exported so vm.c can build/inspect
+   values without duplicating eval.c's logic */
+Val     make_nil(void);
+Val     make_int(int64_t v);
+Val     make_float(double v);
+Val     make_bool(int v);
+Val     make_str(const char *s);
+int64_t val_int(Val v);
+double  val_float(Val v);
+int     val_bool(Val v);
+Val    *alloc_arr(int n);
+void    ys_print_val(Val v);
 extern int  g_assert_count;  /* v2.1: assertions in current test */
 extern char g_src_file[512]; /* v1.4: current source filename */

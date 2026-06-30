@@ -4,7 +4,7 @@
 
 set -e
 
-VERSION="v2.5"
+VERSION="v2.6"
 REPO="rahadbhuiya/yolish"
 RAW="https://raw.githubusercontent.com/$REPO/master"
 

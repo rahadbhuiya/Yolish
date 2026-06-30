@@ -1,4 +1,5 @@
 #include "yolish.h"
+#include "vm.h"
 #ifdef _WIN32
 #include <windows.h>
 #include <direct.h>
@@ -21,10 +22,10 @@ void ys_format(const char *src, int len);
 int  ys_check(Node *prog, const char *filename);
 
 
-/*  REPL  */
+/*  REPL */
 
 static void run_repl(void){
-    fprintf(stdout,"  Yolish v2.5 (Exploidus Runtime)\n");
+    fprintf(stdout,"  Yolish v2.6 (Exploidus Runtime)\n");
     fprintf(stdout,"  Type \"help\" or \"exit\" to quit.\n\n");
 
     Env *env=env_new(NULL);
@@ -54,7 +55,7 @@ static void run_repl(void){
 }
 
 
-/*  ys test <file.y>  */
+/*  ys test <file.y> */
 
 static int run_tests(const char *tfile) {
     FILE *f=fopen(tfile,"r");
@@ -90,10 +91,10 @@ static int run_tests(const char *tfile) {
         g_assert_count=0; g_throwing=0;
         eval_block(stmt->body,env);
         if(g_throwing){
-            printf("  \xe2\x9c\x97  %s\n    %s\n",stmt->sval,g_throw_msg);
+            printf("  FAIL  %s\n    %s\n",stmt->sval,g_throw_msg);
             g_throwing=0; failed++;
         } else {
-            printf("  \xe2\x9c\x93  %s (%d assertion%s)\n",
+            printf("  PASS  %s (%d assertion%s)\n",
                    stmt->sval, g_assert_count, g_assert_count==1?"":"s");
             passed++;
         }
@@ -130,7 +131,40 @@ static int run_check(const char *cfile) {
     return (errs>0)?1:0;
 }
 
-/*  Usage   */
+
+/*  ys vm <file.y>  —  v2.0 bytecode VM (experimental) */
+
+static int run_vm(const char *vfile) {
+    FILE *f=fopen(vfile,"r");
+    if(!f){ fprintf(stderr,"ys vm: cannot open '%s'\n",vfile); return 1; }
+    static char vsrc[1<<20];
+    int vlen=(int)fread(vsrc,1,sizeof(vsrc)-1,f);
+    fclose(f); vsrc[vlen]=0;
+
+    strncpy(g_src_file,vfile,511);
+    {   int last=-1,fl=(int)strlen(vfile);
+        for(int i=0;i<fl;i++) if(vfile[i]=='/'||vfile[i]=='\\') last=i;
+        if(last>=0){ strncpy(g_src_dir,vfile,last); g_src_dir[last]=0; }
+        if(chdir(g_src_dir[0]?g_src_dir:".")){ }
+        g_src_dir[0]=0;
+    }
+
+    Lexer l; lex_init(&l,vsrc,vlen);
+    Node *prog=parse_program(&l);
+
+    VMResult r=vm_interpret(prog);
+    if(r==VM_COMPILE_ERROR){
+        fprintf(stderr,"ys vm: this program uses a construct the v2.0 bytecode\n"
+                        "       compiler doesn't support yet — falling back to\n"
+                        "       the standard interpreter.\n\n");
+        Env *env=env_new(NULL);
+        eval_program(prog,env);
+        return 0;
+    }
+    return (r==VM_RUNTIME_ERROR)?1:0;
+}
+
+/*  Usage */
 
 static void usage(void){
     fprintf(stderr,
@@ -143,11 +177,12 @@ static void usage(void){
         "  ys test <file.y>           run test blocks\n"
         "  ys fmt  <file.y>           format source (prints to stdout)\n"
         "  ys check <file.y>          static check without running\n"
+        "  ys vm <file.y>             run via the bytecode VM (experimental, v2.0)\n"
         "  ys --help                  show this help\n");
 }
 
 
-/*  main   */
+/*  main */
 
 int main(int argc,char **argv){
 
@@ -167,6 +202,10 @@ int main(int argc,char **argv){
         if(strcmp(argv[1],"check")==0){
             if(argc<3){ fprintf(stderr,"Usage: ys check <file.y>\n"); return 1; }
             return run_check(argv[2]);
+        }
+        if(strcmp(argv[1],"vm")==0){
+            if(argc<3){ fprintf(stderr,"Usage: ys vm <file.y>\n"); return 1; }
+            return run_vm(argv[2]);
         }
         if(strcmp(argv[1],"--help")==0||strcmp(argv[1],"-h")==0){
             usage(); return 0;

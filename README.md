@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.5-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.6-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -22,7 +22,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.5 |
+| **Version** | v2.6 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -110,6 +110,7 @@ ys -c <file.y> --target macos   Compile → macOS Mach-O
 ys test <file.y>                Run test blocks
 ys fmt  <file.y>                Format source (prints to stdout)
 ys check <file.y>               Static check without running
+ys vm <file.y>                   Run via the bytecode VM (experimental, v2.0)
 ys --help                       Show help
 ```
 

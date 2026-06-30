@@ -38,6 +38,9 @@ Exploidus — readable, safe, and practical.
 | **v2.1** | **Tooling — `ys test` (test runner), `ys fmt` (formatter), `ys check` (static analysis)** |
 | **v2.2** | **Enums — `enum Status { Ok NotFound Error }` with match integration** |
 | **v2.3** | **Scalability — dynamic (chunk-based) node pool, unlimited import size, 1024-element arrays, O(1) amortized push/pop, immutable array semantics fix** |
+| **v2.4** | **Unlimited strings (heap-allocated, GC-tracked); fixed critical closure-corruption bug present since v1.5** |
+| **v2.5** | **Unlimited variables per scope (dynamic Env); fixed seven builtin short-name aliases that silently returned `nil`** |
+| **v2.0** | **Experimental bytecode VM — `ys vm file.y`. Stack-based VM compiling a language subset (literals, operators, variables, if/while, user functions, arrays, all 190+ existing builtins via a bridge into `call_builtin()`). Benchmarked 35-40x faster than the AST interpreter on `fib(27)` (10.8s → 0.3s). Unsupported constructs fall back cleanly to the AST interpreter rather than miscompiling — full language coverage (structs, closures-with-capture, match, enums, annotations, modules) and self-hosting remain future work under this same version number** |
 | **v2.4** | **Unlimited strings — `Val.sval`/`Node.sval` moved to heap (GC-tracked); dynamic lexer string buffers; fixed a critical closure-corruption bug (self-referencing env parent chain) that had existed since v1.5's GC introduction** |
 | **v2.5** | **Unlimited variables per scope — `Env.names`/`Env.vals` converted from a fixed 48-slot array to a dynamically-growing heap array (removes the old `ENV_MAX` cap entirely, and is *faster* for small scopes since they no longer pay for an oversized fixed allocation). Also fixed seven builtin short-name aliases (`y.replace`, `y.join`, `y.repeat`, `y.starts_with`, `y.ends_with`, `y.reverse`, `y.index_of`) that were documented but silently returned `nil` because only their namespaced forms (`y.string.replace`, `y.array.join`, ...) were registered** |
 
@@ -50,10 +53,13 @@ Exploidus — readable, safe, and practical.
 - Structs in native compiler
 - `y.print`/`y.println` for all types natively compiled
 
-### v2.0 — Self-Hosting
-- Yolish compiles itself
-- Bytecode VM for faster interpretation
-- Constant folding and dead code elimination
+### v2.0 — Self-Hosting (in progress)
+- Done: Bytecode VM for faster interpretation — shipped as `ys vm`, currently
+  a subset compiler (see Completed table above for exact coverage)
+- Pending: Full language coverage in the VM (structs, closures with variable
+  capture, match expressions, enums, try/catch, modules, annotations)
+- Pending: Yolish compiles itself
+- Pending: Constant folding and dead code elimination
 
 ### v3.0 — Exploidus Integration
 - Deep Exploidus OS kernel integration

@@ -25,33 +25,33 @@ jobs:
           echo 'y.println("hello")' | ./ys /dev/stdin | grep -q "hello"
           echo "y.println(1 + 2)" | ./ys /dev/stdin | grep -q "3"
           echo "y.println(2 * 21)" | ./ys /dev/stdin | grep -q "42"
-          echo "✓ basic interpreter"
+          echo "PASS: basic interpreter"
 
       - name: Test — float arithmetic
         run: |
           echo "y.println(1.5 + 2.3)" | ./ys /dev/stdin | grep -q "3.8"
           echo "y.println(10.0 / 4.0)" | ./ys /dev/stdin | grep -q "2.5"
           echo "y.println(-3.14)" | ./ys /dev/stdin | grep -q "\-3.14"
-          echo "✓ float arithmetic"
+          echo "PASS: float arithmetic"
 
       - name: Test — enums
         run: |
           printf 'enum Status { Ok NotFound Error }\ny.println(Status.Ok)\n' \
             | ./ys /dev/stdin | grep -q "Status.Ok"
-          echo "✓ enums"
+          echo "PASS: enums"
 
       - name: Test — file I/O
         run: |
           printf 'y.fs.write("/tmp/ys_ci.txt","hello")\ny.println(y.fs.read("/tmp/ys_ci.txt"))\n' \
             | ./ys /dev/stdin | grep -q "hello"
           rm -f /tmp/ys_ci.txt
-          echo "✓ file I/O"
+          echo "PASS: file I/O"
 
       - name: Test — JSON
         run: |
           printf 'let o = y.json.parse(`{"x":42}`)\ny.println(o.x)\n' \
             | ./ys /dev/stdin | grep -q "42"
-          echo "✓ JSON"
+          echo "PASS: JSON"
 
       - name: Test — modules (relative import)
         run: |
@@ -59,18 +59,18 @@ jobs:
           printf 'import "/tmp/utils_ci.y"\ngreet("ok")\n' \
             | ./ys /dev/stdin | grep -q "ok"
           rm -f /tmp/utils_ci.y
-          echo "✓ modules"
+          echo "PASS: modules"
 
       - name: Test — process & system
         run: |
           echo 'y.println(sys.platform())' | ./ys /dev/stdin | grep -q "linux"
-          echo "✓ process & system"
+          echo "PASS: process & system"
 
       - name: Test — match + guards
         run: |
           printf 'let x = 5\nlet r = match x {\n  n if n > 3 => "big"\n  _ => "small"\n}\ny.println(r)\n' \
             | ./ys /dev/stdin | grep -q "big"
-          echo "✓ match guards"
+          echo "PASS: match guards"
 
       - name: Test — ys test command
         run: |
@@ -85,14 +85,14 @@ test "strings" {
 }
 YSEOF
           ./ys test /tmp/ci_test.y | grep -q "2 passed"
-          echo "✓ ys test"
+          echo "PASS: ys test"
 
       - name: Test — ys check command
         run: |
           echo 'let x = 10
 y.println(x)' > /tmp/ci_clean.y
           ./ys check /tmp/ci_clean.y | grep -q "No issues"
-          echo "✓ ys check"
+          echo "PASS: ys check"
 
       - name: Test — assert builtins
         run: |
@@ -101,7 +101,7 @@ assert_eq(2 + 2, 4)
 assert_true(true)
 assert_false(false)
 y.println("ok")' | ./ys /dev/stdin | grep -q "ok"
-          echo "✓ assert builtins"
+          echo "PASS: assert builtins"
 
       - name: Test — native compiler (Linux ELF)
         run: |
@@ -109,7 +109,24 @@ y.println("ok")' | ./ys /dev/stdin | grep -q "ok"
           ./ys -c /tmp/nc_test.y -o /tmp/nc_test_bin
           /tmp/nc_test_bin | grep -q "compiled!"
           rm -f /tmp/nc_test.y /tmp/nc_test_bin
-          echo "✓ native compiler"
+          echo "PASS: native compiler"
+
+      - name: Test — bytecode VM (v2.0, experimental)
+        run: |
+          cat > /tmp/vm_test.y << 'YSEOF'
+fn fib(n) {
+    if n <= 1 { return n }
+    return fib(n-1) + fib(n-2)
+}
+y.println(fib(10))
+let arr = [1, 2, 3]
+y.println(arr[1])
+var i = 0
+while i < 3 { i = i + 1 }
+y.println(i)
+YSEOF
+          ./ys vm /tmp/vm_test.y < /dev/null | grep -q "55"
+          echo "PASS: bytecode VM"
 
       - name: Run examples
         run: |
@@ -122,5 +139,5 @@ y.println("ok")' | ./ys /dev/stdin | grep -q "ok"
           # instant EOF so input() returns an empty/default value instead
           # of blocking forever.
           for f in examples/*.y; do
-            timeout 30 ./ys "$f" < /dev/null > /dev/null 2>&1 && echo "✓ $f" || echo "✗ $f (non-zero exit)"
+            timeout 30 ./ys "$f" < /dev/null > /dev/null 2>&1 && echo "PASS: $f" || echo "FAIL: $f (non-zero exit)"
           done

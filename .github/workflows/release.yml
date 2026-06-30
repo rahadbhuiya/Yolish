@@ -59,7 +59,7 @@ jobs:
             | Windows x64 | [`ys.exe`](../../releases/download/${{ github.ref_name }}/ys.exe) |
             | Linux x64 | [`ys-linux`](../../releases/download/${{ github.ref_name }}/ys-linux) |
             | macOS x64 | [`ys-macos`](../../releases/download/${{ github.ref_name }}/ys-macos) |
-            | VS Code extension | [`yolish-*.vsix`](../../releases/download/${{ github.ref_name }}/yolish-2.5.0.vsix) |
+            | VS Code extension | [`yolish-*.vsix`](../../releases/download/${{ github.ref_name }}/yolish-2.6.0.vsix) |
 
             ### Install
 
@@ -79,7 +79,7 @@ jobs:
             ```
             or:
             ```cmd
-            code --install-extension yolish-2.5.0.vsix
+            code --install-extension yolish-2.6.0.vsix
             ```
 
             ### What's new in ${{ github.ref_name }}
@@ -93,6 +93,7 @@ jobs:
             - **v2.3** Scalability — dynamic node pool, 1024-element arrays, O(1) amortized push/pop
             - **v2.4** Unlimited strings (heap-allocated); fixed critical closure-corruption bug from v1.5
             - **v2.5** Unlimited variables per scope (dynamic Env); fixed y.replace/y.join/y.reverse/y.index_of short-name aliases
+            - **v2.0** Experimental bytecode VM (`ys vm file.y`) — 35-40x faster on recursive workloads, falls back cleanly for unsupported constructs
             - **v1.6** Module system — relative imports (`./utils.y`), circular detection, caching
             - **v1.7** Stdlib — `y.json`, `y.time`, `y.env`, `y.path`
             - **v2.2** Enums — `enum Direction { North South East West }` with match integration
