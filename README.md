@@ -14,7 +14,6 @@
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
-  <img src="https://github.com/rahadbhuiya/yolish/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </p>
 
 ---
@@ -35,12 +34,24 @@
 
 ### Windows
 
+**Option 1 — GUI installer (recommended)**
+
+1. Download [`yolish-setup.exe`](../../releases/latest/download/yolish-setup.exe)
+2. Double-click → Next → Next → Finish
+3. Open any new terminal and type `ys`
+
+The installer automatically adds Yolish to your PATH and creates a
+Start Menu shortcut that opens the Yolish REPL in a terminal window.
+An entry in Add/Remove Programs is also created for clean uninstallation.
+
+**Option 2 — manual (no installer)**
+
 1. Download [`ys.exe`](../../releases/latest/download/ys.exe)
 2. Put it anywhere (e.g. `C:\Tools\ys.exe`)
-3. Add that folder to your PATH — or run the auto-installer:
+3. Add that folder to your PATH — or run the PowerShell auto-installer:
 
 ```powershell
-# Run once as Administrator — downloads ys.exe and adds to PATH automatically
+# Run once as Administrator
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 

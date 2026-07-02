@@ -22,7 +22,8 @@ jobs:
             gcc-mingw-w64-x86-64 \
             mingw-w64-tools \
             librsvg2-bin \
-            imagemagick
+            imagemagick \
+            nsis
 
       - name: Generate icons
         run: make icons
@@ -38,6 +39,13 @@ jobs:
 
       - name: Build Windows binary
         run: make windows
+
+      - name: Build Windows GUI installer (NSIS)
+        run: |
+          # makensis expects ys.exe and icons/ys.ico in the working dir
+          makensis installer.nsi
+          echo "Installer built: yolish-setup.exe"
+          ls -lh yolish-setup.exe
 
       - name: Build VS Code extension (.vsix)
         run: |
@@ -57,7 +65,8 @@ jobs:
 
             | Platform | File |
             |----------|------|
-            | Windows x64 | [`ys.exe`](../../releases/download/${{ github.ref_name }}/ys.exe) |
+            | Windows x64 installer | [`yolish-setup.exe`](../../releases/download/${{ github.ref_name }}/yolish-setup.exe) — Next/Next/Finish, auto-adds to PATH |
+            | Windows x64 binary (manual) | [`ys.exe`](../../releases/download/${{ github.ref_name }}/ys.exe) |
             | Linux x64 | [`ys-linux`](../../releases/download/${{ github.ref_name }}/ys-linux) |
             | macOS x64 | [`ys-macos`](../../releases/download/${{ github.ref_name }}/ys-macos) |
             | VS Code extension | [`yolish-*.vsix`](../../releases/download/${{ github.ref_name }}/yolish-2.6.0.vsix) |
@@ -108,6 +117,7 @@ jobs:
           files: |
             ys-linux
             ys.exe
+            yolish-setup.exe
             install.ps1
             install.sh
             icons/logo.svg
