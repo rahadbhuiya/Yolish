@@ -273,6 +273,71 @@ static VMResult run(void){
                 vm_push(val);
                 break;
             }
+
+            /*  struct opcodes (v2.0 Phase 2)  */
+            case OP_STRUCT_NEW: {
+                int nameidx = read_u16(frame);
+                int fcount  = frame->chunk->code[frame->ip++];
+                if(fcount > 8) fcount = 8;
+                /* Read field name constant indices from the bytecode stream */
+                int fidxs[8];
+                for(int i=0; i<fcount; i++) fidxs[i] = read_u16(frame);
+                /* Build the struct Val */
+                Val v = make_nil(); v.type = YS_STRUCT;
+                const char *sname = frame->chunk->constants[nameidx].sval;
+                strncpy(v.struct_name, sname?sname:"", 31);
+                v.field_count = fcount;
+                v.field_vals  = alloc_arr(fcount > 0 ? fcount : 1);
+                /* Allocate field names with malloc — small, bounded cost.
+                   (Not GC-tracked yet; future work to add gc_mark_str support.) */
+                char (*fnames)[32] = (char(*)[32])malloc((size_t)(fcount>0?fcount:1) * 32);
+                v.field_names = fnames;
+                /* Pop field values: they were pushed field[0]..field[N-1] so
+                   field[N-1] is on top. Fill in reverse. */
+                for(int i = fcount-1; i >= 0; i--){
+                    v.field_vals[i] = vm_pop();
+                    const char *fn = frame->chunk->constants[fidxs[i]].sval;
+                    snprintf(fnames[i], 32, "%s", fn ? fn : "");
+                }
+                vm_push(v);
+                break;
+            }
+
+            case OP_GET_FIELD: {
+                int nameidx = read_u16(frame);
+                const char *fname = frame->chunk->constants[nameidx].sval;
+                Val obj = vm_pop();
+                Val result = make_nil();
+                if(obj.type == YS_STRUCT && obj.field_vals && obj.field_names && fname){
+                    for(int i=0; i<obj.field_count; i++){
+                        if(strcmp_u(obj.field_names[i], fname)==0){
+                            result = obj.field_vals[i];
+                            break;
+                        }
+                    }
+                }
+                vm_push(result);
+                break;
+            }
+
+            case OP_SET_FIELD: {
+                /* Stack on entry: [..., struct, value]  (value on top) */
+                int nameidx = read_u16(frame);
+                const char *fname = frame->chunk->constants[nameidx].sval;
+                Val newval = vm_pop();
+                Val obj    = vm_pop();
+                if(obj.type == YS_STRUCT && obj.field_vals && obj.field_names && fname){
+                    for(int i=0; i<obj.field_count; i++){
+                        if(strcmp_u(obj.field_names[i], fname)==0){
+                            obj.field_vals[i] = newval; /* mutates through GC ptr */
+                            break;
+                        }
+                    }
+                }
+                vm_push(newval);
+                break;
+            }
+
             case OP_BUILTIN: {
                 int nameidx=read_u16(frame);
                 int argc=frame->chunk->code[frame->ip++];

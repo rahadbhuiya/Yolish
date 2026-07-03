@@ -67,6 +67,16 @@ typedef enum {
     OP_INDEX_GET,     /* pop index, pop array/string → push element */
     OP_INDEX_SET,     /* pop value, pop index, pop array → set element, push value */
 
+    /*  structs (v2.0 Phase 2)  */
+    OP_STRUCT_NEW,    /* u16 name_idx, u8 fcount, then u16 field_name_idx*fcount.
+                          Pops fcount values (field[0] at bottom, field[N-1] on top).
+                          Creates YS_STRUCT Val with GC-tracked field_vals,
+                          malloc field_names; pushes struct. */
+    OP_GET_FIELD,     /* u16 name_idx -> pop struct, push field value (nil if not found). */
+    OP_SET_FIELD,     /* u16 name_idx -> pop value then pop struct. Writes to
+                          struct.field_vals[i] via shared GC pointer so all copies
+                          of this struct Val see the update. Pushes value. */
+
     /*  builtins (escape hatch into the existing builtin table)  */
     OP_BUILTIN,       /* operand: u16 name-const idx, u8 argc
                           → pop argc values, call the named builtin, push result.

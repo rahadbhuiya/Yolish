@@ -293,6 +293,17 @@ static void compile_node(Node *n){
                 int idx=chunk_add_const(CUR->chunk, bc_str(n->left->name,(int)strlen(n->left->name)));
                 emit_byte(OP_SET_GLOBAL,line); emit_u16(idx,line);
             }
+        } else if(n->left && n->left->kind==ND_DOT){
+            /* p.x = value  (struct field write)
+               Stack order for OP_SET_FIELD: push struct, then push value.
+               OP_SET_FIELD writes through the shared field_vals GC pointer
+               so the change is visible through ALL Val copies of this struct.
+               Pushes the value back (as the expression result). */
+            compile_node(n->left->left); /* push the struct (gets field_vals ptr) */
+            compile_node(n->right);       /* push new value */
+            int fidx = chunk_add_const(CUR->chunk,
+                           bc_str(n->left->name,(int)strlen(n->left->name)));
+            emit_byte(OP_SET_FIELD,line); emit_u16(fidx,line);
         } else if(n->left && n->left->kind==ND_INDEX){
             /* arr[i] = value — OP_INDEX_SET expects array, index, value
                on the stack (bottom to top), so push in that order. */
@@ -414,6 +425,67 @@ static void compile_node(Node *n){
         emit_byte(OP_DEFINE_GLOBAL,line); emit_u16(nameidx,line);
         break;
     }
+
+
+    /*  Structs (v2.0 Phase 2) */
+
+    case ND_STRUCT: {
+        /* struct Point { x y } — register the struct name as a global
+           string, same as the AST interpreter: env_def(env, name, make_str(name))
+           This lets code like  Point { x: 10 }  find the type name in scope. */
+        Val namestr = bc_str(n->name,(int)strlen(n->name));
+        int stridx = chunk_add_const(CUR->chunk, namestr);
+        emit_byte(OP_CONST, line); emit_u16(stridx, line);
+        int globidx = chunk_add_const(CUR->chunk, bc_str(n->name,(int)strlen(n->name)));
+        emit_byte(OP_DEFINE_GLOBAL, line); emit_u16(globidx, line);
+        break;
+    }
+
+    case ND_STRUCT_LIT: {
+        /* Point { x: 10  y: 20 }
+           Push each field value in declaration order, then OP_STRUCT_NEW.
+           Field values are in n->args[0..argc-1], names in n->field_names[]. */
+        int fcount = n->argc;
+        if(fcount > 8) fcount = 8; /* language limit: 8 fields per struct */
+        for(int i = 0; i < fcount; i++) compile_node(n->args[i]);
+        /* Emit the struct name + field count */
+        int nameidx = chunk_add_const(CUR->chunk, bc_str(n->name,(int)strlen(n->name)));
+        emit_byte(OP_STRUCT_NEW, line);
+        emit_u16(nameidx, line);
+        emit_byte((unsigned char)fcount, line);
+        /* Embed field name constant indices inline in the bytecode */
+        for(int i = 0; i < fcount; i++){
+            int fidx = chunk_add_const(CUR->chunk,
+                           bc_str(n->field_names[i],(int)strlen(n->field_names[i])));
+            emit_u16(fidx, line);
+        }
+        break;
+    }
+
+    case ND_DOT: {
+        /* p.x — field read. Also handles enum dot access via OP_GET_FIELD
+           (the VM's OP_GET_FIELD falls back to nil for non-struct Vals,
+           matching the AST's "dot on non-struct: nil" behaviour).
+           Method calls p.method() go through compile_call() when the parent
+           node is ND_CALL, not here — here n->kind==ND_DOT means it is
+           used as a pure r-value (reading a field). */
+        compile_node(n->left); /* push the struct */
+        int fidx = chunk_add_const(CUR->chunk, bc_str(n->name,(int)strlen(n->name)));
+        emit_byte(OP_GET_FIELD, line);
+        emit_u16(fidx, line);
+        break;
+    }
+
+    case ND_IMPL: {
+        /* impl Point { fn dist(self) { ... } }
+           Phase 2 deferred: fall back to AST interpreter for any program
+           that contains impl blocks.  Struct definition + literal + field
+           read/write are fully supported above. */
+        fprintf(stderr,"[ys vm] impl blocks not yet supported at line %d — falling back\n", line);
+        CUR->had_error=1;
+        break;
+    }
+
     default:
         fprintf(stderr,"[ys vm] unsupported construct (node kind %d) at line %d — falling back to AST interpreter for this run\n", (int)n->kind, line);
         CUR->had_error=1;
@@ -432,6 +504,7 @@ static void compile_stmt_list(Node **stmts, int count){
         switch(stmts[i]->kind){
             case ND_LET: case ND_VAR: case ND_IF: case ND_WHILE:
             case ND_RETURN: case ND_FN: case ND_BLOCK:
+            case ND_STRUCT: case ND_IMPL: /* void-shaped — no value left on stack */
                 break;
             default:
                 emit_byte(OP_POP, stmts[i]->line);
