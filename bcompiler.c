@@ -3,11 +3,12 @@
    Walks the existing AST (Node*, produced by parser.c — completely
    unchanged) and emits bytecode into a Chunk. This is a *subset*
    compiler for v2.0: it covers the core language (literals, operators,
-   variables, if/while, functions, arrays, builtins) so the VM can be
-   benchmarked and validated end-to-end. Structs, closures-with-capture,
-   match, try/catch, enums, and modules still fall back to the AST
-   interpreter (eval.c) — `ys vm` reports which construct it hit and
-   exits cleanly rather than miscompiling.
+   variables, if/while/for-in, break/continue, match/match-guard,
+   functions (with implicit last-expression return), arrays, structs,
+   builtins) so the VM can be benchmarked and validated end-to-end.
+   Closures-with-capture, try/catch, enums, and modules still fall
+   back to the AST interpreter (eval.c) — `ys vm` reports which
+   construct it hit and exits cleanly rather than miscompiling.
 */
 
 #include "bcompiler.h"
@@ -18,10 +19,39 @@
 /*  compiler state  */
 
 #define MAX_LOCALS 256
+#define MAX_LOOP_DEPTH 32
+#define MAX_BREAKS_PER_LOOP 64
 
 typedef struct {
     char name[64];
 } LocalSlot;
+
+/* v2.6: tracks a single enclosing loop so break/continue can be
+   compiled to real jumps instead of falling back to the AST
+   interpreter. Both break and continue are deferred forward jumps:
+   for while-loops the continue target (the condition re-check) is
+   technically known before the body compiles, but for for-loops the
+   continue target is the increment step, which is emitted *after*
+   the body — so continue is compiled as a placeholder jump in both
+   cases and patched by the enclosing loop once the real target
+   address is known, exactly like break already is. */
+typedef struct {
+    int break_jumps[MAX_BREAKS_PER_LOOP];
+    int break_count;
+    int continue_jumps[MAX_BREAKS_PER_LOOP];
+    int continue_count;
+    int body_base_locals; /* CUR->local_count right before the loop body
+                              compiles — locals the body declares (directly,
+                              or via any nested loop/if) must be popped back
+                              down to this depth before each new iteration
+                              and at every break/continue, since nothing
+                              else in this compiler frees locals when a
+                              runtime scope (loop iteration) ends. Without
+                              this, a second+ iteration's freshly pushed
+                              local lands on top of the stale one instead of
+                              overwriting it, corrupting every fixed slot
+                              index baked into the body's bytecode. */
+} LoopCtx;
 
 typedef struct BCompiler {
     Chunk            *chunk;
@@ -30,11 +60,19 @@ typedef struct BCompiler {
     int               in_function;   /* 0 = top-level globals, 1 = function body locals */
     struct BCompiler *enclosing;
     int               had_error;
+    LoopCtx           loop_stack[MAX_LOOP_DEPTH];
+    int               loop_depth;
 } BCompiler;
 
 static BCompiler *CUR = NULL; /* current compiler — simplifies the many
                                    small emit helpers below; restored via
                                    save/restore around nested fn compiles */
+
+/* v2.6: unique suffix generator for hidden compiler-internal variables
+   (for-loop bounds/index/iterable). Prefixed with '$', a character the
+   lexer never produces inside an identifier, so these can never collide
+   with a real user-declared name in either local or global scope. */
+static int g_temp_counter = 0;
 
 /*  low-level emitters  */
 
@@ -61,6 +99,84 @@ static int emit_jump(unsigned char op, int line){
 
 static void patch_jump_here(int at){
     chunk_patch_jump(CUR->chunk, at, CUR->chunk->count);
+}
+
+/* forward decls — full definitions live in the "local variable table"
+   section further down; needed here because the generic var helpers
+   below are used by both that section's callers and the for-loop
+   compiler, and emit_declare/emit_load/emit_store_and_pop are simplest
+   to keep next to the other emit_* helpers at the top of the file. */
+static int resolve_local(const char *name);
+static int add_local(const char *name);
+static Val bc_str(const char *s,int len);
+
+/* Generic variable helpers (local-or-global aware), used by the for-loop
+   compiler below to declare/read/write both the user's loop variable and
+   the compiler's own hidden bookkeeping variables (bounds/index/iterable)
+   with identical scoping rules to ND_LET/ND_IDENT/ND_ASSIGN. */
+
+static void emit_declare(const char *name, int line){
+    /* Value already sits on top of the stack. For a local, this just
+       claims that stack position as the named slot (same trick as
+       ND_LET — see the comment there). For a global, it pops the value
+       into the named global slot. */
+    if(CUR->in_function){
+        (void)add_local(name);
+    } else {
+        int idx=chunk_add_const(CUR->chunk, bc_str(name,(int)strlen(name)));
+        emit_byte(OP_DEFINE_GLOBAL,line); emit_u16(idx,line);
+    }
+}
+static void emit_load(const char *name, int line){
+    int slot=CUR->in_function?resolve_local(name):-1;
+    if(slot>=0){ emit_byte(OP_GET_LOCAL,line); emit_u16(slot,line); }
+    else {
+        int idx=chunk_add_const(CUR->chunk, bc_str(name,(int)strlen(name)));
+        emit_byte(OP_GET_GLOBAL,line); emit_u16(idx,line);
+    }
+}
+static void emit_store_and_pop(const char *name, int line){
+    /* Value on top of stack -> write into the existing slot, then
+       discard the peeked-back copy (SET_LOCAL/SET_GLOBAL don't pop). */
+    int slot=CUR->in_function?resolve_local(name):-1;
+    if(slot>=0){ emit_byte(OP_SET_LOCAL,line); emit_u16(slot,line); }
+    else {
+        int idx=chunk_add_const(CUR->chunk, bc_str(name,(int)strlen(name)));
+        emit_byte(OP_SET_GLOBAL,line); emit_u16(idx,line);
+    }
+    emit_byte(OP_POP,line);
+}
+
+/* Pops locals (both the runtime stack slots via emitted OP_POP, and the
+   compiler's own bookkeeping) back down to `target`. No-op outside a
+   function (globals don't grow the stack, so they never need this). */
+static void emit_pop_locals_to(int target, int line){
+    if(!CUR->in_function) return;
+    while(CUR->local_count>target){
+        emit_byte(OP_POP,line);
+        CUR->local_count--;
+    }
+}
+
+/* Collapses every local declared since `base` into a single anonymous
+   value: whatever's on top of the stack (the scope's "result") gets
+   written into the scope's first slot (slot number `base`), then every
+   slot above it — including the now-duplicate top — is popped, and the
+   compiler stops treating any of them as named locals. Needed wherever
+   an expression construct's own internals (e.g. match's hidden subject
+   variable, a bound pattern name, or a `let` inside a match arm's body)
+   must go out of scope at exactly the point the expression produces its
+   value — plain emit_pop_locals_to can't be used there since it always
+   pops from the top, which would discard the result, not the locals
+   underneath it. No-op outside a function (globals never grow the
+   stack) or if nothing was actually declared since `base`. */
+static void emit_collapse_scope(int base, int line){
+    if(!CUR->in_function) return;
+    if(CUR->local_count<=base) return;
+    emit_byte(OP_SET_LOCAL,line); emit_u16(base,line);
+    int npops=CUR->local_count-base;
+    for(int i=0;i<npops;i++) emit_byte(OP_POP,line);
+    CUR->local_count=base;
 }
 
 /*  value constructors (mirroring eval.c's make_*; duplicated here
@@ -109,6 +225,7 @@ static int add_local(const char *name){
 
 static void compile_node(Node *n);
 static void compile_stmt_list(Node **stmts, int count);
+static void compile_tail(Node *n);
 
 /*  builtin name table for OP_BUILTIN  */
 /* The VM doesn't reimplement every y.* function — it calls back into
@@ -266,10 +383,36 @@ static void compile_node(Node *n){
     case ND_BOOL:  emit_byte(n->ival?OP_TRUE:OP_FALSE,line); break;
     case ND_STR: {
         /* sval[0]=='\x01' marks a raw/multiline string — strip the
-           sentinel, same convention as eval.c's ND_STR case. No
-           interpolation support yet in the v2.0 VM subset. */
+           sentinel, same convention as eval.c's ND_STR case. Raw
+           strings skip interpolation entirely, matching eval.c. */
         const char *s=n->sval?n->sval:"";
-        if(s[0]=='\x01') s++;
+        int is_raw=(s[0]=='\x01');
+        if(is_raw) s++;
+        if(!is_raw){
+            for(int i=0;s[i];i++){
+                if(s[i]!='{') continue;
+                /* Mirror eval_interp_str's own carve-out: an all-digit
+                   {0}, {1}, ... is a y.format positional placeholder,
+                   deliberately left untouched by the AST interpreter
+                   too (Yolish identifiers can't start with a digit, so
+                   it's never a variable reference) — safe to pass
+                   through as a plain literal, no fallback needed.
+                   Anything else inside {...} (an identifier, an
+                   expression, or empty {}) is real interpolation,
+                   which needs an Env the VM doesn't have. */
+                int j=i+1, all_digits=1, len=0;
+                while(s[j] && s[j]!='}'){
+                    if(s[j]<'0'||s[j]>'9') all_digits=0;
+                    j++; len++;
+                }
+                if(len==0 || !all_digits){
+                    fprintf(stderr,"[ys vm] string interpolation not yet supported at line %d — falling back\n",line);
+                    CUR->had_error=1;
+                    break;
+                }
+                i=j; /* skip past this placeholder, keep scanning */
+            }
+        }
         emit_const(bc_str(s,(int)strlen(s)),line);
         break;
     }
@@ -355,17 +498,305 @@ static void compile_node(Node *n){
         break;
     }
     case ND_WHILE: {
+        if(CUR->loop_depth>=MAX_LOOP_DEPTH){
+            fprintf(stderr,"[ys vm] loops nested too deeply (max %d) at line %d\n",MAX_LOOP_DEPTH,line);
+            CUR->had_error=1;
+            break;
+        }
+        LoopCtx *lc=&CUR->loop_stack[CUR->loop_depth++];
+        lc->break_count=0;
+        lc->continue_count=0;
         int loop_start=CUR->chunk->count;
         compile_node(n->cond);
         int exit_jump=emit_jump(OP_JUMP_IF_FALSE,line);
         emit_byte(OP_POP,line);
+        lc->body_base_locals=CUR->in_function?CUR->local_count:0;
         compile_node(n->body);
+        for(int i=0;i<lc->continue_count;i++)
+            chunk_patch_jump(CUR->chunk, lc->continue_jumps[i], loop_start);
+        /* Release whatever locals this iteration's body declared before
+           looping back — otherwise iteration 2's redeclare lands above
+           the stale slot instead of overwriting it. */
+        emit_pop_locals_to(lc->body_base_locals,line);
         emit_byte(OP_LOOP,line);
         int back_at=CUR->chunk->count;
         emit_u16(0,line);
         chunk_patch_jump(CUR->chunk, back_at, loop_start);
         patch_jump_here(exit_jump);
         emit_byte(OP_POP,line);
+        /* break targets land here — past the condition's cleanup POP,
+           so the stack depth matches the loop's own natural exit. */
+        int break_target=CUR->chunk->count;
+        for(int i=0;i<lc->break_count;i++)
+            chunk_patch_jump(CUR->chunk, lc->break_jumps[i], break_target);
+        CUR->loop_depth--;
+        break;
+    }
+    case ND_BREAK: {
+        if(CUR->loop_depth<=0){
+            fprintf(stderr,"[ys vm] 'break' used outside of a loop at line %d\n",line);
+            CUR->had_error=1;
+            break;
+        }
+        LoopCtx *lc=&CUR->loop_stack[CUR->loop_depth-1];
+        if(lc->break_count>=MAX_BREAKS_PER_LOOP){
+            fprintf(stderr,"[ys vm] too many break statements in one loop (max %d) at line %d\n",MAX_BREAKS_PER_LOOP,line);
+            CUR->had_error=1;
+            break;
+        }
+        /* Pop whatever this iteration has declared so far — break_target
+           expects the stack at exactly body_base_locals, same as the
+           loop's own natural (condition-false) exit path. */
+        emit_pop_locals_to(lc->body_base_locals,line);
+        lc->break_jumps[lc->break_count++]=emit_jump(OP_JUMP,line);
+        break;
+    }
+    case ND_CONTINUE: {
+        if(CUR->loop_depth<=0){
+            fprintf(stderr,"[ys vm] 'continue' used outside of a loop at line %d\n",line);
+            CUR->had_error=1;
+            break;
+        }
+        LoopCtx *lc=&CUR->loop_stack[CUR->loop_depth-1];
+        if(lc->continue_count>=MAX_BREAKS_PER_LOOP){
+            fprintf(stderr,"[ys vm] too many continue statements in one loop (max %d) at line %d\n",MAX_BREAKS_PER_LOOP,line);
+            CUR->had_error=1;
+            break;
+        }
+        /* Same cleanup as break — the continue target (condition
+           re-check or the for-loop's increment step) expects the stack
+           back at body_base_locals, ready for the next iteration. */
+        emit_pop_locals_to(lc->body_base_locals,line);
+        lc->continue_jumps[lc->continue_count++]=emit_jump(OP_JUMP,line);
+        break;
+    }
+    case ND_FOR: {
+        /* for name in <range a..b> { body }   OR   for name in <arr/str expr> { body }
+           Desugars to a counted while-loop. The loop variable's stack
+           slot/global is reserved exactly once, before the loop starts,
+           and updated in place each iteration via emit_store_and_pop —
+           mirroring exactly how ND_WHILE-style loops already behave, so
+           break/continue (which target this loop's LoopCtx) work
+           identically to the while case above. */
+        if(CUR->loop_depth>=MAX_LOOP_DEPTH){
+            fprintf(stderr,"[ys vm] loops nested too deeply (max %d) at line %d\n",MAX_LOOP_DEPTH,line);
+            CUR->had_error=1;
+            break;
+        }
+        int tid=g_temp_counter++;
+        char hivar[80], idxvar[80], arrvar[80];
+        LoopCtx *lc=&CUR->loop_stack[CUR->loop_depth++];
+        lc->break_count=0;
+        lc->continue_count=0;
+        int loop_base_locals=CUR->in_function?CUR->local_count:0;
+
+        if(n->cond && n->cond->kind==ND_BINOP && n->cond->op==TK_DOTDOT){
+            /* range form: for x in lo..hi */
+            snprintf(hivar,sizeof(hivar),"$for_hi%d",tid);
+            compile_node(n->cond->left);          /* lo */
+            emit_declare(n->name,line);           /* loop var := lo, slot reserved */
+            compile_node(n->cond->right);         /* hi */
+            emit_declare(hivar,line);             /* hidden upper bound */
+
+            int cond_check=CUR->chunk->count;
+            emit_load(n->name,line);
+            emit_load(hivar,line);
+            emit_byte(OP_LT,line);
+            int exit_jump=emit_jump(OP_JUMP_IF_FALSE,line);
+            emit_byte(OP_POP,line);
+            lc->body_base_locals=CUR->in_function?CUR->local_count:0;
+            compile_node(n->body);
+            /* Release whatever this iteration's body declared before
+               falling into the increment step (continue does the same
+               cleanup at its own jump site — see ND_CONTINUE). */
+            emit_pop_locals_to(lc->body_base_locals,line);
+
+            /* increment step starts here — this is continue's target */
+            int increment=CUR->chunk->count;
+            for(int i=0;i<lc->continue_count;i++)
+                chunk_patch_jump(CUR->chunk, lc->continue_jumps[i], increment);
+            emit_load(n->name,line);
+            emit_const(bc_int(1),line);
+            emit_byte(OP_ADD,line);
+            emit_store_and_pop(n->name,line);
+            emit_byte(OP_LOOP,line);
+            int back_at=CUR->chunk->count; emit_u16(0,line);
+            chunk_patch_jump(CUR->chunk, back_at, cond_check);
+
+            patch_jump_here(exit_jump);
+            emit_byte(OP_POP,line);
+        } else {
+            /* array/string form: for x in expr — expr evaluated once,
+               matching the AST interpreter, then indexed each iteration.
+               "len" is the same shared builtin y.len uses, so length
+               semantics (including the "0 for anything non-array/
+               non-string" fallback) match the AST interpreter exactly. */
+            snprintf(arrvar,sizeof(arrvar),"$for_arr%d",tid);
+            snprintf(idxvar,sizeof(idxvar),"$for_idx%d",tid);
+            snprintf(hivar,sizeof(hivar),"$for_len%d",tid);
+
+            compile_node(n->cond);
+            emit_declare(arrvar,line);
+
+            emit_const(bc_int(0),line);
+            emit_declare(idxvar,line);
+
+            emit_load(arrvar,line);
+            { int nameidx=chunk_add_const(CUR->chunk, bc_str("len",3));
+              emit_byte(OP_BUILTIN,line); emit_u16(nameidx,line); emit_byte(1,line); }
+            emit_declare(hivar,line);
+
+            emit_byte(OP_NIL,line);
+            emit_declare(n->name,line); /* loop var slot reserved once, filled below */
+
+            int cond_check=CUR->chunk->count;
+            emit_load(idxvar,line);
+            emit_load(hivar,line);
+            emit_byte(OP_LT,line);
+            int exit_jump=emit_jump(OP_JUMP_IF_FALSE,line);
+            emit_byte(OP_POP,line);
+
+            emit_load(arrvar,line);
+            emit_load(idxvar,line);
+            emit_byte(OP_INDEX_GET,line);
+            emit_store_and_pop(n->name,line);
+
+            lc->body_base_locals=CUR->in_function?CUR->local_count:0;
+            compile_node(n->body);
+            emit_pop_locals_to(lc->body_base_locals,line);
+
+            /* increment step starts here — this is continue's target */
+            int increment=CUR->chunk->count;
+            for(int i=0;i<lc->continue_count;i++)
+                chunk_patch_jump(CUR->chunk, lc->continue_jumps[i], increment);
+            emit_load(idxvar,line);
+            emit_const(bc_int(1),line);
+            emit_byte(OP_ADD,line);
+            emit_store_and_pop(idxvar,line);
+            emit_byte(OP_LOOP,line);
+            int back_at=CUR->chunk->count; emit_u16(0,line);
+            chunk_patch_jump(CUR->chunk, back_at, cond_check);
+
+            patch_jump_here(exit_jump);
+            emit_byte(OP_POP,line);
+        }
+
+        int break_target=CUR->chunk->count;
+        for(int i=0;i<lc->break_count;i++)
+            chunk_patch_jump(CUR->chunk, lc->break_jumps[i], break_target);
+        /* Release this for-loop's own hidden bookkeeping vars (and loop
+           var) now that the whole statement is done — needed so an
+           enclosing loop re-executing this statement next iteration
+           doesn't stack a second copy on top of the first. */
+        emit_pop_locals_to(loop_base_locals,line);
+        CUR->loop_depth--;
+        break;
+    }
+    case ND_MATCH: {
+        /* match <subject> { pat [if guard] => body, ... }
+           Compiles to a chain of pattern tests. The subject is
+           evaluated once into a hidden variable so every arm's test
+           (and a bound arm's guard/body) can read it as many times as
+           needed. A bare-identifier pattern (not "_") always matches
+           and binds the subject to that name — for local scope this
+           is done by temporarily renaming the hidden variable's own
+           slot (zero stack cost, no cleanup needed); for global scope
+           it's just another global define. Whichever arm's body runs
+           produces the match's value; if no arm matches, the result
+           is nil — both mirroring eval.c's ND_MATCH exactly. */
+        int tid=g_temp_counter++;
+        char subjvar[64]; snprintf(subjvar,sizeof(subjvar),"$match_subj%d",tid);
+        int base_locals=CUR->in_function?CUR->local_count:0;
+
+        compile_node(n->cond);
+        emit_declare(subjvar,line);
+        int subj_slot=CUR->in_function?resolve_local(subjvar):-1;
+
+        int end_jumps[40]; int end_count=0;
+
+        for(int i=0;i<n->argc;i++){
+            Node *arm_node=n->arg_data[i];
+            if(!arm_node || arm_node->kind!=ND_MATCH_ARM) continue;
+            Node *pat=arm_node->left, *guard=arm_node->cond, *body=arm_node->right;
+            if(!pat||!body) continue;
+
+            int is_wildcard=(pat->kind==ND_IDENT && pat->name[0]=='_' && pat->name[1]==0);
+            int is_binding =(pat->kind==ND_IDENT && !is_wildcard);
+
+            /*  pattern test: leaves matched(bool) on top  */
+            if(is_wildcard || is_binding){
+                emit_byte(OP_TRUE,line);
+            } else if(pat->kind==ND_BINOP && pat->op==TK_DOTDOT){
+                emit_load(subjvar,line); compile_node(pat->left);  emit_byte(OP_GE,line);
+                emit_load(subjvar,line); compile_node(pat->right); emit_byte(OP_LT,line);
+                emit_byte(OP_AND,line);
+            } else {
+                emit_load(subjvar,line);
+                compile_node(pat);
+                emit_byte(OP_EQ,line);
+            }
+
+            int fail_jump=emit_jump(OP_JUMP_IF_FALSE,line);
+            emit_byte(OP_POP,line); /* discard true matched-bool */
+
+            /*  bind (if a named pattern)  */
+            if(is_binding){
+                if(CUR->in_function && subj_slot>=0)
+                    snprintf(CUR->locals[subj_slot].name,64,"%s",pat->name);
+                else if(!CUR->in_function){
+                    emit_load(subjvar,line);
+                    emit_declare(pat->name,line);
+                }
+            }
+
+            /* guard  */
+            int guard_fail_jump=-1;
+            if(guard){
+                compile_node(guard);
+                guard_fail_jump=emit_jump(OP_JUMP_IF_FALSE,line);
+                emit_byte(OP_POP,line); /* discard true guard-bool */
+            }
+
+            /*  body: produces this arm's result  */
+            compile_tail(body);
+            emit_collapse_scope(base_locals,line); /* drop subjvar (+ any arm-local lets), keep the result */
+            if(is_binding && CUR->in_function && subj_slot>=0)
+                snprintf(CUR->locals[subj_slot].name,64,"%s",subjvar); /* restore — later arms still need to resolve subjvar by its real name */
+            /* emit_collapse_scope reset CUR->local_count to base_locals —
+               correct bytecode for *this* arm's own runtime success path
+               (which jumps straight to match_end and never touches later
+               arms' code), but it's wrong as *compile-time* bookkeeping
+               for the arms still to be compiled below: subjvar itself
+               must still count as "in scope" for their pattern tests to
+               resolve it as a local. Put it back. */
+            if(CUR->in_function) CUR->local_count=base_locals+1;
+            if(end_count<40) end_jumps[end_count++]=emit_jump(OP_JUMP,line);
+
+            /*  failure landing zone: guard-fail and pattern-fail both
+               need to reach "test next arm", but they must NOT share the
+               same POP — each discards a *different* leftover boolean
+               (the guard's false result vs. the pattern test's false
+               result). Guard-fail does its own POP, then jumps past
+               pattern-fail's POP entirely. */
+            int guard_fail_skip=-1;
+            if(guard_fail_jump>=0){
+                patch_jump_here(guard_fail_jump);
+                emit_byte(OP_POP,line); /* discard false guard-bool */
+                if(is_binding && CUR->in_function && subj_slot>=0)
+                    snprintf(CUR->locals[subj_slot].name,64,"%s",subjvar);
+                guard_fail_skip=emit_jump(OP_JUMP,line);
+            }
+            patch_jump_here(fail_jump);
+            emit_byte(OP_POP,line); /* discard false matched-bool */
+            if(guard_fail_skip>=0) patch_jump_here(guard_fail_skip);
+        }
+
+        /* no arm matched */
+        emit_byte(OP_NIL,line);
+        emit_collapse_scope(base_locals,line);
+
+        int match_end=CUR->chunk->count;
+        for(int i=0;i<end_count;i++) chunk_patch_jump(CUR->chunk, end_jumps[i], match_end);
         break;
     }
     case ND_RETURN: {
@@ -412,8 +843,12 @@ static void compile_node(Node *n){
         fcomp.chunk=&proto->chunk; fcomp.in_function=1; fcomp.enclosing=CUR;
         BCompiler *saved=CUR; CUR=&fcomp;
         for(int i=0;i<n->argc && i<8;i++) (void)add_local(proto->param_names[i]);
-        compile_node(n->body);
-        emit_byte(OP_NIL,line); emit_byte(OP_RETURN,line); /* implicit return nil if body falls through */
+        /* Implicit return: like eval.c's eval_block-based function call,
+           a function with no explicit `return` returns the value of its
+           last statement (nil if that statement is void-shaped, or if an
+           explicit `return` already fired first — see compile_tail). */
+        compile_tail(n->body);
+        emit_byte(OP_RETURN,line);
         int err=fcomp.had_error;
         CUR=saved;
         if(err) CUR->had_error=1;
@@ -492,6 +927,57 @@ static void compile_node(Node *n){
     }
 }
 
+/* Compiles `n` as the tail (final, value-producing) position of a
+   block — mirroring eval_block()'s semantics, where a block's value is
+   whatever its last statement evaluated to. Used for match-arm bodies,
+   which are expressions (possibly wrapped in a { block }).
+   - A block recurses: every statement but the last compiles normally
+     (as compile_stmt_list already does — non-void ones get popped),
+     then the last one is itself compiled as a tail.
+   - if/else recurses into both branches so `match`-like exhaustive
+     if-chains still produce a value; a missing else yields nil.
+   - Anything already expression-shaped (calls, binops, literals,
+     idents, match, struct/array literals, ...) already leaves a value
+     — compile it as-is.
+   - The remaining "void-shaped" statement kinds (let/var/while/for/fn/
+     struct/impl/break/continue) have side effects but no meaningful
+     value in eval.c either; compile the side effect, then push nil. */
+static void compile_tail(Node *n){
+    if(!n) return;
+    int line=n->line;
+    if(n->kind==ND_BLOCK){
+        int c=n->stmtc;
+        if(c==0){ emit_byte(OP_NIL,line); return; }
+        if(c>1) compile_stmt_list(n->stmts, c-1);
+        compile_tail(n->stmts[c-1]);
+        return;
+    }
+    if(n->kind==ND_IF){
+        compile_node(n->cond);
+        int else_jump=emit_jump(OP_JUMP_IF_FALSE,line);
+        emit_byte(OP_POP,line);
+        compile_tail(n->then);
+        int end_jump=emit_jump(OP_JUMP,line);
+        patch_jump_here(else_jump);
+        emit_byte(OP_POP,line);
+        if(n->els) compile_tail(n->els);
+        else emit_byte(OP_NIL,line);
+        patch_jump_here(end_jump);
+        return;
+    }
+    switch(n->kind){
+        case ND_LET: case ND_VAR: case ND_WHILE: case ND_FOR:
+        case ND_FN: case ND_STRUCT: case ND_IMPL:
+        case ND_BREAK: case ND_CONTINUE:
+            compile_node(n);
+            emit_byte(OP_NIL,line);
+            return;
+        default:
+            compile_node(n); /* already leaves a value */
+            return;
+    }
+}
+
 static void compile_stmt_list(Node **stmts, int count){
     for(int i=0;i<count;i++){
         compile_node(stmts[i]);
@@ -502,9 +988,10 @@ static void compile_stmt_list(Node **stmts, int count){
            block. We detect this generically: anything that isn't one
            of the "void-shaped" statement kinds gets an explicit pop. */
         switch(stmts[i]->kind){
-            case ND_LET: case ND_VAR: case ND_IF: case ND_WHILE:
+            case ND_LET: case ND_VAR: case ND_IF: case ND_WHILE: case ND_FOR:
             case ND_RETURN: case ND_FN: case ND_BLOCK:
-            case ND_STRUCT: case ND_IMPL: /* void-shaped — no value left on stack */
+            case ND_STRUCT: case ND_IMPL:
+            case ND_BREAK: case ND_CONTINUE: /* void-shaped — no value left on stack */
                 break;
             default:
                 emit_byte(OP_POP, stmts[i]->line);
@@ -514,6 +1001,7 @@ static void compile_stmt_list(Node **stmts, int count){
 
 int bcompile_program(Node *prog, Chunk *out_chunk){
     chunk_init(out_chunk);
+    g_temp_counter=0;
     BCompiler top; memset(&top,0,sizeof(top));
     top.chunk=out_chunk; top.in_function=0; top.enclosing=NULL;
     CUR=&top;
