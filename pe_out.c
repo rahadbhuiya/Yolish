@@ -54,7 +54,8 @@ int pe_write(const char *path,
              uint8_t *code, int code_len,
              uint8_t *data, int data_len,
              int *reloc_code, int *reloc_data, int nrelocs,
-             int entry_off)
+             int entry_off,
+             int *icall_off, int *icall_idx, int n_icalls)
 {
     /*  compute layout  */
     uint32_t text_vsize  = (uint32_t)code_len;
@@ -113,16 +114,40 @@ int pe_write(const char *path,
         IDA(0); IDA(0); /* hint = 0 */
         IDA_STR(win_imports[i].name);
         IDA_PAD2;
-        /* fill INT entry */
-        uint64_t hint_va=IMAGE_BASE+idata_rva+fn_off;
+        /* fill INT entry — must be a bare RVA (bit63=0 => import-by-name
+           via RVA to IMAGE_IMPORT_BY_NAME), NOT a full virtual address.
+           Storing IMAGE_BASE+rva here makes the loader dereference an
+           out-of-range RVA while binding imports, which crashes the
+           process at startup before any of our code runs. */
+        uint64_t hint_rva=(uint64_t)(uint32_t)(idata_rva+fn_off);
         uint8_t *p=idata_buf+int_off+i*8;
-        for(int b=0;b<8;b++) p[b]=(uint8_t)(hint_va>>(b*8));
-        /* fill IAT entry (same initially) */
+        for(int b=0;b<8;b++) p[b]=(uint8_t)(hint_rva>>(b*8));
+        /* fill IAT entry (same initially, loader overwrites with real VA) */
         uint8_t *q=idata_buf+iat_off+i*8;
-        for(int b=0;b<8;b++) q[b]=(uint8_t)(hint_va>>(b*8));
+        for(int b=0;b<8;b++) q[b]=(uint8_t)(hint_rva>>(b*8));
         /* record IAT VA for code to call */
         import_thunks[i]=IMAGE_BASE+idata_rva+iat_off+i*8;
         win_imports[i].rva=idata_rva+iat_off+i*8;
+    }
+
+    /* --- patch `call [rip+disp32]` sites to point at their IAT slot ---
+       emit_win32_helpers() emits `FF 15 <disp32>` placeholders with
+       disp32=0 for GetStdHandle/WriteFile/ExitProcess. Those were never
+       being patched, so at runtime the CPU dereferenced whatever bytes
+       happened to follow the instruction as a function pointer and
+       jumped there — an access violation almost immediately after the
+       process started. Fix up disp32 = IAT_slot_VA - (address of next
+       instruction), i.e. standard RIP-relative addressing. */
+    for(int i=0;i<n_icalls;i++){
+        int disp_off=icall_off[i];      /* offset of the disp32 field */
+        int idx=icall_idx[i];           /* index into win_imports[] */
+        uint64_t iat_slot_va=IMAGE_BASE+idata_rva+iat_off+(uint32_t)idx*8;
+        uint64_t next_insn_va=code_va+disp_off+4; /* disp32 field is 4 bytes, followed by next insn */
+        int32_t disp32=(int32_t)((int64_t)iat_slot_va-(int64_t)next_insn_va);
+        code[disp_off  ]=(uint8_t)(disp32    );
+        code[disp_off+1]=(uint8_t)(disp32>> 8);
+        code[disp_off+2]=(uint8_t)(disp32>>16);
+        code[disp_off+3]=(uint8_t)(disp32>>24);
     }
 
     /* DLL name */
@@ -189,7 +214,8 @@ int pe_write(const char *path,
     w4(fp,0);       /* symbol table ptr */
     w4(fp,0);       /* number of symbols */
     w2(fp,0xf0);    /* optional header size = 240 bytes */
-    w2(fp,0x0022);  /* characteristics: executable, large address aware */
+    w2(fp,0x0023);  /* characteristics: executable, large-address-aware,
+                       relocs-stripped (no .reloc section is emitted below) */
 
     /* Optional header (PE32+) */
     w2(fp,0x020b);  /* magic: PE32+ */
@@ -212,7 +238,11 @@ int pe_write(const char *path,
     w4(fp,FILE_ALIGN);         /* size of headers (fits in FILE_ALIGN) */
     w4(fp,0);                  /* checksum */
     w2(fp,3);                  /* subsystem: console */
-    w2(fp,0x60);               /* DLL characteristics */
+    w2(fp,0x20);                /* DLL characteristics: NX_COMPAT only.
+                                    DYNAMIC_BASE (ASLR) is intentionally
+                                    NOT set: this writer emits no .reloc
+                                    section, so the image must always be
+                                    loaded at IMAGE_BASE as-is. */
     w8(fp,0x100000);           /* stack reserve */
     w8(fp,0x1000);             /* stack commit */
     w8(fp,0x100000);           /* heap reserve */

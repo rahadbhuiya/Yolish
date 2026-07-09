@@ -71,6 +71,19 @@ static void add_reloc(RelocKind k, int code_off, int target_off){
     relocs[nrelocs++]=(Reloc){k,code_off,target_off};
 }
 
+/* Windows: indirect call through an IAT slot, e.g. `call [rip+disp32]`.
+   Import index must match win_imports[] order in pe_out.c:
+   0=GetStdHandle, 1=WriteFile, 2=ExitProcess.
+   Emits the correct 6-byte FF 15 <disp32> encoding (a prior version
+   emitted an extra stray byte here, misaligning the instruction stream)
+   and records the disp32 offset via RELOC_CODE so pe_write can patch it
+   to point at the real IAT slot once section layout is known. */
+static void add_import_call(int import_idx){
+    emit2(0xff,0x15);
+    add_reloc(RELOC_CODE, code_len, import_idx);
+    emit_i32(0);
+}
+
 /*  symbol table  */
 #define SYM_MAX 256
 typedef struct { char name[64]; int code_off; int is_extern; } Symbol;
@@ -853,7 +866,8 @@ extern int pe_write(const char *path,
     uint8_t *code, int code_len,
     uint8_t *data, int data_len,
     int *reloc_code, int *reloc_data, int nrelocs,
-    int entry_off);
+    int entry_off,
+    int *icall_off, int *icall_idx, int n_icalls);
 
 /*  win32 helpers (emitted when target=windows)  */
 static void emit_win32_helpers(void){
@@ -867,26 +881,15 @@ static void emit_win32_helpers(void){
     helper_print_str_off=code_len;
     x_push_rbp(); x_mov_rbp_rsp();
     x_sub_rsp_i8(0x48); /* 72 bytes: 32 shadow + locals */
-    /* GetStdHandle(-11) → rax = stdout handle */
-    /* mov rcx, -11 */
-    emit2(0x48,0xb9); emit_i64(-11LL);
-    /* call [rip + GetStdHandle_IAT] — placeholder, patched by pe_write */
-    emit2(0xff,0x15); emit1(0x00); emit_i32(0); /* CALL [rip+0] placeholder */
     /* WriteFile(handle, buf, len, &written, NULL) */
-    /* rcx=handle(rax), rdx=buf, r8=len, r9=&written, [rsp+32]=0 */
-    emit3(0x48,0x89,0xc1); /* mov rcx,rax */
-    /* rdx already = buf (second param), r8 = len (third param from rdx) */
-    /* But we need to save rcx(buf) and rdx(len) from caller args */
-    /* Actually Windows ABI: first arg=rcx, second=rdx */
-    /* Our helper proto: rcx=buf, rdx=len */
-    /* Need: rcx=handle, rdx=buf_ptr, r8d=len */
-    /* Save buf/len first (they're in rcx/rdx on entry) */
+    /* Windows ABI on entry: rcx=buf, rdx=len (this helper's own proto) */
+    /* Save buf/len first, before either register gets clobbered */
     emit3(0x48,0x89,0x4d); emit1(0xe0); /* mov [rbp-32], rcx (buf) */
     emit3(0x48,0x89,0x55); emit1(0xe8); /* mov [rbp-24], rdx (len) */
-    /* GetStdHandle */
+    /* GetStdHandle(-11) → rax = stdout handle */
     emit3(0x48,0xc7,0xc1); emit_i32(-11); /* mov rcx,-11 */
-    emit2(0xff,0x15); emit_i32(0); /* call [rip+GetStdHandle_IAT] placeholder */
-    /* WriteFile */
+    add_import_call(0); /* call [rip+GetStdHandle_IAT] */
+    /* WriteFile(handle, buf, len, &written, NULL) */
     emit3(0x48,0x89,0xc1); /* mov rcx,rax (handle) */
     emit3(0x48,0x8b,0x55); emit1(0xe0); /* mov rdx,[rbp-32] (buf) */
     emit3(0x4c,0x8b,0x45); emit1(0xe8); /* mov r8,[rbp-24] (len) */
@@ -894,7 +897,7 @@ static void emit_win32_helpers(void){
     emit4(0x4c,0x8d,0x4c,0x24); emit1(0x28);
     /* [rsp+32] = NULL */
     emit4(0xc7,0x44,0x24,0x20); emit_i32(0);
-    emit2(0xff,0x15); emit_i32(0); /* call WriteFile placeholder */
+    add_import_call(1); /* call [rip+WriteFile_IAT] */
     x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
 
     /* __ys_print_int(rcx=val) */
@@ -946,7 +949,7 @@ static void emit_win32_helpers(void){
     /* __ys_exit(rcx=code) */
     sym_define("__ys_exit", code_len);
     helper_exit_off=code_len;
-    emit2(0xff,0x15); emit_i32(0); /* call ExitProcess placeholder */
+    add_import_call(2); /* call [rip+ExitProcess_IAT] */
     x_ret();
 }
 
@@ -1012,11 +1015,16 @@ void ys_compile(Node *prog, Target target, const char *outfile){
 
     /* collect reloc arrays */
     static int rc[RELOC_MAX], rd[RELOC_MAX]; int nr=0;
+    static int ic_off[RELOC_MAX], ic_idx[RELOC_MAX]; int n_ic=0;
     for(int i=0;i<nrelocs;i++){
         if(relocs[i].kind==RELOC_DATA){
             rc[nr]=relocs[i].code_off;
             rd[nr]=relocs[i].target_off;
             nr++;
+        } else if(relocs[i].kind==RELOC_CODE){
+            ic_off[n_ic]=relocs[i].code_off;
+            ic_idx[n_ic]=relocs[i].target_off; /* import index */
+            n_ic++;
         }
     }
 
@@ -1030,7 +1038,7 @@ void ys_compile(Node *prog, Target target, const char *outfile){
         ret=macho_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off);
         break;
     case TARGET_WINDOWS:
-        ret=pe_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off);
+        ret=pe_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off,ic_off,ic_idx,n_ic);
         break;
     }
     if(ret==0) fprintf(stdout,"ys: compiled → %s\n",outfile);
