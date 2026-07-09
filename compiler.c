@@ -918,8 +918,11 @@ static void emit_win32_helpers(void){
     emit3(0x4c,0x8b,0x45); emit1(0xe8); /* mov r8,[rbp-24] (len) */
     /* r9 = &written = rsp+0x28 */
     emit4(0x4c,0x8d,0x4c,0x24); emit1(0x28);
-    /* [rsp+32] = NULL */
-    emit4(0xc7,0x44,0x24,0x20); emit_i32(0);
+    /* [rsp+32] = NULL (must zero the FULL 8-byte pointer slot — a 32-bit
+       write here only clears the low half, leaving the upper 4 bytes as
+       whatever garbage was already on the stack, so lpOverlapped ends up
+       being a bogus non-NULL pointer and WriteFile silently fails) */
+    emit4(0x48,0xc7,0x44,0x24); emit1(0x20); emit_i32(0);
     add_import_call(1); /* call [rip+WriteFile_IAT] */
     x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
 
