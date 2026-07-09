@@ -19,19 +19,19 @@ RequestExecutionLevel admin
 SetCompressor     /SOLID lzma
 
 ;  Installer metadata 
-VIProductVersion  "2.6.0.0"
+VIProductVersion  "2.8.0.0"
 VIAddVersionKey   "ProductName"      "Yolish Programming Language"
-VIAddVersionKey   "ProductVersion"   "v2.6"
+VIAddVersionKey   "ProductVersion"   "v2.8"
 VIAddVersionKey   "CompanyName"      ".Bhuiya"
 VIAddVersionKey   "FileDescription"  "Yolish Installer"
-VIAddVersionKey   "FileVersion"      "2.6.0.0"
+VIAddVersionKey   "FileVersion"      "2.8.0.0"
 VIAddVersionKey   "LegalCopyright"   "MIT License"
 
 ;  MUI settings 
 !define MUI_ABORTWARNING
 !define MUI_ICON                        "icons\ys.ico"
 !define MUI_UNICON                      "icons\ys.ico"
-!define MUI_WELCOMEPAGE_TITLE           "Welcome to Yolish v2.6"
+!define MUI_WELCOMEPAGE_TITLE           "Welcome to Yolish v2.8"
 !define MUI_WELCOMEPAGE_TEXT            "This wizard will install the Yolish programming language on your computer.$\r$\n$\r$\nYolish is the official language of Exploidus OS.$\r$\nFast, expressive, capability-aware.$\r$\n$\r$\nClick Next to continue."
 !define MUI_FINISHPAGE_TITLE            "Yolish v2.6 installed"
 !define MUI_FINISHPAGE_TEXT             "Yolish has been installed.$\r$\n$\r$\nOpen a new terminal and type:$\r$\n$\r$\n  ys          (REPL)$\r$\n  ys hello.y  (run a file)$\r$\n$\r$\nOr launch the Yolish REPL from the Start Menu."

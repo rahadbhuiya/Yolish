@@ -191,6 +191,36 @@ Val eval_block(Node *b, Env *parent);
 
 /* v2.0: bytecode VM bridge into the existing builtin table (see eval.c) */
 Val call_builtin_public(const char *name, Val *argv, int argc);
+/* v2.6: closure bridge (see bcompiler.c's ND_FN_LIT and vm.c's OP_CALL/
+   OP_MAKE_CLOSURE). A VM-compiled closure carries a real AST Node* +
+   Env* (built at capture time), and is invoked via the *same*
+   tree-walking call path the AST interpreter itself uses — this is
+   what lets a VM closure be passed to y.map/filter/reduce/sort/each
+   (which only know how to call AST-style function values) and behave
+   identically either way. vm_global_lookup_public lets a closure body,
+   evaluated by the tree-walking interpreter, still see globals defined
+   by the *VM's own* separate global table (OP_DEFINE_GLOBAL) when its
+   own Env chain doesn't have the name. */
+Val call_closure_public(Node *fd, Env *ce, Val *argv, int argc);
+Val *vm_global_lookup_public(const char *name);
+/* v2.6: impl-method bridge (see bcompiler.c's ND_IMPL and vm.c's
+   OP_CALL_METHOD). register_impl_methods_public runs at VM-compile
+   time (impl blocks are always static top-level declarations), adding
+   to eval.c's own method registry so both interpreters share one
+   source of truth. call_method_public dispatches a method call
+   (p.method(...)) the same tree-walking way eval.c's own ND_CALL
+   method dispatch does. */
+void register_impl_methods_public(Node *impl_node);
+Val call_method_public(Val obj, const char *method_name, Val *argv, int argc);
+/* v2.6: `import "file.y" as name` — runs the file in an isolated Env
+   and packages every top-level definition into a namespace struct
+   value, exactly mirroring eval.c's own ND_MODULE. Exposed so vm.c's
+   OP_LOAD_MODULE can run it at the *correct point in execution order*
+   (unlike the bare `import` form, which is spliced at compile time —
+   this one has real side effects, e.g. running the module file's own
+   top-level statements, so it must happen when the bytecode actually
+   reaches this point, not eagerly during compilation). */
+Val eval_module_public(const char *raw_path, const char *ns_name);
 
 /* v2.0: Val constructors and helpers, exported so vm.c can build/inspect
    values without duplicating eval.c's logic */

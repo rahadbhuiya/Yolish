@@ -1,8 +1,8 @@
 {
   "name": "yolish",
   "displayName": "Yolish",
-  "description": "Yolish language support for VS Code \u2014 syntax highlighting, run button, snippets",
-  "version": "2.6.0",
+  "description": "Yolish language support for VS Code: syntax highlighting, run button, snippets",
+  "version": "2.8.0",
   "publisher": "Exploidus",
   "icon": "icon.png",
   "engines": {

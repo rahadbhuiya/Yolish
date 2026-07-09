@@ -61,6 +61,56 @@ typedef enum {
     OP_CALL,          /* operand: u8 argc → calls the callee found argc+1 below top */
     OP_RETURN,        /* pop return value, pop frame, push value to caller */
     OP_CLOSURE,       /* operand: u16 const idx (FnProto) → build a closure Val */
+    OP_MAKE_CLOSURE,  /* v2.6: operands: u16 proto const idx (Val w/ fn_node=AST
+                          Node* for a ND_FN_LIT, fn_env=0), u8 capture count N,
+                          then N x u16 name const idx. Pops N values (pushed by
+                          the caller in the same order as the name list, so
+                          popped in reverse) into a freshly-built Env, and
+                          pushes a closure Val (same fn_node, fn_env=that Env).
+                          See bcompiler.c's ND_FN_LIT and vm.c's OP_CALL. */
+
+    /* v2.6: try/catch/throw — implemented as native VM control flow (not
+       borrowing eval.c's g_throwing flag, which only means anything
+       inside the tree-walking interpreter's own call loop). A handler
+       records the frame depth + stack pointer at try-entry; OP_THROW
+       unwinds vm_frame_count back to that depth and resets vm_sp before
+       jumping to the catch block — this is what lets a throw inside a
+       *called* function (any number of frames deep) still be caught by
+       a try/catch several calls up, exactly like the AST interpreter. */
+    OP_TRY_BEGIN,     /* operands: u8 has-catch-var flag, u16 catch-var
+                          local slot (meaningful only if the flag is set),
+                          i16 relative offset to the catch block (0 if no
+                          catch clause) — offset last so it patches with
+                          the same chunk_patch_jump() convention as every
+                          other jump. Pushes a handler. */
+    OP_TRY_END,       /* pops the handler — try block finished normally,
+                          without throwing. */
+    OP_THROW,         /* pops the thrown value. If a handler is active,
+                          unwinds to it and jumps to its catch block
+                          (binding the catch var first, if any). If no
+                          handler is active, halts the VM run silently
+                          (VM_OK, no further instructions execute) —
+                          matching the AST interpreter's own behavior for
+                          an uncaught throw (g_throwing just propagates
+                          all the way up with nothing left to run it). */
+
+    OP_CALL_METHOD,   /* v2.6: operands: u16 method-name const idx, u8
+                          argc. Pops argc args (reverse order) then the
+                          receiver, calls call_method_public (impl-block
+                          method dispatch, tree-walking — see eval.c),
+                          pushes the result. */
+
+    OP_LOAD_MODULE,   /* v2.6: `import "file.y" as name` — operands:
+                          u16 raw-path const idx, u16 namespace-name
+                          const idx. Runs eval_module_public (tree-
+                          walking: parses the file, evaluates its
+                          top-level statements in an isolated Env,
+                          packages the result into a namespace struct)
+                          at the exact point this instruction executes
+                          — unlike the bare `import` form (spliced at
+                          compile time), this one has real side effects
+                          that must happen in true execution order.
+                          Pushes the resulting struct Val. */
 
     /*  arrays  */
     OP_ARRAY,         /* operand: u16 count → pop count values, push array */

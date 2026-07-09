@@ -5,7 +5,7 @@
 # Admin is optional — without it, installs to %LOCALAPPDATA%\Yolish instead of Program Files.
 
 $ErrorActionPreference = "Stop"
-$version = "v2.6"
+$version = "v2.8"
 $repo    = "rahadbhuiya/yolish"
 
 # Use Program Files if Admin, else fallback to user-local dir (no Admin needed)

@@ -28,11 +28,47 @@ static int       vm_sp;
 static CallFrame vm_frames[FRAMES_MAX];
 static int       vm_frame_count;
 
+#define MAX_TRY_DEPTH 32
+typedef struct {
+    int    frame_count;    /* vm_frame_count to unwind back to (the frame that owns this try) */
+    int    stack_sp;       /* vm_sp to restore to (the try-block's own local-scope baseline) */
+    Chunk *catch_chunk;    /* == the owning frame's chunk (try/catch is always within one function) */
+    int    catch_ip;       /* absolute offset to jump to */
+    int    has_catch_var;
+    int    catch_var_slot; /* local slot (relative to the owning frame) to bind the caught value into */
+} TryHandler;
+static TryHandler try_handlers[MAX_TRY_DEPTH];
+static int        try_depth;
+
 static char global_names[MAX_GLOBALS][64];
 static Val  global_vals[MAX_GLOBALS];
 static int  global_count;
 
 static int  vm_had_runtime_error;
+
+/* v2.6: converts a thrown value into what the catch variable actually
+   gets bound to — mirrors eval.c's ND_THROW exactly: a struct passes
+   through unchanged, everything else becomes its string representation
+   (ints formatted as decimal, strings/errors passed through as-is,
+   anything else becomes the literal "err"). */
+static Val vm_thrown_to_catch_val(Val thrown){
+    if(thrown.type==YS_STRUCT) return thrown;
+    char buf[512];
+    if(thrown.type==YS_STR||thrown.type==YS_ERR){
+        snprintf(buf,sizeof(buf),"%s",thrown.sval?thrown.sval:"");
+    } else if(thrown.type==YS_INT){
+        snprintf(buf,sizeof(buf),"%lld",(long long)thrown.ival);
+    } else {
+        snprintf(buf,sizeof(buf),"err");
+    }
+    Val r=make_nil();
+    r.type=YS_STR;
+    int len=(int)strlen(buf);
+    char *heap=(char*)malloc((size_t)len+1);
+    memcpy(heap,buf,(size_t)len+1);
+    r.sval=heap; r.slen=len;
+    return r;
+}
 
 /*  stack primitives  */
 
@@ -64,6 +100,15 @@ static void global_define(const char *name, Val v){
     snprintf(global_names[global_count],64,"%s",name);
     global_vals[global_count]=v;
     global_count++;
+}
+
+/* v2.6: lets eval.c's env_get() fall back to the VM's own global table
+   when a tree-walking closure (see call_closure_public) references a
+   name its own Env chain doesn't have — e.g. a top-level `fn`/`let`
+   compiled by the VM, which lives here, not in an Env. */
+Val *vm_global_lookup_public(const char *name){
+    int g=global_find(name);
+    return g>=0 ? &global_vals[g] : NULL;
 }
 
 /*  helpers shared with the AST interpreter's semantics  */
@@ -216,6 +261,24 @@ static VMResult run(void){
                     fprintf(stderr,"[ys vm] attempt to call a non-function value\n");
                     vm_had_runtime_error=1; break;
                 }
+                if(callee.fn_env){
+                    /* Tree-walking closure (built by OP_MAKE_CLOSURE):
+                       fn_node is a real AST Node*, fn_env a real Env*
+                       with captures already bound. Dispatch through the
+                       same call path the AST interpreter itself uses,
+                       so this closure behaves identically whether
+                       called directly from VM-compiled code or handed
+                       to a builtin like y.map that invokes it itself. */
+                    Node *fd=(Node*)callee.fn_node;
+                    Env *ce=(Env*)callee.fn_env;
+                    Val args[16];
+                    int na=argc>16?16:argc;
+                    for(int i=0;i<na;i++) args[i]=vm_peek(argc-1-i);
+                    Val result=call_closure_public(fd, ce, args, na);
+                    vm_sp -= (argc+1); /* drop args + callee, same as the FnProto path's OP_RETURN */
+                    vm_push(result);
+                    break;
+                }
                 FnProto *proto=(FnProto*)callee.fn_node;
                 if(argc!=proto->arity){
                     fprintf(stderr,"[ys vm] '%s' expects %d arg(s), got %d\n",proto->name,proto->arity,argc);
@@ -244,6 +307,87 @@ static VMResult run(void){
                 break;
             }
             case OP_CLOSURE: { int idx=read_u16(frame); vm_push(frame->chunk->constants[idx]); break; }
+            case OP_MAKE_CLOSURE: {
+                int proto_idx=read_u16(frame);
+                int ncap=frame->chunk->code[frame->ip++];
+                int name_idx[32];
+                for(int i=0;i<ncap && i<32;i++) name_idx[i]=read_u16(frame);
+                Env *ce=env_new(NULL);
+                for(int i=ncap-1;i>=0;i--){
+                    Val v=vm_pop();
+                    if(i<32) env_def(ce, frame->chunk->constants[name_idx[i]].sval, v);
+                }
+                Val closure=frame->chunk->constants[proto_idx]; /* fn_node = literal's AST Node* */
+                closure.fn_env=(void*)ce;
+                vm_push(closure);
+                break;
+            }
+
+            case OP_TRY_BEGIN: {
+                int has_var=frame->chunk->code[frame->ip++];
+                int var_slot=read_u16(frame);
+                int off=read_i16(frame);
+                if(try_depth>=MAX_TRY_DEPTH){
+                    fprintf(stderr,"[ys vm] try/catch nested too deeply (max %d)\n",MAX_TRY_DEPTH);
+                    vm_had_runtime_error=1; break;
+                }
+                TryHandler *th=&try_handlers[try_depth++];
+                th->frame_count=vm_frame_count;
+                th->stack_sp=vm_sp;
+                th->catch_chunk=frame->chunk;
+                th->catch_ip=frame->ip+off; /* frame->ip here == right after the offset field, matching chunk_patch_jump's own convention */
+                th->has_catch_var=has_var;
+                th->catch_var_slot=var_slot;
+                break;
+            }
+            case OP_TRY_END: {
+                if(try_depth>0) try_depth--;
+                break;
+            }
+            case OP_THROW: {
+                Val thrown=vm_pop();
+                if(try_depth<=0){
+                    /* Uncaught — matches the AST interpreter's own
+                       behavior exactly: g_throwing propagates all the
+                       way up with nothing left to catch it, and the
+                       program just silently stops right here. */
+                    return VM_OK;
+                }
+                TryHandler th=try_handlers[--try_depth];
+                vm_frame_count=th.frame_count;
+                frame=&vm_frames[vm_frame_count-1];
+                frame->chunk=th.catch_chunk;
+                frame->ip=th.catch_ip;
+                vm_sp=th.stack_sp;
+                if(th.has_catch_var){
+                    frame->slots[th.catch_var_slot]=vm_thrown_to_catch_val(thrown);
+                    vm_sp=th.stack_sp+1;
+                }
+                break;
+            }
+
+            case OP_CALL_METHOD: {
+                int nameidx=read_u16(frame);
+                int argc=frame->chunk->code[frame->ip++];
+                const char *mname=frame->chunk->constants[nameidx].sval;
+                Val args[16];
+                int na=argc>16?16:argc;
+                for(int i=na-1;i>=0;i--) args[i]=vm_pop();
+                Val recv=vm_pop();
+                Val result=call_method_public(recv,mname,args,na);
+                vm_push(result);
+                break;
+            }
+
+            case OP_LOAD_MODULE: {
+                int pathidx=read_u16(frame);
+                int nameidx=read_u16(frame);
+                const char *path=frame->chunk->constants[pathidx].sval;
+                const char *nsname=frame->chunk->constants[nameidx].sval;
+                Val mod=eval_module_public(path,nsname);
+                vm_push(mod);
+                break;
+            }
 
             case OP_ARRAY: {
                 int cnt=read_u16(frame);
@@ -315,6 +459,22 @@ static VMResult run(void){
                             break;
                         }
                     }
+                } else if(obj.type==YS_INT && obj.sval && fname
+                          && obj.sval[0]=='e' && obj.sval[1]=='n' && obj.sval[2]=='u'
+                          && obj.sval[3]=='m' && obj.sval[4]==':'){
+                    /* v2.6: EnumName.Variant — obj is the sentinel value
+                       registered for "EnumName" (see bcompiler.c's
+                       ND_ENUM), sval="enum:EnumName". Reconstruct the
+                       qualified name and look it up, exactly like
+                       eval.c's own ND_DOT enum handling. Only checks the
+                       VM's global table, matching how enums are almost
+                       always declared at top level (see the note in
+                       ND_ENUM) — same scope limitation as match/try's
+                       hidden state for function-local declarations. */
+                    char qname[128];
+                    snprintf(qname,sizeof(qname),"%.60s.%.60s",&obj.sval[5],fname);
+                    Val *found=vm_global_lookup_public(qname);
+                    if(found) result=*found;
                 }
                 vm_push(result);
                 break;
@@ -388,7 +548,7 @@ VMResult vm_interpret(Node *prog){
     Chunk top;
     if(!bcompile_program(prog,&top)) return VM_COMPILE_ERROR;
 
-    vm_sp=0; vm_frame_count=0; global_count=0; vm_had_runtime_error=0;
+    vm_sp=0; vm_frame_count=0; global_count=0; vm_had_runtime_error=0; try_depth=0;
     vm_frames[vm_frame_count].chunk=&top;
     vm_frames[vm_frame_count].ip=0;
     vm_frames[vm_frame_count].slots=&vm_stack[0];

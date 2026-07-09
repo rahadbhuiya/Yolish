@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>The official programming language of Exploidus OS.</strong><br/>
-  Fast, expressive, capability-aware — with a native x86-64 compiler.
+  Fast, expressive, capability-aware, with a native x86-64 compiler.
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.6 |
+| **Version** | v2.8 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -34,7 +34,7 @@
 
 ### Windows
 
-**Option 1 — GUI installer (recommended)**
+**Option 1: GUI installer (recommended)**
 
 1. Download [`yolish-setup.exe`](../../releases/latest/download/yolish-setup.exe)
 2. Double-click → Next → Next → Finish
@@ -44,11 +44,11 @@ The installer automatically adds Yolish to your PATH and creates a
 Start Menu shortcut that opens the Yolish REPL in a terminal window.
 An entry in Add/Remove Programs is also created for clean uninstallation.
 
-**Option 2 — manual (no installer)**
+**Option 2: manual (no installer)**
 
 1. Download [`ys.exe`](../../releases/latest/download/ys.exe)
 2. Put it anywhere (e.g. `C:\Tools\ys.exe`)
-3. Add that folder to your PATH — or run the PowerShell auto-installer:
+3. Add that folder to your PATH, or run the PowerShell auto-installer:
 
 ```powershell
 # Run once as Administrator
@@ -83,7 +83,7 @@ Only needed if you want to hack on Yolish itself:
 ```bash
 git clone https://github.com/rahadbhuiya/yolish
 cd yolish
-make        # requires gcc or clang — no other dependencies
+make        # requires gcc or clang, no other dependencies
 ```
 
 See [BUILD.md](BUILD.md) for detailed build instructions.
@@ -121,7 +121,7 @@ ys -c <file.y> --target macos   Compile → macOS Mach-O
 ys test <file.y>                Run test blocks
 ys fmt  <file.y>                Format source (prints to stdout)
 ys check <file.y>               Static check without running
-ys vm <file.y>                   Run via the bytecode VM (experimental, v2.0)
+ys vm <file.y>                   Run via the bytecode VM (faster, full language coverage)
 ys --help                       Show help
 ```
 
@@ -181,7 +181,7 @@ let total   = y.sum(nums)
 -- String interpolation
 let msg = "Hello {name}, score = {score}"
 
--- Backtick strings (raw, no interpolation — perfect for JSON/templates)
+-- Backtick strings (raw, no interpolation, perfect for JSON/templates)
 let json = `{"name": "Yolish", "version": 1}`
 
 -- File I/O (v1.2)
@@ -202,7 +202,7 @@ y.println(sys.platform())
 let now = y.time.now()
 y.println(y.time.format(now, "%Y-%m-%d %H:%M:%S"))
 
--- Module import (v1.6 — relative path, cached)
+-- Module import (v1.6: relative path, cached)
 import "./utils.y"
 
 -- Error handling
@@ -246,18 +246,18 @@ fn fetch_and_save(url, path) { ... }
 | Raw strings `r"..."` | Done |
 | `y.map` / `y.filter` / `y.reduce` / `y.each` | Done |
 | `y.sort` / `y.zip` / `y.flatten` / `y.sum` / `y.range` | Done |
-| `y.math.*` — sqrt, pow, sin, cos, pi, ... | Done |
-| `y.string.*` — upper, lower, split, join, trim, ... | Done |
+| `y.math.*`: sqrt, pow, sin, cos, pi, ... | Done |
+| `y.string.*`: upper, lower, split, join, trim, ... | Done |
 | `y.input` / `y.input_int` / `y.input_float` | Done |
-| Type system — `y.typeof`, `y.is_*`, conversions | Done |
+| Type system: `y.typeof`, `y.is_*`, conversions | Done |
 | Capability system `@cap`, `@intent`, `@audit` | Done |
 | Module / import system + relative paths + caching | Done **v1.6** |
 | Error objects `y.error(msg, code)` | Done |
-| Better errors — `file:line:col` + typo suggestion | Done **v1.4** |
+| Better errors: `file:line:col` + typo suggestion | Done **v1.4** |
 | REPL with colored banner | Done |
 | **Float arithmetic** (SSE2 native) | Done **v1.1** |
 | **Arrays in native compiler** | Done **v1.1** |
-| **File I/O** (`y.fs.*` — 10 functions) | Done **v1.2** |
+| **File I/O** (`y.fs.*`, 10 functions) | Done **v1.2** |
 | **Process & System** (`process.*`, `sys.*`) | Done **v1.3** |
 | **JSON** (`y.json.parse`, `y.json.stringify`) | Done **v1.7** |
 | **Time** (`y.time.now`, `sleep`, `format`) | Done **v1.7** |
@@ -270,9 +270,10 @@ fn fetch_and_save(url, path) { ... }
 | Native → Exploidus | Pending v1.8 |
 | **Garbage Collector** (mark-and-sweep, `gc.collect`, `gc.stats`) | Done **v1.5** |
 | **Built-in test runner** (`ys test`, `test` blocks, `assert*`) | Done **v2.1** |
-| **Static checker** (`ys check` — undefined vars, type hints) | Done **v2.1** |
-| **Code formatter** (`ys fmt` — prints formatted source) | Done **v2.1** |
-| Self-hosting (Yolish compiles Yolish) | Pending v2.0 |
+| **Static checker** (`ys check`, undefined vars, type hints) | Done **v2.1** |
+| **Code formatter** (`ys fmt`, prints formatted source) | Done **v2.1** |
+| **Bytecode VM** (`ys vm`, full language coverage) | Done **v2.6** |
+| Self-hosting (Yolish compiles Yolish) | Pending |
 
 ---
 
@@ -324,21 +325,21 @@ fn fetch_and_save(url, path) { ... }
 | v0.6 | String interpolation, error objects, module system, stdlib |
 | v0.7 | `impl` methods, `y.input`, functional builtins, dynamic allocation |
 | v0.8 | Match guards and pattern binding |
-| **v1.0** | **Native x86-64 compiler — Linux, Windows, macOS** |
+| **v1.0** | **Native x86-64 compiler, Linux, Windows, macOS** |
 | **v1.1** | **Float (SSE2) + arrays in native compiler** |
-| **v1.2** | **File I/O — `y.fs.*` (10 functions)** |
-| **v1.3** | **Process & system — `process.*`, `sys.*`** |
-| **v1.4** | **Error messages — `file:line:col` + typo suggestions** |
-| **v1.6** | **Module system — relative imports, circular detection, caching** |
-| **v1.7** | **Stdlib expansion — `y.json`, `y.time`, `y.env`, `y.path`** |
-| **v2.2** | **Enums — `enum Direction { N S E W }` + match integration** |
+| **v1.2** | **File I/O, `y.fs.*` (10 functions)** |
+| **v1.3** | **Process and system, `process.*`, `sys.*`** |
+| **v1.4** | **Error messages, `file:line:col` + typo suggestions** |
+| **v1.6** | **Module system, relative imports, circular detection, caching** |
+| **v1.7** | **Stdlib expansion, `y.json`, `y.time`, `y.env`, `y.path`** |
+| **v2.2** | **Enums, `enum Direction { N S E W }` + match integration** |
+| **v2.0-v2.6** | **Bytecode VM (`ys vm`) introduced in v2.0, reached full language coverage in v2.6: closures, try/catch/throw, enums, both forms of import, impl blocks, array index assignment** |
 
 ### Upcoming
 
 | Version | Plan |
 |---------|------|
-| v1.8 | Native → Exploidus OS target |
-| v2.0 | Self-hosting — Yolish compiles itself; bytecode VM |
+| v1.8 | Native to Exploidus OS target |
 | v3.0 | Deep Exploidus OS integration; official shell language |
 
 See [ROADMAP.md](ROADMAP.md) for full details.

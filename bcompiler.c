@@ -4,11 +4,18 @@
    unchanged) and emits bytecode into a Chunk. This is a *subset*
    compiler for v2.0: it covers the core language (literals, operators,
    variables, if/while/for-in, break/continue, match/match-guard,
-   functions (with implicit last-expression return), arrays, structs,
-   builtins) so the VM can be benchmarked and validated end-to-end.
-   Closures-with-capture, try/catch, enums, and modules still fall
-   back to the AST interpreter (eval.c) — `ys vm` reports which
-   construct it hit and exits cleanly rather than miscompiling.
+   functions (with implicit last-expression return), closures (fn
+   literals — always run via the tree-walking interpreter under the
+   hood, see ND_FN_LIT and vm.c's OP_MAKE_CLOSURE/OP_CALL), try/catch/
+   throw (native VM frame-unwinding — see OP_TRY_BEGIN/OP_THROW), enums,
+   import (bare form spliced at compile time; `as name` form runs via
+   OP_LOAD_MODULE at the correct point in execution order — see
+   ND_IMPORT/ND_MODULE), impl blocks / struct methods (tree-walking
+   dispatch — see OP_CALL_METHOD), array index assignment (arr[i]=x),
+   arrays, structs, builtins) so the VM can be benchmarked and
+   validated end-to-end against the AST interpreter. `ys vm` reports
+   any construct it doesn't recognize and falls back cleanly rather
+   than miscompiling.
 */
 
 #include "bcompiler.h"
@@ -179,6 +186,42 @@ static void emit_collapse_scope(int base, int line){
     CUR->local_count=base;
 }
 
+/* v2.6: free-variable scan for ND_FN_LIT closure capture. Walks a
+   literal's body collecting every identifier it references (both
+   plain ND_IDENT reads and the callee name of a plain — non-dot —
+   ND_CALL, since compile_call compiles `f(x)` as an ND_IDENT lookup
+   for `f`). This is a deliberate over-approximation: it doesn't track
+   the literal's own inner `let` scoping, so a name the closure later
+   shadows with its own `let` is still a capture candidate here — see
+   ND_FN_LIT below for how that's resolved (only names that resolve as
+   a local in the *enclosing* scope actually get captured; a closure's
+   own inner declaration of the same name simply shadows it at runtime
+   exactly like any other local redeclaration already does). */
+#define MAX_CAPTURES 32
+typedef struct { char names[MAX_CAPTURES][64]; int count; } NameSet;
+
+static void nameset_add(NameSet *s, const char *name){
+    if(!name || !name[0]) return;
+    if(name[0]=='_' && name[1]==0) return; /* wildcard, never a real var */
+    for(int i=0;i<s->count;i++) if(strcmp(s->names[i],name)==0) return;
+    if(s->count<MAX_CAPTURES) snprintf(s->names[s->count++],64,"%s",name);
+}
+
+static void scan_free_idents(Node *n, NameSet *out){
+    if(!n) return;
+    if(n->kind==ND_IDENT) nameset_add(out, n->name);
+    else if(n->kind==ND_CALL && !n->left) nameset_add(out, n->name); /* plain call's callee */
+    scan_free_idents(n->left,out);
+    scan_free_idents(n->right,out);
+    scan_free_idents(n->cond,out);
+    scan_free_idents(n->then,out);
+    scan_free_idents(n->els,out);
+    scan_free_idents(n->body,out);
+    for(int i=0;i<16 && n->arg_data[i];i++) scan_free_idents(n->arg_data[i],out);
+    if(n->args)  for(int i=0;i<n->argc;i++)  scan_free_idents(n->args[i],out);
+    if(n->stmts) for(int i=0;i<n->stmtc;i++) scan_free_idents(n->stmts[i],out);
+}
+
 /*  value constructors (mirroring eval.c's make_*; duplicated here
    on purpose — bcompiler.c must not depend on eval.c internals, only
    on the public Val layout in yolish.h, to keep the two subsystems
@@ -201,6 +244,47 @@ static Val bc_str(const char *s,int len){
     memcpy(buf,s,(size_t)len); buf[len]=0;
     r.sval=buf; r.slen=len;
     return r;
+}
+
+/* v2.6: import/module support. `import "file.y"` merges the file's
+   top-level statements into the current scope — eval.c does this by
+   re-running them at runtime every import site reaches, guarded by a
+   runtime cache. Since bytecode is compiled once, the equivalent move
+   here is to splice the imported statements into *this* compile at the
+   import site (parsing the file with the same parser.c, then just
+   calling compile_stmt_list on its statements) — the cache below is a
+   compile-time mirror of eval.c's g_imported_modules, preventing the
+   same resolved path from being spliced twice into one compilation
+   (matching "importing the same file twice is silently skipped"). */
+#define MAX_BC_IMPORTS 64
+static char g_bc_imported[MAX_BC_IMPORTS][512];
+static int  g_bc_nimported=0;
+#define MAX_BC_IMPORT_DEPTH 32
+static int  g_bc_import_depth=0;
+
+static void bc_resolve_import(const char *raw, char *out, int sz){
+    const char *base = g_src_dir[0] ? g_src_dir : ".";
+    char tmp[1024];
+    int blen=(int)strlen(base); if(blen>400) blen=400;
+    int rlen=(int)strlen(raw);  if(rlen>500) rlen=500;
+    int rel=(raw[0]=='.' && (raw[1]=='/'||raw[1]=='.'));
+    if(rel){
+        snprintf(tmp,sizeof(tmp),"%.*s/%.*s",blen,base,rlen,raw);
+    } else {
+        snprintf(tmp,sizeof(tmp),"%.*s/%.*s",blen,base,rlen,raw);
+        FILE *f2=fopen(tmp,"r");
+        if(f2) fclose(f2);
+        else snprintf(tmp,sizeof(tmp),"%.*s",rlen,raw);
+    }
+    int tl=(int)strlen(tmp);
+    if(tl>=sz) tl=sz-1;
+    memcpy(out,tmp,(size_t)tl); out[tl]=0;
+    int l=(int)strlen(out);
+    if(l>1 && !(out[l-2]=='.'&&out[l-1]=='y') && l+2<sz){ out[l]='.'; out[l+1]='y'; out[l+2]=0; }
+}
+static int bc_import_cached(const char *p){
+    for(int i=0;i<g_bc_nimported;i++) if(strcmp(g_bc_imported[i],p)==0) return 1;
+    return 0;
 }
 
 /*  local variable table  */
@@ -361,6 +445,21 @@ static void compile_call(Node *n){
         emit_byte((unsigned char)real_argc,n->line);
         return;
     }
+    if(n->left){
+        /* p.method(...) — try_build_qname already ruled out a builtin
+           namespace, so this is a struct method call (impl blocks).
+           Dispatch through OP_CALL_METHOD (tree-walking, see eval.c's
+           call_method_public) rather than the plain-call path below,
+           which would otherwise wrongly treat "method" as a bare
+           global function name and ignore the receiver entirely. */
+        compile_node(n->left);
+        for(int i=0;i<real_argc;i++) compile_node(n->args[s+i]);
+        int nameidx = chunk_add_const(CUR->chunk, bc_str(n->name,(int)strlen(n->name)));
+        emit_byte(OP_CALL_METHOD,n->line);
+        emit_u16(nameidx,n->line);
+        emit_byte((unsigned char)real_argc,n->line);
+        return;
+    }
     /* plain call: a user-defined function value, e.g. add(2,3) or a
        local/global holding a closure. Push the callee, then the args,
        then OP_CALL. No receiver offset here — plain calls (n->left==NULL)
@@ -458,6 +557,19 @@ static void compile_node(Node *n){
             fprintf(stderr,"[ys vm] unsupported assignment target at line %d\n",line);
             CUR->had_error=1;
         }
+        break;
+    }
+    case ND_INDEX_SET: {
+        /* arr[i] = value — the parser's own dedicated node for this
+           (see parser.c), distinct from ND_ASSIGN wrapping an ND_INDEX
+           target above (which the parser never actually produces, but
+           which stayed as defensive/parallel handling). n->left is the
+           ND_INDEX node (array + index); n->right is the value. Same
+           stack order as above: array, index, value. */
+        compile_node(n->left->left);  /* array */
+        compile_node(n->left->right); /* index */
+        compile_node(n->right);       /* value */
+        emit_byte(OP_INDEX_SET,line);
         break;
     }
     case ND_LET: case ND_VAR: {
@@ -749,7 +861,7 @@ static void compile_node(Node *n){
                 }
             }
 
-            /* guard  */
+            /*  guard  */
             int guard_fail_jump=-1;
             if(guard){
                 compile_node(guard);
@@ -797,6 +909,50 @@ static void compile_node(Node *n){
 
         int match_end=CUR->chunk->count;
         for(int i=0;i<end_count;i++) chunk_patch_jump(CUR->chunk, end_jumps[i], match_end);
+        break;
+    }
+    case ND_TRY: {
+        /* try { ... } catch(e) { ... }
+           Implemented as native VM control flow (OP_TRY_BEGIN/OP_THROW
+           unwind actual CallFrames — see bytecode.h) rather than
+           bridging to the AST interpreter, specifically so a `throw`
+           inside a *called* function (any number of frames deep, e.g.
+           errors.y's `divide()`/`safe_get()`) still gets caught here,
+           exactly like the AST interpreter's g_throwing propagation. */
+        int base_locals=CUR->in_function?CUR->local_count:0;
+        /* Catch-var binding needs a real local slot that OP_THROW can
+           write into directly, so it only works inside a function —
+           at global scope (no slots, everything's a named global) the
+           catch block still runs, just without the caught value bound
+           by name. try/catch at bare top level is rare in practice. */
+        int has_catch_var = n->els && n->name[0] && CUR->in_function;
+        int catch_var_slot = base_locals;
+
+        emit_byte(OP_TRY_BEGIN,line);
+        emit_byte((unsigned char)(has_catch_var?1:0),line);
+        emit_u16(catch_var_slot,line);
+        int offset_at=CUR->chunk->count;
+        emit_u16(0,line); /* placeholder, patched below once the catch block's address is known */
+
+        compile_tail(n->then);
+        emit_collapse_scope(base_locals,line);
+        emit_byte(OP_TRY_END,line);
+        int end_jump=emit_jump(OP_JUMP,line);
+
+        /* catch block */
+        patch_jump_here(offset_at);
+        if(has_catch_var) (void)add_local(n->name); /* names the slot OP_THROW already wrote the caught value into */
+        if(n->els) compile_tail(n->els);
+        else emit_byte(OP_NIL,line); /* no catch clause: exception is silently swallowed, result is nil — matches eval.c */
+        emit_collapse_scope(base_locals,line);
+
+        patch_jump_here(end_jump);
+        break;
+    }
+    case ND_THROW: {
+        if(n->right) compile_node(n->right);
+        else emit_byte(OP_NIL,line);
+        emit_byte(OP_THROW,line);
         break;
     }
     case ND_RETURN: {
@@ -861,6 +1017,162 @@ static void compile_node(Node *n){
         break;
     }
 
+    case ND_FN_LIT: {
+        /* fn(x) { ... } as a value — assigned to a variable, passed as
+           an argument, returned from a function, etc.
+           Unlike ND_FN above, this is never compiled to its own Chunk.
+           It's always built as a tree-walking closure (a real AST
+           Node* + a captured Env*), invoked via call_closure_public —
+           see vm.c's OP_CALL and OP_MAKE_CLOSURE. This is what lets it
+           be passed to y.map/filter/reduce/sort/each and any other
+           builtin that only knows how to call AST-style function
+           values, and lets any *further* nesting (a closure created
+           inside this closure's own body) fall through to eval.c's own
+           native ND_FN_LIT handling automatically once tree-walking
+           takes over — no extra work needed here for that case.
+           Free variables (names the body references that aren't this
+           literal's own parameters) get captured by value, at closure-
+           creation time, from whichever ones resolve as a local in the
+           *enclosing* bytecode-compiled scope; anything else resolves
+           normally at call time (a global, or a name genuinely
+           undefined) via env_get's VM-global fallback. */
+        NameSet fv; fv.count=0;
+        scan_free_idents(n->body,&fv);
+        for(int i=0;i<n->argc;i++){
+            for(int j=0;j<fv.count;j++){
+                if(strcmp(fv.names[j], n->field_names[i])==0){
+                    for(int k=j;k<fv.count-1;k++) snprintf(fv.names[k],64,"%s",fv.names[k+1]);
+                    fv.count--; j--;
+                }
+            }
+        }
+        int cap_name_idx[MAX_CAPTURES]; int ncap=0;
+        for(int i=0;i<fv.count && ncap<MAX_CAPTURES;i++){
+            if(CUR->in_function && resolve_local(fv.names[i])>=0){
+                emit_load(fv.names[i],line);
+                cap_name_idx[ncap++]=chunk_add_const(CUR->chunk, bc_str(fv.names[i],(int)strlen(fv.names[i])));
+            }
+        }
+        Val protoval=bc_nil(); protoval.type=YS_FN; protoval.fn_node=n; /* fn_env stays 0 — set at runtime by OP_MAKE_CLOSURE */
+        int proto_idx=chunk_add_const(CUR->chunk, protoval);
+        emit_byte(OP_MAKE_CLOSURE,line);
+        emit_u16(proto_idx,line);
+        emit_byte((unsigned char)ncap,line);
+        for(int i=0;i<ncap;i++) emit_u16(cap_name_idx[i],line);
+        break;
+    }
+
+    case ND_IMPORT: {
+        /* import "file.y" — merges the file's top-level statements into
+           this scope. Resolved and spliced in *once* per compile (see
+           bc_import_cached above); a second `import` of the same
+           resolved path anywhere in the program is a silent no-op,
+           matching eval.c's runtime cache behavior exactly. Only the
+           bare form is supported here — `import "file.y" as name`
+           (ND_MODULE) still falls back to the AST interpreter, since it
+           needs to package the whole file's definitions into a runtime
+           struct value, which doesn't fit this splice-at-compile-time
+           approach. */
+        char resolved[512];
+        bc_resolve_import(n->sval?n->sval:"", resolved, sizeof(resolved));
+        if(bc_import_cached(resolved)) break;
+        if(g_bc_import_depth>=MAX_BC_IMPORT_DEPTH){
+            /* Guards against a pathological import chain overflowing the
+               C call stack before bc_import_cached ever catches it — the
+               path string these compile-time imports build up isn't
+               normalized (matching eval.c's own iresolve, which has the
+               same property), so a true A-imports-B-imports-A cycle
+               keeps growing the resolved path each level instead of
+               ever exactly repeating. A depth cap is a safety net
+               eval.c itself doesn't have; falling back here is always
+               safe, just possibly slower for a genuinely deep (if
+               unusual) legitimate import chain. */
+            fprintf(stderr,"[ys vm] import nesting too deep (max %d, possible circular import) at line %d — falling back\n",MAX_BC_IMPORT_DEPTH,line);
+            CUR->had_error=1;
+            break;
+        }
+        if(g_bc_nimported<MAX_BC_IMPORTS) snprintf(g_bc_imported[g_bc_nimported++],512,"%s",resolved);
+
+        FILE *impf=fopen(resolved,"r");
+        if(!impf){
+            fprintf(stderr,"[ys vm] cannot import '%s' at line %d — falling back\n",resolved,line);
+            CUR->had_error=1;
+            break;
+        }
+        fseek(impf,0,SEEK_END); long fsz=ftell(impf); fseek(impf,0,SEEK_SET);
+        char *isrc=(char*)malloc((size_t)fsz+1);
+        int isz=(int)fread(isrc,1,(size_t)fsz,impf);
+        fclose(impf); isrc[isz]=0;
+
+        /* switch source-dir context to the imported file while parsing
+           it, so *its* relative imports resolve correctly too, then
+           restore — mirrors eval.c's ND_IMPORT exactly. */
+        char odir[512], ofile[512];
+        snprintf(odir,512,"%s",g_src_dir); snprintf(ofile,512,"%s",g_src_file);
+        { int last=-1, rl=(int)strlen(resolved);
+          for(int i=0;i<rl;i++){ char ch=resolved[i]; if(ch=='/'||ch=='\\') last=i; }
+          if(last>=0){ int cl=last>510?510:last; memcpy(g_src_dir,resolved,(size_t)cl); g_src_dir[cl]=0; }
+          else g_src_dir[0]=0;
+          snprintf(g_src_file,512,"%s",resolved);
+        }
+
+        g_bc_import_depth++;
+        Lexer il; lex_init(&il,isrc,isz);
+        Node *iprog=parse_program(&il);
+        compile_stmt_list(iprog->stmts, iprog->stmtc);
+        g_bc_import_depth--;
+
+        snprintf(g_src_dir,512,"%s",odir); snprintf(g_src_file,512,"%s",ofile);
+        free(isrc);
+        break;
+    }
+
+    case ND_MODULE: {
+        /* import "file.y" as name — unlike bare import (spliced at
+           compile time above), this has to run at the *correct point
+           in execution order*: it evaluates the whole module file via
+           the tree-walking interpreter (isolated Env) and packages the
+           result into a namespace struct, which is a real side effect
+           (the module's own top-level code runs), not just a splice.
+           So this emits a runtime opcode (OP_LOAD_MODULE) instead of
+           doing the work here at compile time. */
+        int pathidx = chunk_add_const(CUR->chunk, bc_str(n->sval?n->sval:"", (int)strlen(n->sval?n->sval:"")));
+        int nameidx = chunk_add_const(CUR->chunk, bc_str(n->name,(int)strlen(n->name)));
+        emit_byte(OP_LOAD_MODULE,line);
+        emit_u16(pathidx,line);
+        emit_u16(nameidx,line);
+        emit_declare(n->name,line);
+        break;
+    }
+
+    case ND_ENUM: {
+        /* enum Direction { North South East West }
+           Registers EnumName.Variant as a constant int (its index)
+           carrying a display string, plus a sentinel EnumName itself
+           (an int whose sval is "enum:EnumName") — mirrors eval.c's
+           ND_ENUM exactly, using emit_const/emit_declare so this works
+           whether the enum sits at global or (less commonly) function
+           scope. See ND_DOT below for how `Direction.North` reads this
+           back at a use site. */
+        for(int i=0;i<n->stmtc;i++){
+            Node *v=n->stmts[i];
+            char qname[128];
+            snprintf(qname,sizeof(qname),"%s.%s",n->name,v->name);
+            Val ev=bc_int((int64_t)i);
+            Val qs=bc_str(qname,(int)strlen(qname));
+            ev.sval=qs.sval; ev.slen=qs.slen;
+            emit_const(ev,line);
+            emit_declare(qname,line);
+        }
+        char mbuf[160];
+        snprintf(mbuf,sizeof(mbuf),"enum:%s",n->name);
+        Val meta=bc_int((int64_t)n->stmtc);
+        Val ms=bc_str(mbuf,(int)strlen(mbuf));
+        meta.sval=ms.sval; meta.slen=ms.slen;
+        emit_const(meta,line);
+        emit_declare(n->name,line);
+        break;
+    }
 
     /*  Structs (v2.0 Phase 2) */
 
@@ -913,11 +1225,14 @@ static void compile_node(Node *n){
 
     case ND_IMPL: {
         /* impl Point { fn dist(self) { ... } }
-           Phase 2 deferred: fall back to AST interpreter for any program
-           that contains impl blocks.  Struct definition + literal + field
-           read/write are fully supported above. */
-        fprintf(stderr,"[ys vm] impl blocks not yet supported at line %d — falling back\n", line);
-        CUR->had_error=1;
+           impl blocks are always static top-level declarations, so
+           registering their methods at compile time (rather than when
+           this statement would "execute") is equivalent — see
+           register_impl_methods_public in eval.c, which shares the
+           exact same method registry the AST interpreter itself uses.
+           No bytecode emitted; method calls (p.dist()) dispatch through
+           OP_CALL_METHOD, added in compile_call. */
+        register_impl_methods_public(n);
         break;
     }
 
@@ -967,7 +1282,7 @@ static void compile_tail(Node *n){
     }
     switch(n->kind){
         case ND_LET: case ND_VAR: case ND_WHILE: case ND_FOR:
-        case ND_FN: case ND_STRUCT: case ND_IMPL:
+        case ND_FN: case ND_STRUCT: case ND_IMPL: case ND_ENUM: case ND_IMPORT: case ND_MODULE:
         case ND_BREAK: case ND_CONTINUE:
             compile_node(n);
             emit_byte(OP_NIL,line);
@@ -990,7 +1305,7 @@ static void compile_stmt_list(Node **stmts, int count){
         switch(stmts[i]->kind){
             case ND_LET: case ND_VAR: case ND_IF: case ND_WHILE: case ND_FOR:
             case ND_RETURN: case ND_FN: case ND_BLOCK:
-            case ND_STRUCT: case ND_IMPL:
+            case ND_STRUCT: case ND_IMPL: case ND_ENUM: case ND_IMPORT: case ND_MODULE:
             case ND_BREAK: case ND_CONTINUE: /* void-shaped — no value left on stack */
                 break;
             default:
@@ -1002,6 +1317,8 @@ static void compile_stmt_list(Node **stmts, int count){
 int bcompile_program(Node *prog, Chunk *out_chunk){
     chunk_init(out_chunk);
     g_temp_counter=0;
+    g_bc_nimported=0;
+    g_bc_import_depth=0;
     BCompiler top; memset(&top,0,sizeof(top));
     top.chunk=out_chunk; top.in_function=0; top.enclosing=NULL;
     CUR=&top;

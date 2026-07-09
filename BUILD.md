@@ -1,7 +1,7 @@
 # Building Yolish
 
 > **Note:** This guide is for **contributors** who want to build Yolish from source.  
-> If you just want to use Yolish, download the binary from [Releases](../../releases/latest) — no compiler needed.
+> If you just want to use Yolish, download the binary from [Releases](../../releases/latest); no compiler needed.
 
 ---
 
@@ -29,19 +29,19 @@
 | Windows | MinGW-w64 or MSVC | gcc 9+ / VS 2019+ |
 | Cross (Linux → Windows) | `gcc-mingw-w64-x86-64` | 9+ |
 
-**Linux — install compiler:**
+**Linux: install compiler**
 ```bash
 sudo apt install build-essential        # Debian/Ubuntu
 sudo dnf install gcc                    # Fedora
 sudo pacman -S gcc                      # Arch
 ```
 
-**macOS — install compiler:**
+**macOS: install compiler**
 ```bash
 xcode-select --install
 ```
 
-**Windows — install MinGW:**
+**Windows: install MinGW**
 - Download from https://www.mingw-w64.org/
 - Or install via [MSYS2](https://www.msys2.org/): `pacman -S mingw-w64-x86_64-gcc`
 - Or install [w64devkit](https://github.com/skeeto/w64devkit/releases) (simplest)
@@ -140,7 +140,7 @@ x86_64-w64-mingw32-gcc -std=c11 -O2 -static \
   elf_out.c pe_out.c macho_out.c main.c -lm
 ```
 
-Output: `./ys.exe` — a valid Windows PE32+ binary.
+Output: `./ys.exe`, a valid Windows PE32+ binary.
 
 ---
 
@@ -186,9 +186,9 @@ make debug
 ```
 
 The debug binary is named `ys_debug` and includes:
-- `-fsanitize=address,undefined` — catches memory errors and UB
-- `-g` — debug symbols for GDB/LLDB
-- `-fno-omit-frame-pointer` — proper stack traces
+- `-fsanitize=address,undefined`: catches memory errors and UB
+- `-g`: debug symbols for GDB/LLDB
+- `-fno-omit-frame-pointer`: proper stack traces
 
 ---
 

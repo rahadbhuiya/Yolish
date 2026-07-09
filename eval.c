@@ -49,7 +49,6 @@ static Val g_return_val_fwd;
 
 /* 
    v1.5  —  Mark-and-Sweep Garbage Collector
-   ================================================================
    All arr_data and field_vals are allocated through gc_alloc().
    A GCNode header sits immediately before each allocation.
    gc_collect() marks from all envpool roots then sweeps unreachable
@@ -261,7 +260,12 @@ Val *env_get(Env *e,const char *name){
     for(;e;e=e->parent)
         for(int i=0;i<e->count;i++)
             if(strcmp_u(e->names[i],name)==0) return &e->vals[i];
-    return 0;
+    /* v2.6: not found in this Env chain — a VM-compiled closure's Env
+       has no parent reaching the VM's own global table (a separate
+       hashtable in vm.c, unrelated to Env), so check there too. In
+       pure AST-interpreter runs this is always a harmless miss (the
+       VM's global table is never populated). */
+    return vm_global_lookup_public(name);
 }
 void env_set(Env *e,const char *name,Val v){
     for(Env *s=e;s;s=s->parent)
@@ -1317,6 +1321,16 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         for(int i=0;i<menv->count;i++){
             for(int j=0;j<64;j++) mod.field_names[i][j]=menv->names[i][j];
             mod.field_vals[i]=menv->vals[i];
+            /* v2.6 fix: a module's own named functions need to resolve
+               other module-level names (other functions, constants)
+               correctly when called from *outside* the module — e.g.
+               combo() calling base() internally, or referencing a
+               module-level `let`. Without this, call_module_fn's
+               "(fn_env)?...:env" fallback used whatever *calling*
+               context happened to invoke the module function, which
+               has no idea about the module's own definitions. */
+            if(mod.field_vals[i].type==YS_FN && !mod.field_vals[i].fn_env)
+                mod.field_vals[i].fn_env=(void*)menv;
         }
         env_def(env,n->name,mod);
         return mod;
@@ -1358,7 +1372,12 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         } else {
             memset(&g_return_val,0,sizeof(Val));
         }
-        g_returning=1;
+        /* v2.6 fix: if evaluating the return's expression itself threw
+           (e.g. `return risky_call()`), that's a throw in progress, not
+           a return — don't also set g_returning, or a catch that later
+           resets g_throwing will leave g_returning incorrectly stuck,
+           silently truncating everything after the try/catch. */
+        if(!g_throwing) g_returning=1;
         return g_return_val;
     }
 
@@ -3151,7 +3170,6 @@ Val eval_program(Node *prog,Env *env){
 
 /* 
    v2.0  —  bytecode VM bridge
-   ================================================================
    call_builtin() above is static and expects Node* args that it will
    eval_node() itself. The VM already has fully-evaluated Val arguments
    sitting on its stack — there is no AST to re-evaluate. Rather than
@@ -3193,4 +3211,127 @@ Val call_builtin_public(const char *name, Val *argv, int argc){
     static Env *bridge_env=NULL;
     if(!bridge_env) bridge_env=env_new(NULL);
     return call_builtin(name, args, n+1, bridge_env);
+}
+
+/* v2.6: invoke a VM-built closure. `fd` is the ND_FN_LIT AST node
+   itself (the VM never re-compiles it to bytecode — closures always
+   run through this same tree-walking path, whether called directly by
+   VM-compiled code via OP_CALL, or indirectly by a builtin like
+   y.map/y.filter/y.reduce/y.sort/y.each). `ce` is the Env built at
+   capture time (see bcompiler.c's ND_FN_LIT), already populated with
+   whichever enclosing locals the closure's body references. */
+Val call_closure_public(Node *fd, Env *ce, Val *argv, int argc){
+    Env *fe=env_new(ce);
+    for(int i=0;i<fd->argc && i<argc;i++) env_def(fe,fd->field_names[i],argv[i]);
+    g_returning=0;
+    Val r=eval_block(fd->body,fe);
+    if(g_returning){ memcpy(&r,&g_return_val,sizeof(Val)); g_returning=0; }
+    return r;
+}
+
+/* v2.6: registers every `fn` in an `impl StructName { ... }` block into
+   the same method registry ND_IMPL populates above — called once at VM
+   compile time (see bcompiler.c's ND_IMPL) instead of at AST-eval time,
+   since impl blocks are always static top-level declarations either
+   way. Identical loop body to eval.c's own case ND_IMPL. */
+void register_impl_methods_public(Node *impl_node){
+    for(int i=0;i<impl_node->stmtc;i++){
+        Node *fn=impl_node->stmts[i];
+        if(fn && fn->kind==ND_FN && nmethods<MAX_METHODS){
+            int si=nmethods++;
+            int ni=0;
+            while(impl_node->name[ni] && ni<31){ methods[si].struct_name[ni]=impl_node->name[ni]; ni++; }
+            methods[si].struct_name[ni]=0;
+            int mi=0;
+            while(fn->name[mi] && mi<31){ methods[si].method_name[mi]=fn->name[mi]; mi++; }
+            methods[si].method_name[mi]=0;
+            methods[si].fn_node=fn;
+        }
+    }
+}
+
+/* v2.6: dispatches obj.method_name(argv...) — mirrors eval.c's own
+   ND_CALL method-dispatch branch (self-binding convention included),
+   falling back to a plain field read (or nil) if no method matches,
+   same as the AST interpreter. Called from vm.c's OP_CALL_METHOD. */
+Val call_method_public(Val obj, const char *method_name, Val *argv, int argc){
+    if(obj.type==YS_STRUCT){
+        for(int mi=0; mi<nmethods; mi++){
+            if(strcmp_u(methods[mi].struct_name,obj.struct_name)==0
+            && strcmp_u(methods[mi].method_name,method_name)==0){
+                Node *fd=methods[mi].fn_node;
+                Env *fe=env_new(NULL);
+                if(fd->argc>0 && strcmp_u(fd->field_names[0],"self")==0){
+                    env_def(fe,"self",obj);
+                    for(int pi=1; pi<fd->argc && (pi-1)<argc; pi++)
+                        env_def(fe,fd->field_names[pi],argv[pi-1]);
+                } else {
+                    for(int pi=0; pi<fd->argc && pi<argc; pi++)
+                        env_def(fe,fd->field_names[pi],argv[pi]);
+                }
+                g_returning=0;
+                Val result=eval_block(fd->body,fe);
+                if(g_returning){ memcpy(&result,&g_return_val,sizeof(Val)); g_returning=0; }
+                return result;
+            }
+        }
+        /* no method matched — a field holding a function value is
+           itself callable in eval.c; anything else just returns the
+           field (or nil if there's no such field either). */
+        for(int fi=0; fi<obj.field_count; fi++){
+            if(strcmp_u(obj.field_names[fi],method_name)==0){
+                Val fv=obj.field_vals[fi];
+                if(fv.type==YS_FN && fv.fn_node && fv.fn_env)
+                    return call_closure_public((Node*)fv.fn_node,(Env*)fv.fn_env,argv,argc);
+                return fv;
+            }
+        }
+    }
+    return make_nil();
+}
+/* v2.6: `import "file.y" as name` bridge — identical logic to ND_MODULE
+   above (same file-resolution order: try the raw path first, then
+   prefixed with g_src_dir), just generalized to take the path/name as
+   parameters and hand the resulting namespace struct back to the
+   caller (vm.c's OP_LOAD_MODULE) instead of env_def-ing it directly,
+   since the VM has no Env of its own to define into. */
+Val eval_module_public(const char *raw_path, const char *ns_name){
+    static char mod_src[65536];
+    FILE *mf=fopen(raw_path,"r");
+    if(!mf){
+        char rel[640]; int di=0;
+        while(g_src_dir[di]&&di<510){ rel[di]=g_src_dir[di]; di++; }
+        int si=0; while(raw_path[si]&&di<638){ rel[di++]=raw_path[si++]; } rel[di]=0;
+        mf=fopen(rel,"r");
+    }
+    if(!mf) return make_nil();
+    int msz=(int)fread(mod_src,1,sizeof(mod_src)-1,mf);
+    fclose(mf); mod_src[msz]=0;
+    Lexer ml; lex_init(&ml,mod_src,msz);
+    Node *mprog=parse_program(&ml);
+    Env *menv=env_new(NULL); /* isolated namespace */
+    for(int i=0;i<mprog->stmtc;i++) eval_node(mprog->stmts[i],menv);
+    Val mod=make_nil(); mod.type=YS_STRUCT;
+    int nl2=str_len_u(ns_name)<31?str_len_u(ns_name):31;
+    for(int i=0;i<nl2;i++) mod.struct_name[i]=ns_name[i];
+    mod.struct_name[nl2]=0;
+    mod.field_count=menv->count;
+    mod.field_vals=alloc_fld(menv->count+1);
+    mod.field_names=alloc_nm(menv->count+1);
+    for(int i=0;i<menv->count;i++){
+        for(int j=0;j<64;j++) mod.field_names[i][j]=menv->names[i][j];
+        mod.field_vals[i]=menv->vals[i];
+        /* A module's own named functions (unlike a plain top-level `fn`)
+           need to be callable from *outside* the module while still
+           resolving other module-level names (other functions, PI-style
+           constants) correctly — e.g. cube() calling square() internally.
+           Giving them fn_env=menv makes them behave like closures over
+           the module's own isolated env, and doubles as the signal
+           (fn_env set) that call_method_public's field-fallback uses to
+           know this is a real AST Node* it can tree-walk, not a VM
+           bytecode FnProto*. */
+        if(mod.field_vals[i].type==YS_FN && !mod.field_vals[i].fn_env)
+            mod.field_vals[i].fn_env=(void*)menv;
+    }
+    return mod;
 }

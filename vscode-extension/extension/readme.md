@@ -17,7 +17,7 @@ Official VS Code extension for the [Yolish](https://github.com/rahadbhuiya/yolis
 
 Install Yolish first:
 
-**Windows** — download `ys.exe` from [Releases](https://github.com/rahadbhuiya/yolish/releases) and add to PATH,
+**Windows**: download `ys.exe` from [Releases](https://github.com/rahadbhuiya/yolish/releases) and add to PATH,
 or run the installer:
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1
@@ -32,11 +32,11 @@ curl -fsSL https://raw.githubusercontent.com/rahadbhuiya/yolish/master/install.s
 
 **Run a file:**
 - Open any `.y` file
-- Press `F5` or click the `► Run Yolish` button in the title bar
+- Press `F5` or click the `Run Yolish` button in the title bar
 - Output appears in the integrated terminal
 
 **Compile to native binary:**
-- Press `Ctrl+Shift+B` or click the `⚙ Compile` button
+- Press `Ctrl+Shift+B` or click the `Compile` button
 - Produces a native executable next to the source file
 
 **CMD / PowerShell (without VS Code):**

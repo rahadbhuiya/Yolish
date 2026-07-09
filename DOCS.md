@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.6  
+**Version:** v2.8  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -18,7 +18,7 @@
 8. [Closures and First-Class Functions](#8-closures-and-first-class-functions)
 9. [Arrays](#9-arrays)
 10. [Structs](#10-structs)
-11. [Impl — Struct Methods](#11-impl--struct-methods)
+11. [Impl: Struct Methods](#11-impl-struct-methods)
 12. [String Builtins](#12-string-builtins)
 13. [I/O Builtins](#13-io-builtins)
 14. [Type Conversion Builtins](#14-type-conversion-builtins)
@@ -40,17 +40,17 @@
 30. [Full Example Programs](#30-full-example-programs)
 31. [Quick Reference](#31-quick-reference)
 32. [Enums](#32-enums)
-33. [File I/O — y.fs.*](#33-file-io--yfs)
-34. [JSON — y.json.*](#34-json--yjson)
-35. [Time — y.time.*](#35-time--ytime)
-36. [Path — y.path.*](#36-path--ypath)
-37. [Env — y.env.*](#37-env--yenv)
+33. [File I/O: y.fs.*](#33-file-io-yfs)
+34. [JSON: y.json.*](#34-json-yjson)
+35. [Time: y.time.*](#35-time-ytime)
+36. [Path: y.path.*](#36-path-ypath)
+37. [Env: y.env.*](#37-env-yenv)
 38. [Process & System](#38-process--system)
-39. [Garbage Collector — gc.*](#39-garbage-collector--gc)
-40. [Testing — ys test](#40-testing--ys-test)
-41. [Static Checker — ys check](#41-static-checker--ys-check)
-42. [Formatter — ys fmt](#42-formatter--ys-fmt)
-43. [Bytecode VM — ys vm (experimental)](#43-bytecode-vm--ys-vm-experimental)
+39. [Garbage Collector: gc.*](#39-garbage-collector-gc)
+40. [Testing: ys test](#40-testing-ys-test)
+41. [Static Checker: ys check](#41-static-checker-ys-check)
+42. [Formatter: ys fmt](#42-formatter-ys-fmt)
+43. [Bytecode VM: ys vm](#43-bytecode-vm-ys-vm)
 
 ---
 
@@ -89,7 +89,7 @@ i = i + 1
 | `bool` | `true`, `false` | |
 | `array` | `[1, 2, 3]` | Dynamic, mixed types allowed. Max 1024 elements |
 | `struct` | `Point { x: 1, y: 2 }` | User-defined |
-| `nil` | — | Zero value, unset variable |
+| `nil` | (none) | Zero value, unset variable |
 
 ---
 
@@ -171,7 +171,7 @@ while i < 5 {
 }
 ```
 
-### for — range
+### for: range
 
 ```yolish
 for i in 0..10 {
@@ -179,7 +179,7 @@ for i in 0..10 {
 }
 ```
 
-### for — array
+### for: array
 
 ```yolish
 let arr = [10, 20, 30]
@@ -193,7 +193,7 @@ for i in 0..y.len(arr) {
 }
 ```
 
-### for — string characters
+### for: string characters
 
 ```yolish
 for ch in "hello" {
@@ -267,7 +267,7 @@ for i in 0..3 {
 
 ## 6. Match Expressions
 
-`match` is a full expression — it returns a value and can appear anywhere a value is expected.
+`match` is a full expression. It returns a value and can appear anywhere a value is expected.
 
 ### Syntax
 
@@ -396,7 +396,7 @@ fn fizzbuzz(n) {
 }
 ```
 
-The binding name is only visible inside that arm — it does not leak out.
+The binding name is only visible inside that arm. It does not leak out.
 
 ### Notes
 
@@ -444,13 +444,13 @@ fn factorial(n) {
 
 - Max 8 parameters per function.
 - `return` exits immediately at any depth.
-- Functions are first-class values — they can be stored in variables and passed as arguments.
+- Functions are first-class values. They can be stored in variables and passed as arguments.
 
 ---
 
 ## 8. Closures and First-Class Functions
 
-Functions are first-class values in Yolish — they can be stored in variables, passed as arguments, and returned from other functions.
+Functions are first-class values in Yolish. They can be stored in variables, passed as arguments, and returned from other functions.
 
 ### Anonymous functions
 
@@ -466,7 +466,7 @@ fn apply(f, x) { return f(x) }
 y.println(apply(double, 7))    -- 14
 ```
 
-### Closures — capture environment
+### Closures: capture environment
 
 ```yolish
 fn make_adder(n) {
@@ -500,7 +500,7 @@ y.each(nums, fn(x) { y.print(x)  y.print(" ") })
 
 ## 9. Arrays
 
-`y.push` and `y.pop` always return a **new array** — the original is never mutated.
+`y.push` and `y.pop` always return a **new array**; the original is never mutated.
 Arrays use capacity-doubling internally (v2.3), so repeated pushes are O(1) amortized.
 
 ```yolish
@@ -512,7 +512,7 @@ y.println(y.len(b))   -- 4
 
 **Strings have no size limit (v2.4).** They are heap-allocated and
 garbage-collected, so file contents, JSON payloads, and large concatenations
-all work without truncation — both as literals in source code and as
+all work without truncation, both as literals in source code and as
 values built at runtime.
 
 ```yolish
@@ -614,7 +614,7 @@ let p2 = make_point(5, 15)
 
 ---
 
-## 11. Impl — Struct Methods
+## 11. Impl: Struct Methods
 
 Use `impl StructName { }` to attach methods to a struct. The first parameter must be `self`.
 
@@ -855,7 +855,7 @@ y.sort(["b", "a", "c"])                        -- ["a", "b", "c"]
 y.sort([5, 2, 8], fn(a, b){ return a > b })    -- [8, 5, 2]  (descending)
 ```
 
-Returns a **sorted copy** — original is unchanged.
+Returns a **sorted copy**; original is unchanged.
 
 ### y.map
 
@@ -1023,7 +1023,7 @@ if y.has_cap(caps, "fs.read") {
 
 ### Why this matters
 
-In C or Python, any code can open any file. In Yolish, capabilities are typed values — they can be passed, stored, and inspected. On Exploidus OS, the kernel validates the capability before granting access. When a capability goes out of scope, it is automatically revoked.
+In C or Python, any code can open any file. In Yolish, capabilities are typed values: they can be passed, stored, and inspected. On Exploidus OS, the kernel validates the capability before granting access. When a capability goes out of scope, it is automatically revoked.
 
 ---
 
@@ -1060,7 +1060,7 @@ fn main() {
 ### Notes
 
 - Path is relative to the importing file's directory.
-- `import "file.y" as name` runs in an isolated env — symbols do not pollute the caller.
+- `import "file.y" as name` runs in an isolated env, so symbols do not pollute the caller.
 - `import "file.y"` (without `as`) shares the caller's env.
 - Circular imports are not detected; avoid them manually.
 
@@ -1079,7 +1079,7 @@ fn function_name(params) { ... }
 
 ### @intent
 
-Signals resource intent to the Exploidus OS scheduler. Emitted to `stderr` once per outermost call — recursive calls do not repeat it.
+Signals resource intent to the Exploidus OS scheduler. Emitted to `stderr` once per outermost call; recursive calls do not repeat it.
 
 ```yolish
 @intent("io")
@@ -1113,7 +1113,7 @@ Scheduler output (stderr):
 
 ### @audit
 
-Logs every call — tag, function name, and argument count. Output goes to `stderr`.
+Logs every call: tag, function name, and argument count. Output goes to `stderr`.
 
 ```yolish
 @audit("auth")
@@ -1213,7 +1213,7 @@ y.println(safe_divide(10, 0))    -- caught: division by zero / -1
 
 - `throw` accepts any value (string, int, error object).
 - Uncaught throws propagate up through function calls.
-- `throw` inside a `for` or `while` loop works correctly — it unwinds to the nearest `try`.
+- `throw` inside a `for` or `while` loop works correctly, unwinding to the nearest `try`.
 
 ---
 
@@ -1328,13 +1328,13 @@ ys> exit
 Bye!
 ```
 
-The REPL shares a persistent environment across lines — variables and functions defined on one line are available on the next.
+The REPL shares a persistent environment across lines, so variables and functions defined on one line are available on the next.
 
 ---
 
 ## 25. Standard Library
 
-For `y.fs`, `y.json`, `y.time`, `y.path`, `y.env`, and `process` — see
+For `y.fs`, `y.json`, `y.time`, `y.path`, `y.env`, and `process`, see
 sections 33–38 below for full documentation.
 
 
@@ -1386,7 +1386,7 @@ sections 33–38 below for full documentation.
 
 ## 26. Native Compiler
 
-Compile Yolish source to a standalone native binary — no interpreter needed at runtime.
+Compile Yolish source to a standalone native binary; no interpreter needed at runtime.
 
 ```bash
 ys -c program.y                      -- compile for current OS
@@ -1448,7 +1448,7 @@ Multi-line block comments:
 Max **1023 characters**. Longer strings are silently truncated at the lexer.
 
 ### Array size
-Max **1024 elements** per array literal (v2.3). Strings have no size limit (v2.4) — they are heap-allocated and garbage-collected.
+Max **1024 elements** per array literal (v2.3). Strings have no size limit (v2.4); they are heap-allocated and garbage-collected.
 
 ### Float precision
 Floats use native `double` (IEEE 754, ~15 significant digits):
@@ -1743,17 +1743,17 @@ y.println(a == Direction.West)       -- false
 
 ---
 
-## 33. File I/O — y.fs.*
+## 33. File I/O: y.fs.*
 
 ```yolish
 y.fs.write(path, data)     -- write string to file (creates or overwrites)
 y.fs.append(path, data)    -- append string to file
 y.fs.read(path)            -- read entire file as string
-y.fs.exists(path)          -- bool — file or directory exists
-y.fs.size(path)            -- int — file size in bytes (-1 on error)
-y.fs.is_dir(path)          -- bool — path is a directory
+y.fs.exists(path)          -- bool: file or directory exists
+y.fs.size(path)            -- int: file size in bytes (-1 on error)
+y.fs.is_dir(path)          -- bool: path is a directory
 y.fs.list(dir)             -- array of filenames in directory
-y.fs.mkdir(path)           -- create directory (bool — success)
+y.fs.mkdir(path)           -- create directory (bool: success)
 y.fs.delete(path)          -- delete file or empty directory (bool)
 y.fs.rename(old, new)      -- rename/move file (bool)
 ```
@@ -1787,7 +1787,7 @@ y.fs.delete("notes_v2.txt")
 
 ---
 
-## 34. JSON — y.json.*
+## 34. JSON: y.json.*
 
 ```yolish
 y.json.parse(str)       -- parse JSON string → value
@@ -1828,11 +1828,11 @@ y.println(cfg.port)                     -- 8080
 
 ---
 
-## 35. Time — y.time.*
+## 35. Time: y.time.*
 
 ```yolish
-y.time.now()              -- int — milliseconds since Unix epoch
-y.time.unix()             -- int — seconds since Unix epoch
+y.time.now()              -- int: milliseconds since Unix epoch
+y.time.unix()             -- int: seconds since Unix epoch
 y.time.sleep(ms)          -- sleep for N milliseconds
 y.time.format(ms, fmt)    -- format timestamp as string
 ```
@@ -1855,7 +1855,7 @@ y.println(elapsed)                                    -- ~500
 
 ---
 
-## 36. Path — y.path.*
+## 36. Path: y.path.*
 
 ```yolish
 y.path.join(a, b, ...)    -- join path segments with /
@@ -1884,10 +1884,10 @@ if ext == ".y" {
 
 ---
 
-## 37. Env — y.env.*
+## 37. Env: y.env.*
 
 ```yolish
-y.env.get(key)         -- string or nil — get environment variable
+y.env.get(key)         -- string or nil: get environment variable
 y.env.set(key, val)    -- set environment variable
 y.env.unset(key)       -- remove environment variable
 ```
@@ -1944,7 +1944,7 @@ if some_error {
 
 ---
 
-## 39. Garbage Collector — gc.*
+## 39. Garbage Collector: gc.*
 
 Yolish v1.5 ships a **mark-and-sweep garbage collector**. All array and struct
 field allocations are automatically tracked. The GC runs periodically between
@@ -1952,10 +1952,10 @@ statements and frees unreachable objects.
 
 ### How it works
 
-1. **Allocate** — every `alloc_arr` / `alloc_fld` call goes through the GC allocator
-2. **Mark** — scan all live environments, mark every reachable array/struct block
-3. **Sweep** — free all unmarked allocations from previous cycles
-4. **Cycle protection** — objects allocated in the current cycle are never freed prematurely
+1. **Allocate**: every `alloc_arr` / `alloc_fld` call goes through the GC allocator
+2. **Mark**: scan all live environments, mark every reachable array/struct block
+3. **Sweep**: free all unmarked allocations from previous cycles
+4. **Cycle protection**: objects allocated in the current cycle are never freed prematurely
 
 The GC triggers automatically every ~128 allocations. You can also control it manually.
 
@@ -1988,7 +1988,7 @@ y.print("cycle: ") y.println(s.cycle)
 -- Force a collection
 gc.collect()
 
--- Memory-intensive loop — GC automatically reclaims old arrays
+-- Memory-intensive loop, GC automatically reclaims old arrays
 var i = 0
 while i < 1000 {
     let data = [i, i+1, i+2, i+3, i+4]
@@ -2015,14 +2015,14 @@ y.println((after.freed * 100) / after.alloc)  -- > 50%
 
 ### Notes
 
-- The GC is **conservative** — it may keep some objects alive longer than necessary,
+- The GC is **conservative**: it may keep some objects alive longer than necessary,
   but it will never free a live object
 - For long-running programs, call `gc.collect()` explicitly at natural checkpoints
 - `gc.stats().freed` resets to 0 on each collection cycle
 
 ---
 
-## 40. Testing — ys test
+## 40. Testing: ys test
 
 Write `test` blocks anywhere in a `.y` file:
 
@@ -2051,7 +2051,7 @@ Running tests in math.y
 2 passed, 1 failed
 ```
 
-Exit code is `0` if all pass, `1` if any fail — works with CI.
+Exit code is `0` if all pass, `1` if any fail, so it works with CI.
 
 ### Assertion builtins
 
@@ -2097,13 +2097,13 @@ test "strings" {
 
 ### Notes
 
-- Code outside `test` blocks runs first (setup code — define functions, load data)
+- Code outside `test` blocks runs first (setup code: define functions, load data)
 - A failing assertion stops that test block; other tests continue
 - `test` blocks are silently skipped when running with plain `ys file.y`
 
 ---
 
-## 41. Static Checker — ys check
+## 41. Static Checker: ys check
 
 ```bash
 ys check file.y
@@ -2145,7 +2145,7 @@ ys check src/main.y && ys test src/main.y
 
 ---
 
-## 42. Formatter — ys fmt
+## 42. Formatter: ys fmt
 
 ```bash
 ys fmt file.y           # prints formatted code to stdout
@@ -2154,9 +2154,9 @@ ys fmt file.y > file.y  # overwrite in place
 ```
 
 Normalizes:
-- **Indentation** — 4 spaces per level
-- **Trailing whitespace** — removed from every line
-- **Blank lines** — preserved
+- **Indentation**: 4 spaces per level
+- **Trailing whitespace**: removed from every line
+- **Blank lines**: preserved
 
 ```yolish
 -- before: mixed indentation
@@ -2178,65 +2178,74 @@ Note: `ys fmt` preserves all string content unchanged (raw strings, backtick str
 
 ---
 
-## 43. Bytecode VM — ys vm (experimental)
+## 43. Bytecode VM: ys vm
 
 ```bash
 ys vm file.y
 ```
 
-v2.0 introduces an experimental **stack-based bytecode VM** as an alternative
-execution path to the AST interpreter. The source is compiled to bytecode
-once, then executed by a tight dispatch loop — no AST tree-walking per
-statement, no environment-chain allocation per scope. On recursion-heavy
-workloads this is dramatically faster:
+The bytecode VM is a stack-based execution path that runs alongside the
+AST interpreter. Source is compiled to bytecode once, then run by a tight
+dispatch loop, so there is no tree-walking per statement and no
+environment-chain allocation per scope. On recursion-heavy workloads this
+is dramatically faster:
 
 ```
-fib(27) — recursive Fibonacci, ~832K calls
+fib(27), recursive Fibonacci, about 832K calls
 
   ys file.y      10.8s   (AST interpreter)
-  ys vm file.y    0.3s   (bytecode VM)   — ~36x faster
+  ys vm file.y    0.3s   (bytecode VM), about 36x faster
 ```
 
-### What's supported in v2.0
+### What's supported
+
+The VM now compiles the full language, not just a subset:
 
 | Feature | Supported |
 |---------|-----------|
-| Literals (int, float, bool, string) | Yes |
-| Arithmetic, comparison, logical operators | Yes |
+| Literals, arithmetic, comparison, logical operators | Yes |
 | `let` / `var`, local and global scope | Yes |
-| `if` / `else` | Yes |
-| `while` | Yes |
-| User-defined functions, recursion | Yes |
-| Array literals, indexing (read + write) | Yes |
-| String concatenation | Yes |
+| `if` / `else`, `while` | Yes |
+| `for` in (range and array/string iteration) | Yes |
+| `break` / `continue` | Yes |
+| `match` / `match` guards | Yes |
+| User-defined functions, recursion, implicit last-expression return | Yes |
+| Closures (`fn(x) { ... }`, capturing outer variables) | Yes |
+| `try` / `catch` / `throw` | Yes |
+| `enum` | Yes |
+| `import "file.y"` (merges into current scope) | Yes |
+| `import "file.y" as name` (namespace struct) | Yes |
+| `impl` blocks and struct methods | Yes |
+| Array literals, indexing, index assignment (`arr[i] = x`) | Yes |
+| Structs, struct literals, field access | Yes |
 | All existing builtins (`y.*`, `process.*`, `sys.*`, `gc.*`, `cap.*`, test assertions) | Yes |
 | Auto-calling `fn main()` | Yes |
 
-### What falls back to the AST interpreter
+Closures and `try`/`catch`/`throw` use two different strategies internally.
+Closures are compiled as a bridge into the tree-walking interpreter (so a
+closure can be handed to `y.map`, `y.filter`, `y.reduce`, `y.sort`, or
+`y.each` and behave the same either way). `try`/`catch`/`throw` is native
+VM control flow, meaning a `throw` several function calls deep is caught
+correctly by an enclosing `try`, without going through the tree-walking
+interpreter at all.
 
-The VM is a **subset compiler** for v2.0 — it recognizes constructs it
-doesn't yet support and automatically falls back to running the whole
-program through the standard AST interpreter, rather than producing
-incorrect output:
+### What still falls back to the AST interpreter
+
+A small number of things aren't compiled by the VM yet:
 
 | Feature | Status |
 |---------|--------|
-| Structs and `impl` methods | Falls back |
-| Closures that capture outer variables | Falls back |
-| `match` expressions | Falls back |
-| `try` / `catch` / `throw` | Falls back |
-| `enum` | Falls back |
-| `@intent` / `@audit` annotations | Falls back |
-| `import` | Falls back |
 | String interpolation (`"Hello {name}"`) | Falls back |
+| `@intent` / `@audit` annotations | Falls back |
 
 When a fallback happens, `ys vm` prints which construct triggered it to
-stderr, then transparently runs the whole file through `eval_program()` —
-the program's behavior and output are identical either way; only the
-execution path differs.
+stderr, then transparently runs the whole file through the AST
+interpreter. The program's output is identical either way, only the
+execution path differs, so a fallback never produces wrong results, just
+a slower run.
 
 ```yolish
--- this runs entirely on the VM, ~36x faster on deep recursion
+-- runs entirely on the VM
 fn fib(n) {
     if n <= 1 { return n }
     return fib(n-1) + fib(n-2)
@@ -2245,22 +2254,30 @@ y.println(fib(27))
 ```
 
 ```yolish
--- this falls back to the AST interpreter (struct + impl not yet
--- supported by the VM's bcompiler.c) — output is still correct
+-- also runs entirely on the VM: structs, impl methods, closures,
+-- try/catch, enums, and match all compile now
 struct Point { x  y }
 impl Point {
     fn dist(self) { return y.math.sqrt(self.x*self.x + self.y*self.y) }
 }
 let p = Point { x: 3  y: 4 }
 y.println(p.dist())
+
+fn make_adder(n) {
+    return fn(x) { return x + n }
+}
+let add5 = make_adder(5)
+y.println(add5(10))
 ```
 
 ### Notes
 
-- `ys vm` is experimental — use `ys file.y` (the AST interpreter) for
-  anything going to production until full language coverage lands
-- Closures, structs, match, and the rest of the fallback list are
-  planned for future v2.0.x point releases as the bcompiler subset grows
-- The VM shares the exact same GC, `Val` representation, and the
-  complete builtin table with the AST interpreter — there are no
-  separate implementations to keep in sync for *those* parts
+- `ys vm` is stable enough for everyday use, but the AST interpreter
+  remains the reference implementation. If the two ever disagree on a
+  program's output, that is a bug in the VM, not a language difference.
+- The VM shares the same GC, `Val` representation, and the complete
+  builtin table with the AST interpreter, so there is only one
+  implementation of the builtins to keep correct.
+- String interpolation is the main remaining gap. It needs a small
+  amount of runtime support to compile, and is the next thing planned
+  for the bytecode compiler.

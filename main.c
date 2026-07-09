@@ -25,7 +25,7 @@ int  ys_check(Node *prog, const char *filename);
 /*  REPL */
 
 static void run_repl(void){
-    fprintf(stdout,"  Yolish v2.6 (Exploidus Runtime)\n");
+    fprintf(stdout,"  Yolish v2.8 (Exploidus Runtime)\n");
     fprintf(stdout,"  Type \"help\" or \"exit\" to quit.\n\n");
 
     Env *env=env_new(NULL);
