@@ -78,9 +78,34 @@ static void add_reloc(RelocKind k, int code_off, int target_off){
    emitted an extra stray byte here, misaligning the instruction stream)
    and records the disp32 offset via RELOC_CODE so pe_write can patch it
    to point at the real IAT slot once section layout is known. */
+/* forward decl: g_target is defined further below, but the ABI helpers
+   right after add_import_call() need to branch on it */
+static Target g_target;
+
 static void add_import_call(int import_idx){
     emit2(0xff,0x15);
     add_reloc(RELOC_CODE, code_len, import_idx);
+    emit_i32(0);
+}
+
+/* Move rax into the 1st/2nd integer-argument register per target ABI.
+   SysV (Linux/macOS): arg1=rdi, arg2=rsi.  Microsoft x64 (Windows): arg1=rcx, arg2=rdx.
+   Every call site that hands scalar args to a runtime helper (__ys_print_str,
+   __ys_print_int, __ys_exit, ...) MUST go through these, or the callee reads
+   garbage registers on Windows even though the exact same code "works" on Linux. */
+static void x_arg1_from_rax(void){
+    if(g_target==TARGET_WINDOWS) emit3(0x48,0x89,0xc1); /* mov rcx,rax */
+    else                         emit3(0x48,0x89,0xc7); /* mov rdi,rax */
+}
+static void x_arg2_from_rax(void){
+    if(g_target==TARGET_WINDOWS) emit3(0x48,0x89,0xc2); /* mov rdx,rax */
+    else                         emit3(0x48,0x89,0xc6); /* mov rsi,rax */
+}
+/* lea <arg1-reg>, [rip+data_off]  (records the RELOC_DATA fixup) */
+static void x_lea_arg1_data(int data_off){
+    if(g_target==TARGET_WINDOWS) emit3(0x48,0x8d,0x0d); /* lea rcx,[rip+..] */
+    else                         emit3(0x48,0x8d,0x3d); /* lea rdi,[rip+..] */
+    add_reloc(RELOC_DATA,code_len,data_off);
     emit_i32(0);
 }
 
@@ -580,13 +605,12 @@ static void compile_expr(Node *n){
                     /* string literal: print_str(ptr, len) */
                     int off=data_add_str(arg->sval);
                     int len=ystrlen(arg->sval);
-                    emit3(0x48,0x8d,0x3d); /* lea rdi,[rip+...] */
-                    add_reloc(RELOC_DATA,code_len,off); emit_i32(0);
+                    x_lea_arg1_data(off);
                     x_mov_rax_imm32(len);
-                    emit3(0x48,0x89,0xc6); /* mov rsi,rax */
+                    x_arg2_from_rax();
                     int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str");
                 } else {
-                    compile_expr(arg); emit3(0x48,0x89,0xc7);
+                    compile_expr(arg); x_arg1_from_rax();
                     if(g_last_float){ int p=x_call_unresolved(); add_call_patch(p,"__ys_print_float"); }
                     else { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_int"); }
                 }
@@ -603,12 +627,11 @@ static void compile_expr(Node *n){
                 if(arg&&arg->kind==ND_STR){
                     int off=data_add_str(arg->sval);
                     int len=ystrlen(arg->sval);
-                    emit3(0x48,0x8d,0x3d);
-                    add_reloc(RELOC_DATA,code_len,off); emit_i32(0);
-                    x_mov_rax_imm32(len); emit3(0x48,0x89,0xc6);
+                    x_lea_arg1_data(off);
+                    x_mov_rax_imm32(len); x_arg2_from_rax();
                     int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str");
                 } else if(arg){
-                    compile_expr(arg); emit3(0x48,0x89,0xc7);
+                    compile_expr(arg); x_arg1_from_rax();
                     if(g_last_float){ int p=x_call_unresolved(); add_call_patch(p,"__ys_print_float"); }
                     else { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_int"); }
                 }
@@ -619,8 +642,8 @@ static void compile_expr(Node *n){
         /* y.exit(code) */
         if(strcmp(fn,"exit")==0||strcmp(fn,"y.exit")==0){
             Node *arg=(n->argc>0)?((n->left)?n->args[1]:n->args[0]):NULL;
-            if(arg){ compile_expr(arg); emit3(0x48,0x89,0xc7); }
-            else { x_mov_rax_imm32(0); emit3(0x48,0x89,0xc7); }
+            if(arg){ compile_expr(arg); x_arg1_from_rax(); }
+            else { x_mov_rax_imm32(0); x_arg1_from_rax(); }
             int p=x_call_unresolved(); add_call_patch(p,"__ys_exit");
             break;
         }
@@ -1000,7 +1023,7 @@ void ys_compile(Node *prog, Target target, const char *outfile){
 
     /* exit(0) */
     x_mov_rax_imm32(0);
-    emit3(0x48,0x89,0xc7); /* mov rdi,rax */
+    x_arg1_from_rax();
     int ep=x_call_unresolved(); add_call_patch(ep,"__ys_exit");
 
     x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
