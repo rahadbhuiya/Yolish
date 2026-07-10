@@ -244,6 +244,8 @@ static int x_jmp_rel32(){ emit1(0xe9); int p=code_len; emit_i32(0); return p; }
 static int x_jz_rel32(){  emit2(0x0f,0x84); int p=code_len; emit_i32(0); return p; }
 /* jnz rel32 */
 static int x_jnz_rel32(){ emit2(0x0f,0x85); int p=code_len; emit_i32(0); return p; }
+/* jg rel32 (signed greater-than) */
+static int x_jg_rel32(){  emit2(0x0f,0x8f); int p=code_len; emit_i32(0); return p; }
 
 /* patch jump at patch_off to jump to here */
 static void x_patch_here(int patch_off){
@@ -977,6 +979,53 @@ static void emit_win32_helpers(void){
     helper_exit_off=code_len;
     add_import_call(2); /* call [rip+ExitProcess_IAT] */
     x_ret();
+
+    /* __ys_win_maybe_pause(): if this process is the ONLY one attached to
+       its console, that console was auto-created by Explorer because the
+       .exe was double-clicked (rather than inherited from an existing
+       cmd.exe) — in that case Windows destroys the window the instant the
+       process exits, so any printed output disappears before it can be
+       read. Detect this with GetConsoleProcessList() (returns 1 if we're
+       the sole owner) and, only then, prompt + wait for Enter. When
+       launched from an existing terminal, GetConsoleProcessList() returns
+       >1 and we skip straight through — no extra keypress needed there. */
+    sym_define("__ys_win_maybe_pause", code_len);
+    x_push_rbp(); x_mov_rbp_rsp();
+    x_sub_rsp_i8(0x60); /* 32 shadow + pid buf(8) + read buf/count locals */
+
+    /* GetConsoleProcessList(&pids, 2) -> eax = attached process count */
+    emit3(0x48,0x8d,0x4d); emit1(0xf0);   /* lea rcx,[rbp-0x10] (pid buffer) */
+    emit1(0xba); emit_i32(2);             /* mov edx,2 */
+    add_import_call(3);                   /* call [rip+GetConsoleProcessList_IAT] */
+    emit3(0x83,0xf8,0x01);                /* cmp eax,1 */
+    int jg_skip=x_jg_rel32();             /* if count>1: skip pause entirely */
+
+    /* print "\nPress Enter to continue . . . " */
+    {
+        static const char *msg="\nPress Enter to continue . . . ";
+        int moff=data_add_str(msg);
+        int mlen=ystrlen(msg);
+        x_lea_arg1_data(moff);
+        x_mov_rax_imm32(mlen); x_arg2_from_rax();
+        int pp=x_call_unresolved(); add_call_patch(pp,"__ys_print_str");
+    }
+
+    /* GetStdHandle(STD_INPUT_HANDLE = -10) -> rax = console input handle */
+    emit3(0x48,0xc7,0xc1); emit_i32(-10); /* mov rcx,-10 */
+    add_import_call(0);                   /* call [rip+GetStdHandle_IAT] */
+
+    /* ReadFile(handle, buf=[rbp-0x20], 1, &read=[rbp-0x30], NULL) —
+       a console handle in default (line-buffered) mode blocks until the
+       user presses Enter, which is exactly the wait we want. */
+    emit3(0x48,0x89,0xc1);                /* mov rcx,rax (handle) */
+    emit3(0x48,0x8d,0x55); emit1(0xe0);   /* lea rdx,[rbp-0x20] (buf) */
+    emit2(0x41,0xb8); emit_i32(1);        /* mov r8d,1 (nNumberOfBytesToRead) */
+    emit3(0x4c,0x8d,0x4d); emit1(0xd0);   /* lea r9,[rbp-0x30] (&bytesRead) */
+    emit4(0x48,0xc7,0x44,0x24); emit1(0x20); emit_i32(0); /* [rsp+0x20]=NULL (full 8 bytes) */
+    add_import_call(4);                   /* call [rip+ReadFile_IAT] */
+
+    x_patch_here(jg_skip); /* skip_pause: */
+    x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
 }
 
 /*  compile_program  */
@@ -1022,6 +1071,13 @@ void ys_compile(Node *prog, Target target, const char *outfile){
     /* call __ys_main() if user defined a main() function */
     if(sym_find("__ys_main")>=0){
         int pm=x_call_unresolved(); add_call_patch(pm,"__ys_main");
+    }
+
+    /* On Windows, give double-click-launched consoles a chance to show
+       their output before the window disappears (see __ys_win_maybe_pause
+       for why this is skipped automatically when run from cmd.exe). */
+    if(target==TARGET_WINDOWS){
+        int pp=x_call_unresolved(); add_call_patch(pp,"__ys_win_maybe_pause");
     }
 
     /* exit(0) */

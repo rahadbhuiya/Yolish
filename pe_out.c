@@ -29,9 +29,11 @@
 /* import directory: kernel32 imports */
 typedef struct { uint32_t rva; char name[64]; } WinImport;
 static WinImport win_imports[]={
-    {0,"GetStdHandle"},
-    {0,"WriteFile"},
-    {0,"ExitProcess"},
+    {0,"GetStdHandle"},        /* index 0 */
+    {0,"WriteFile"},           /* index 1 */
+    {0,"ExitProcess"},         /* index 2 */
+    {0,"GetConsoleProcessList"}, /* index 3 — detect double-click-owned console */
+    {0,"ReadFile"},            /* index 4 — used for the "press enter" pause */
 };
 #define N_IMPORTS (sizeof(win_imports)/sizeof(win_imports[0]))
 static uint64_t import_thunks[N_IMPORTS];  /* filled in: VA of IAT entries */
