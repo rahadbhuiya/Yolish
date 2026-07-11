@@ -39,10 +39,12 @@ typedef enum {
     OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LE, OP_GE,
     OP_AND, OP_OR,
+    OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR, /* bitwise: &, |, ^, <<, >> */
 
     /*  unary (pop a, push OP a)  */
     OP_NEG,           /* numeric negate */
     OP_NOT,           /* boolean not */
+    OP_BNOT,          /* bitwise not (~) */
 
     /*  variables  */
     OP_GET_LOCAL,     /* operand: u16 slot → push frame->slots[slot] */

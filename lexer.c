@@ -184,6 +184,8 @@ Token lex_next(Lexer *l){
     if(c=='.'&&*p<end&&s[*p]=='.'){t.kind=TK_DOTDOT;    t.len=2;(*p)++;return t;}
     if(c=='&'&&*p<end&&s[*p]=='&'){t.kind=TK_AND;       t.len=2;(*p)++;return t;}
     if(c=='|'&&*p<end&&s[*p]=='|'){t.kind=TK_OR;        t.len=2;(*p)++;return t;}
+    if(c=='<'&&*p<end&&s[*p]=='<'){t.kind=TK_SHL;       t.len=2;(*p)++;return t;}
+    if(c=='>'&&*p<end&&s[*p]=='>'){t.kind=TK_SHR;       t.len=2;(*p)++;return t;}
 
     switch(c){
     case '+': t.kind=TK_PLUS;      break;
@@ -206,6 +208,10 @@ Token lex_next(Lexer *l){
     case ',': t.kind=TK_COMMA;     break;
     case ':': t.kind=TK_COLON;     break;
     case ';': t.kind=TK_SEMICOLON; break;
+    case '&': t.kind=TK_AMP;       break;
+    case '|': t.kind=TK_PIPE;      break;
+    case '^': t.kind=TK_CARET;     break;
+    case '~': t.kind=TK_TILDE;     break;
     default:  t.kind=TK_EOF;       break;
     }
     return t;

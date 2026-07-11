@@ -8,10 +8,23 @@
 #  include <sys/stat.h>
 #  include <dirent.h>
 #  include <unistd.h>
+#  include <sys/socket.h>
+#  include <netinet/in.h>
+#  include <netinet/tcp.h>
+#  include <arpa/inet.h>
+#  include <netdb.h>
+#  include <fcntl.h>
+#  include <errno.h>
+#  define YS_SOCK_INVALID (-1)
 #else
 #  include <direct.h>
 #  include <windows.h>
 #  include <io.h>
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+   /* NOTE: building ys.exe on Windows with this file requires linking
+      against ws2_32 (e.g. `gcc ... -lws2_32` or add ws2_32.lib in MSVC). */
+#  define YS_SOCK_INVALID INVALID_SOCKET
 #endif
 
 /*  Memory pools  */
@@ -155,6 +168,8 @@ static void gc_mark_val(Val *v){
     if(v->sval)       gc_mark_str(v->sval);   /* v2.4: dynamic string */
     if(v->arr_data)   gc_mark_ptr(v->arr_data);
     if(v->field_vals) gc_mark_ptr(v->field_vals);
+    if(v->map_keys)   gc_mark_ptr(v->map_keys);
+    if(v->map_vals)   gc_mark_ptr(v->map_vals);
     /* closure environment — scan its local bindings */
     if(v->type == YS_FN && v->fn_env){
         Env *fe = (Env*)v->fn_env;
@@ -302,6 +317,7 @@ Val make_nil(void){
     r.fn_node=0; r.fn_env=0; r.cap_fd=-1; r.cap_perm=0;
     r.cap_path[0]=0; r.arr_data=0; r.arr_len=0; r.arr_cap=0;
     r.struct_name[0]=0; r.field_vals=0; r.field_names=0; r.field_count=0;
+    r.map_keys=0; r.map_vals=0; r.map_len=0; r.map_cap=0;
     return r;
 }
 Val make_int(int64_t v){Val r=make_nil();r.type=YS_INT;r.ival=v;return r;}
@@ -418,6 +434,246 @@ void ys_print_val(Val v){
 /*  Forward  */
 Val eval_block(Node *b,Env *parent);
 static Val call_builtin(const char *name,Node **args,int argc,Env *env);
+
+/*
+   Networking support (Batch 1: TCP client sockets)
+   ---------------------------------------------------
+   Exposes:
+     y.net.connect(host, port)  -> socket handle (int) or -1
+     y.net.send(sock, data)     -> bytes sent (int) or -1
+     y.net.recv(sock, maxlen)   -> received data (string, "" on EOF/error)
+     y.net.close(sock)          -> nil
+     y.net.last_error()         -> string describing the last failure
+
+   This lives in call_builtin() so it works identically from the
+   tree-walking interpreter AND the bytecode VM (call_builtin_public()
+   below wraps VM values through the same function). It does NOT yet
+   cover the ahead-of-time native compiler (-c / --target ...) — that
+   needs raw syscalls/WinAPI emitted directly into machine code and is
+   tracked as a separate, later batch.
+*/
+static char g_net_err[256] = {0};
+
+static void ys_net_set_err(const char *msg){
+    int i=0; while(msg[i]&&i<255){ g_net_err[i]=msg[i]; i++; } g_net_err[i]=0;
+}
+
+#ifdef _WIN32
+static int g_wsa_ready=0;
+static void ys_net_ensure_init(void){
+    if(g_wsa_ready) return;
+    WSADATA wsa;
+    if(WSAStartup(MAKEWORD(2,2), &wsa)==0) g_wsa_ready=1;
+    else ys_net_set_err("WSAStartup failed");
+}
+typedef SOCKET ys_sock_t;
+#else
+static void ys_net_ensure_init(void){ /* no-op on POSIX */ }
+typedef int ys_sock_t;
+#endif
+
+/* connect(2)/getaddrinfo — returns the OS socket handle as a plain
+   integer (cast to int64_t), or -1 on failure with g_net_err set. */
+static int64_t ys_net_connect(const char *host, int port){
+    ys_net_ensure_init();
+    char portbuf[16];
+    snprintf(portbuf,sizeof(portbuf),"%d",port);
+
+    struct addrinfo hints, *res=NULL, *rp;
+    memset(&hints,0,sizeof(hints));
+    hints.ai_family=AF_UNSPEC;
+    hints.ai_socktype=SOCK_STREAM;
+
+    int gai=getaddrinfo(host, portbuf, &hints, &res);
+    if(gai!=0 || !res){
+        ys_net_set_err("could not resolve host");
+        return -1;
+    }
+
+    ys_sock_t s = YS_SOCK_INVALID;
+    for(rp=res; rp; rp=rp->ai_next){
+        s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if(s==YS_SOCK_INVALID) continue;
+        if(connect(s, rp->ai_addr, (int)rp->ai_addrlen)==0) break; /* success */
+#ifdef _WIN32
+        closesocket(s);
+#else
+        close(s);
+#endif
+        s = YS_SOCK_INVALID;
+    }
+    freeaddrinfo(res);
+
+    if(s==YS_SOCK_INVALID){
+        ys_net_set_err("connect failed");
+        return -1;
+    }
+    return (int64_t)s;
+}
+
+static int64_t ys_net_send(int64_t sock, const char *data, int len){
+    ys_sock_t s=(ys_sock_t)sock;
+#ifdef _WIN32
+    int n=send(s,data,len,0);
+#else
+    ssize_t n=send(s,data,(size_t)len,0);
+#endif
+    if(n<0){ ys_net_set_err("send failed"); return -1; }
+    return (int64_t)n;
+}
+
+/* returns bytes read into buf (caller-provided, size maxlen), or -1 on
+   error; 0 means the peer closed the connection (EOF), not an error. */
+static int64_t ys_net_recv(int64_t sock, char *buf, int maxlen){
+    ys_sock_t s=(ys_sock_t)sock;
+#ifdef _WIN32
+    int n=recv(s,buf,maxlen,0);
+#else
+    ssize_t n=recv(s,buf,(size_t)maxlen,0);
+#endif
+    if(n<0){ ys_net_set_err("recv failed"); return -1; }
+    return (int64_t)n;
+}
+
+static void ys_net_close(int64_t sock){
+    ys_sock_t s=(ys_sock_t)sock;
+#ifdef _WIN32
+    closesocket(s);
+#else
+    close(s);
+#endif
+}
+
+/*
+   Hashmap (y.map.*)
+   -----------------
+   Open-addressing hash table with linear probing, storing parallel
+   Val arrays (map_keys/map_vals) directly on the Val struct itself —
+   same GC-tracked-buffer pattern as arr_data/field_vals. Keys must be
+   YS_STR, YS_INT, or YS_BOOL (the hashable, comparable-by-value cases);
+   anything else is rejected by the y.map.set/get/... builtins.
+
+   DESIGN NOTE (documented in DOCS.md): unlike y.push/y.pop, which are
+   explicitly immutable (always return a new array), maps are mutated
+   IN PLACE through their shared map_keys/map_vals pointers — the usual
+   hashmap contract, and necessary for O(1) amortized inserts. This is
+   a deliberate, documented exception to the array convention.
+*/
+static uint64_t ys_map_hash(Val *k){
+    if(k->type==YS_STR){
+        uint64_t h=1469598103934665603ULL; /* FNV-1a */
+        for(int i=0;i<k->slen;i++){ h^=(unsigned char)k->sval[i]; h*=1099511628211ULL; }
+        return h;
+    }
+    uint64_t x=(uint64_t)val_int(*k); /* covers YS_INT and YS_BOOL */
+    x=(x^(x>>30))*0xbf58476d1ce4e5b9ULL;
+    x=(x^(x>>27))*0x94d049bb133111ebULL;
+    x=x^(x>>31);
+    return x;
+}
+static int ys_map_keys_equal(Val *a, Val *b){
+    if(a->type==YS_STR && b->type==YS_STR){
+        if(a->slen!=b->slen) return 0;
+        return memcmp(a->sval,b->sval,(size_t)a->slen)==0;
+    }
+    if(a->type==YS_STR || b->type==YS_STR) return 0;
+    return val_int(*a)==val_int(*b);
+}
+static int ys_map_slot_empty(Val *k){ return k->type==YS_NIL && k->ival==0; }
+static int ys_map_slot_tomb(Val *k){  return k->type==YS_NIL && k->ival==1; }
+
+static void ys_map_init(Val *m, int cap){
+    if(cap<8) cap=8;
+    m->type=YS_MAP;
+    m->map_keys=gc_alloc(cap);
+    m->map_vals=gc_alloc(cap);
+    m->map_len=0;
+    m->map_cap=cap;
+}
+
+/* Returns the slot index for key k. *found=1 + index of the live entry
+   if k is present; *found=0 + index of the first empty/tombstone slot
+   along the probe sequence otherwise (i.e. where to insert). map_cap is
+   always a power of two so `& (cap-1)` is a valid fast modulo. */
+static int ys_map_find_slot(Val *m, Val *k, int *found){
+    uint64_t h=ys_map_hash(k);
+    int cap=m->map_cap;
+    int idx=(int)(h & (uint64_t)(cap-1));
+    int first_free=-1;
+    for(int probe=0; probe<cap; probe++){
+        int i=(idx+probe)&(cap-1);
+        Val *slotkey=&m->map_keys[i];
+        if(ys_map_slot_empty(slotkey)){ *found=0; return (first_free>=0)?first_free:i; }
+        if(ys_map_slot_tomb(slotkey)){ if(first_free<0) first_free=i; continue; }
+        if(ys_map_keys_equal(slotkey,k)){ *found=1; return i; }
+    }
+    *found=0;
+    return (first_free>=0)?first_free:0;
+}
+
+static void ys_map_grow(Val *m){
+    int old_cap=m->map_cap;
+    Val *old_keys=m->map_keys;
+    Val *old_vals=m->map_vals;
+    Val new_m; ys_map_init(&new_m, old_cap*2);
+    for(int i=0;i<old_cap;i++){
+        if(!ys_map_slot_empty(&old_keys[i]) && !ys_map_slot_tomb(&old_keys[i])){
+            int found=0;
+            int slot=ys_map_find_slot(&new_m,&old_keys[i],&found);
+            new_m.map_keys[slot]=old_keys[i];
+            new_m.map_vals[slot]=old_vals[i];
+            new_m.map_len++;
+        }
+    }
+    m->map_keys=new_m.map_keys;
+    m->map_vals=new_m.map_vals;
+    m->map_cap=new_m.map_cap;
+}
+
+/* Mutates m in place — see the DESIGN NOTE above. Grows past 70% load. */
+static void ys_map_set(Val *m, Val k, Val v){
+    if(m->type!=YS_MAP || !m->map_keys) ys_map_init(m,8);
+    if((m->map_len+1)*10 >= m->map_cap*7) ys_map_grow(m);
+    int found=0;
+    int slot=ys_map_find_slot(m,&k,&found);
+    m->map_keys[slot]=k;
+    m->map_vals[slot]=v;
+    if(!found) m->map_len++;
+}
+static Val *ys_map_get(Val *m, Val k){
+    if(m->type!=YS_MAP || !m->map_keys) return NULL;
+    int found=0;
+    int slot=ys_map_find_slot(m,&k,&found);
+    return found?&m->map_vals[slot]:NULL;
+}
+static int ys_map_delete(Val *m, Val k){
+    if(m->type!=YS_MAP || !m->map_keys) return 0;
+    int found=0;
+    int slot=ys_map_find_slot(m,&k,&found);
+    if(!found) return 0;
+    m->map_keys[slot]=make_nil(); m->map_keys[slot].ival=1; /* tombstone */
+    m->map_vals[slot]=make_nil();
+    m->map_len--;
+    return 1;
+}
+static int ys_map_key_ok(Val *k){ return k->type==YS_STR||k->type==YS_INT||k->type==YS_BOOL; }
+
+/* Recomputes live entry count by scanning, rather than trusting the
+   cached map_len field. map_len is a plain scalar, so mutating it on
+   one Val "copy" (e.g. inside a builtin that receives m by value) does
+   NOT propagate to every other copy of the same map still holding the
+   same underlying map_keys/map_vals buffer — only pointer fields share
+   state automatically. Scanning is the only way to get a length that's
+   correct no matter which copy — or which execution engine (tree-walk
+   interpreter vs bytecode VM, which run builtins through independent
+   variable-storage mechanisms) — is asking. */
+static int ys_map_count_live(Val *m){
+    if(m->type!=YS_MAP || !m->map_keys) return 0;
+    int n2=0;
+    for(int i=0;i<m->map_cap;i++)
+        if(!ys_map_slot_empty(&m->map_keys[i]) && !ys_map_slot_tomb(&m->map_keys[i])) n2++;
+    return n2;
+}
 
 /*  Safe eval: always reads g_return_val after eval_node  */
 #define EVAL_SAFE(n, env, dest) do {     eval_node((n),(env));     memcpy(&(dest), &g_return_val, sizeof(Val)); } while(0)
@@ -916,6 +1172,11 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         case TK_GTE:  return make_bool(use_f?val_float(L)>=val_float(R):val_int(L)>=val_int(R));
         case TK_AND:  return make_bool(val_bool(L)&&val_bool(R));
         case TK_OR:   return make_bool(val_bool(L)||val_bool(R));
+        case TK_AMP:   return make_int(val_int(L) &  val_int(R));
+        case TK_PIPE:  return make_int(val_int(L) |  val_int(R));
+        case TK_CARET: return make_int(val_int(L) ^  val_int(R));
+        case TK_SHL:   return make_int(val_int(L) << (val_int(R)&63));
+        case TK_SHR:   return make_int(val_int(L) >> (val_int(R)&63));
         default: return make_nil();
         }
     }
@@ -925,6 +1186,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         if(n->op==TK_MINUS)
             return v.type==YS_FLOAT?make_float(-v.fval):make_int(-val_int(v));
         if(n->op==TK_BANG) return make_bool(!val_bool(v));
+        if(n->op==TK_TILDE) return make_int(~val_int(v));
         return v;
     }
 
@@ -1131,7 +1393,20 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     }
 
     case ND_CALL:{
-        if(n->name[0]=='@'
+        /* BUGFIX: the shortcuts below match on n->name alone, which for
+           a dotted call is only the LAST segment (e.g. for y.map.len(x)
+           n->name is just "len") — so before this fix, any multi-level
+           namespaced call ending in one of these short names would
+           wrongly short-circuit to the unqualified builtin instead of
+           the real qualified one (y.map.len(m) silently called the
+           generic len() on the wrong argument shape). Restrict the
+           shortcut to single-hop calls: bare `len(x)` (n->left is NULL)
+           or `y.len(x)` (n->left is the plain "y" identifier, not a
+           deeper ND_DOT chain). Deeper chains fall through to the
+           qualified-name path below, as they should. */
+        int is_deep_chain = (n->left && n->left->kind==ND_DOT);
+        if(!is_deep_chain && (
+            n->name[0]=='@'
             ||strcmp_u(n->name,"y.print")==0 ||strcmp_u(n->name,"print")==0
             ||strcmp_u(n->name,"y.println")==0||strcmp_u(n->name,"println")==0
             ||strcmp_u(n->name,"y.input")==0  ||strcmp_u(n->name,"input")==0
@@ -1162,7 +1437,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
             ||strcmp_u(n->name,"assert_neq")==0
             ||strcmp_u(n->name,"assert_true")==0
             ||strcmp_u(n->name,"assert_false")==0
-            ||strcmp_u(n->name,"assert_nil")==0)
+            ||strcmp_u(n->name,"assert_nil")==0))
             return call_builtin(n->name,n->args,n->argc,env);
 
         /* dot calls — build fully qualified name (handles y.math.sqrt etc) */
@@ -1561,6 +1836,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         int s=(argc>1)?1:0;
         Val v=eval_node(args[s],env);
         if(v.type==YS_ARR) return make_int(v.arr_len);
+        if(v.type==YS_MAP) return make_int(ys_map_count_live(&v));
         return make_int(str_len_u(v.sval));
     }
     /* y.abs */
@@ -2159,14 +2435,29 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     }
 
     /*  y.string  */
+    /* y.string.repeat(s, n) → string
+       SECURITY FIX: this previously wrote up to 8188 bytes into a
+       512-byte STACK array (`char buf[512]` with a loop bound of
+       bi<8188) — a real stack buffer overflow for any s/n combo whose
+       total length exceeded 512 bytes. It also silently truncated
+       results past 8188 bytes. Now allocates a correctly-sized,
+       GC-tracked buffer up front and has no arbitrary cap. */
     if(strcmp_u(name,"y.string.repeat")==0){
         int s0=(argc>1)?1:0;
         Val sv=eval_node(args[s0],env);
         int n2=(int)val_int(eval_node(args[s0+1],env));
-        char buf[512]; int bi=0, slen=str_len_u(sv.sval);
-        for(int i=0;i<n2&&bi<8188;i++)
-            for(int j=0;j<slen&&bi<8188;j++) buf[bi++]=sv.sval[j];
-        buf[bi]=0; return make_str(buf);
+        int slen=sv.slen;
+        if(n2<0) n2=0;
+        if(slen<0) slen=0;
+        int64_t total=(int64_t)slen*(int64_t)n2;
+        if(total<0) total=0;
+        char *buf=gc_alloc_str((int)total+1);
+        int bi=0;
+        for(int i=0;i<n2;i++)
+            for(int j=0;j<slen;j++) buf[bi++]=sv.sval[j];
+        buf[bi]=0;
+        Val r=make_nil(); r.type=YS_STR; r.sval=buf; r.slen=bi;
+        return r;
     }
     if(strcmp_u(name,"y.string.starts_with")==0){
         int s0=(argc>1)?1:0;
@@ -2186,22 +2477,37 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         for(int i=0;i<pl;i++) if(sv.sval[sl-pl+i]!=pv.sval[i]){match=0;break;}
         return make_bool(match);
     }
+    /* y.string.replace(s, from, to) → string
+       SECURITY FIX: this previously wrote up to 8188 bytes into a
+       512-byte STACK array — the same overflow pattern as
+       y.string.repeat above. Rewritten as a two-pass measure-then-fill
+       into a correctly-sized, GC-tracked buffer with no arbitrary cap. */
     if(strcmp_u(name,"y.string.replace")==0){
         int s0=(argc>1)?1:0;
         Val sv=eval_node(args[s0],env);
         Val from=eval_node(args[s0+1],env);
         Val to=eval_node(args[s0+2],env);
-        int fl=str_len_u(from.sval), tl=str_len_u(to.sval);
-        char buf[512]; int bi=0, si=0, slen=str_len_u(sv.sval);
-        while(si<slen&&bi<8188){
+        int fl=from.slen, tl=to.slen, slen=sv.slen;
+        /* pass 1: compute exact output length */
+        int64_t outlen=0; int si=0;
+        while(si<slen){
             int match=(fl>0);
-            for(int i=0;i<fl&&match;i++) if(sv.sval[si+i]!=from.sval[i]) match=0;
-            if(match&&fl>0){
-                for(int i=0;i<tl&&bi<8188;i++) buf[bi++]=to.sval[i];
-                si+=fl;
-            } else { buf[bi++]=sv.sval[si++]; }
+            for(int i=0;i<fl&&match;i++) if(si+i>=slen||sv.sval[si+i]!=from.sval[i]) match=0;
+            if(match){ outlen+=tl; si+=fl; }
+            else { outlen+=1; si+=1; }
         }
-        buf[bi]=0; return make_str(buf);
+        char *buf=gc_alloc_str((int)outlen+1);
+        /* pass 2: fill */
+        int bi=0; si=0;
+        while(si<slen){
+            int match=(fl>0);
+            for(int i=0;i<fl&&match;i++) if(si+i>=slen||sv.sval[si+i]!=from.sval[i]) match=0;
+            if(match){ for(int i=0;i<tl;i++) buf[bi++]=to.sval[i]; si+=fl; }
+            else { buf[bi++]=sv.sval[si++]; }
+        }
+        buf[bi]=0;
+        Val r=make_nil(); r.type=YS_STR; r.sval=buf; r.slen=bi;
+        return r;
     }
     if(strcmp_u(name,"y.string.pad_left")==0){
         int s0=(argc>1)?1:0;
@@ -2402,21 +2708,33 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     }
 
 
-    /* y.fs.read(path) → string */
+    /* y.fs.read(path) → string
+       Fixed: previously used a fixed 8191-byte static buffer, silently
+       truncating any file larger than that. Now sizes the read buffer to
+       the file's actual size and is binary-safe end to end. */
     if(strcmp_u(name,"y.fs.read")==0){
         int s=(argc>1)?1:0;
         Val path_v=eval_node(args[s],env);
         if(g_throwing) return make_nil();
         FILE *fp=fopen(path_v.sval,"rb");
         if(!fp){ g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"y.fs.read: cannot open '%.100s'",path_v.sval); return make_nil(); }
-        static char fbuf[8192];
-        int n=(int)fread(fbuf,1,8191,fp);
+        fseek(fp,0,SEEK_END);
+        long sz=ftell(fp);
+        if(sz<0) sz=0;
+        fseek(fp,0,SEEK_SET);
+        char *buf=gc_alloc_str((int)sz+1);
+        long n=(long)fread(buf,1,(size_t)sz,fp);
         if(n<0) n=0;
-        fbuf[n]=0; fclose(fp);
-        return make_str(fbuf);
+        buf[n]=0; fclose(fp);
+        Val r=make_nil(); r.type=YS_STR; r.sval=buf; r.slen=(int)n;
+        return r;
     }
 
-    /* y.fs.write(path, data) → int (bytes written) */
+    /* y.fs.write(path, data) → int (bytes written)
+       Fixed: previously used str_len_u(data_v.sval), a null-terminated
+       length, which truncated writes at the first embedded 0x00 byte —
+       fatal for writing binary data (e.g. compiled executables). Now
+       uses data_v.slen, the value's real byte length. */
     if(strcmp_u(name,"y.fs.write")==0){
         int s=(argc>2)?1:0;
         Val path_v=eval_node(args[s],env);
@@ -2424,11 +2742,11 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         if(g_throwing) return make_nil();
         FILE *fp=fopen(path_v.sval,"wb");
         if(!fp){ g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"y.fs.write: cannot open '%.100s'",path_v.sval); return make_nil(); }
-        int n=(int)fwrite(data_v.sval,1,str_len_u(data_v.sval),fp);
+        int n=(int)fwrite(data_v.sval,1,(size_t)data_v.slen,fp);
         fclose(fp); return make_int(n);
     }
 
-    /* y.fs.append(path, data) → int */
+    /* y.fs.append(path, data) → int — same binary-safety fix as y.fs.write */
     if(strcmp_u(name,"y.fs.append")==0){
         int s=(argc>2)?1:0;
         Val path_v=eval_node(args[s],env);
@@ -2436,7 +2754,7 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         if(g_throwing) return make_nil();
         FILE *fp=fopen(path_v.sval,"ab");
         if(!fp) return make_int(-1);
-        int n=(int)fwrite(data_v.sval,1,str_len_u(data_v.sval),fp);
+        int n=(int)fwrite(data_v.sval,1,(size_t)data_v.slen,fp);
         fclose(fp); return make_int(n);
     }
 
@@ -3150,6 +3468,118 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     }
 
 
+
+    /* y.net.* — TCP client sockets (see ys_net_* helpers near top of file) */
+    if(strcmp_u(name,"y.net.connect")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_int(-1);
+        Val hv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val pv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        const char *host=(hv.type==YS_STR)?hv.sval:"";
+        int port=(int)val_int(pv);
+        return make_int(ys_net_connect(host,port));
+    }
+    if(strcmp_u(name,"y.net.send")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_int(-1);
+        Val sv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val dv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(dv.type!=YS_STR) return make_int(-1);
+        return make_int(ys_net_send(val_int(sv), dv.sval, dv.slen));
+    }
+    if(strcmp_u(name,"y.net.recv")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_str("");
+        Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        int maxlen=1024;
+        if(argc>s+1){ Val mv=eval_node(args[s+1],env); if(g_throwing) return make_nil(); maxlen=(int)val_int(mv); }
+        if(maxlen<=0) maxlen=1024;
+        char *buf=gc_alloc_str(maxlen+1);
+        int64_t n=ys_net_recv(val_int(sv), buf, maxlen);
+        if(n<=0){ return make_str(""); }
+        buf[n]=0;
+        Val r=make_nil(); r.type=YS_STR; r.sval=buf; r.slen=(int)n;
+        return r;
+    }
+    if(strcmp_u(name,"y.net.close")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        ys_net_close(val_int(sv));
+        return make_nil();
+    }
+    if(strcmp_u(name,"y.net.last_error")==0){
+        return make_str(g_net_err);
+    }
+
+    /* y.map.* — hashmap (see ys_map_* engine near top of file) */
+    if(strcmp_u(name,"y.map.new")==0){
+        Val m=make_nil(); ys_map_init(&m,8); return m;
+    }
+    if(strcmp_u(name,"y.map.set")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+3) return make_nil();
+        Val m=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val k=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        Val v=eval_node(args[s+2],env); if(g_throwing) return make_nil();
+        if(!ys_map_key_ok(&k)){ g_throwing=1; snprintf(g_throw_msg,sizeof(g_throw_msg),"y.map.set: key must be string, int, or bool"); return make_nil(); }
+        ys_map_set(&m,k,v);
+        /* persist the (possibly grown/reallocated) map back to the
+           variable, same pattern as array index-assignment uses */
+        if(args[s]->kind==ND_IDENT) env_set(env,args[s]->name,m);
+        return m;
+    }
+    if(strcmp_u(name,"y.map.get")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_nil();
+        Val m=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val k=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(!ys_map_key_ok(&k)) return make_nil();
+        Val *found=ys_map_get(&m,k);
+        return found?*found:make_nil();
+    }
+    if(strcmp_u(name,"y.map.has")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_bool(0);
+        Val m=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val k=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(!ys_map_key_ok(&k)) return make_bool(0);
+        return make_bool(ys_map_get(&m,k)!=NULL);
+    }
+    if(strcmp_u(name,"y.map.delete")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_bool(0);
+        Val m=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val k=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(!ys_map_key_ok(&k)) return make_bool(0);
+        int deleted=ys_map_delete(&m,k);
+        if(args[s]->kind==ND_IDENT) env_set(env,args[s]->name,m);
+        return make_bool(deleted);
+    }
+    if(strcmp_u(name,"y.map.len")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_int(0);
+        Val m=eval_node(args[s],env); if(g_throwing) return make_nil();
+        return make_int(ys_map_count_live(&m));
+    }
+    if(strcmp_u(name,"y.map.keys")==0||strcmp_u(name,"y.map.values")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val m=eval_node(args[s],env); if(g_throwing) return make_nil();
+        Val result=make_nil(); result.type=YS_ARR;
+        int n2=ys_map_count_live(&m);
+        result.arr_data=alloc_arr(n2>0?n2:1);
+        result.arr_len=0;
+        int want_keys=(strcmp_u(name,"y.map.keys")==0);
+        if(m.type==YS_MAP){
+            for(int i=0;i<m.map_cap;i++){
+                if(!ys_map_slot_empty(&m.map_keys[i]) && !ys_map_slot_tomb(&m.map_keys[i])){
+                    result.arr_data[result.arr_len++]=want_keys?m.map_keys[i]:m.map_vals[i];
+                }
+            }
+        }
+        return result;
+    }
 
     return make_nil();
 }

@@ -173,6 +173,11 @@ static void vm_binop(OpCode op){
         case OP_GE:  vm_push(make_bool(use_float?val_float(a)>=val_float(b):val_int(a)>=val_int(b))); return;
         case OP_AND: vm_push(make_bool(is_truthy(a)&&is_truthy(b))); return;
         case OP_OR:  vm_push(make_bool(is_truthy(a)||is_truthy(b))); return;
+        case OP_BAND: vm_push(make_int(val_int(a) &  val_int(b))); return;
+        case OP_BOR:  vm_push(make_int(val_int(a) |  val_int(b))); return;
+        case OP_BXOR: vm_push(make_int(val_int(a) ^  val_int(b))); return;
+        case OP_SHL:  vm_push(make_int(val_int(a) << (val_int(b)&63))); return;
+        case OP_SHR:  vm_push(make_int(val_int(a) >> (val_int(b)&63))); return;
         default: fprintf(stderr,"[ys vm] bad binop opcode %d\n",(int)op); vm_had_runtime_error=1;
     }
 }
@@ -206,6 +211,7 @@ static VMResult run(void){
             case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
             case OP_EQ: case OP_NEQ: case OP_LT: case OP_GT: case OP_LE: case OP_GE:
             case OP_AND: case OP_OR:
+            case OP_BAND: case OP_BOR: case OP_BXOR: case OP_SHL: case OP_SHR:
                 vm_binop((OpCode)op); break;
 
             case OP_NEG: {
@@ -214,6 +220,7 @@ static VMResult run(void){
                 break;
             }
             case OP_NOT: { Val a=vm_pop(); vm_push(make_bool(!is_truthy(a))); break; }
+            case OP_BNOT: { Val a=vm_pop(); vm_push(make_int(~val_int(a))); break; }
 
             case OP_GET_LOCAL: { int slot=read_u16(frame); vm_push(frame->slots[slot]); break; }
             case OP_SET_LOCAL: { int slot=read_u16(frame); frame->slots[slot]=vm_peek(0); break; }

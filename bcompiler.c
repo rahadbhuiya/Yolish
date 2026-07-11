@@ -339,6 +339,11 @@ static void compile_binop(Node *n){
         case TK_GTE:   emit_byte(OP_GE,line); break;
         case TK_AND:   emit_byte(OP_AND,line); break;
         case TK_OR:    emit_byte(OP_OR,line); break;
+        case TK_AMP:   emit_byte(OP_BAND,line); break;
+        case TK_PIPE:  emit_byte(OP_BOR,line); break;
+        case TK_CARET: emit_byte(OP_BXOR,line); break;
+        case TK_SHL:   emit_byte(OP_SHL,line); break;
+        case TK_SHR:   emit_byte(OP_SHR,line); break;
         default:
             fprintf(stderr,"[ys vm] unsupported binary operator at line %d\n",line);
             CUR->had_error=1;
@@ -349,6 +354,7 @@ static void compile_unop(Node *n){
     compile_node(n->left ? n->left : n->right);
     if(n->op==TK_MINUS) emit_byte(OP_NEG,n->line);
     else if(n->op==TK_BANG||n->op==TK_NOT) emit_byte(OP_NOT,n->line);
+    else if(n->op==TK_TILDE) emit_byte(OP_BNOT,n->line);
     else { fprintf(stderr,"[ys vm] unsupported unary operator at line %d\n",n->line); CUR->had_error=1; }
 }
 

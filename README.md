@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.6-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.9-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -21,7 +21,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.8 |
+| **Version** | v2.9 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -334,6 +334,7 @@ fn fetch_and_save(url, path) { ... }
 | **v1.7** | **Stdlib expansion, `y.json`, `y.time`, `y.env`, `y.path`** |
 | **v2.2** | **Enums, `enum Direction { N S E W }` + match integration** |
 | **v2.0-v2.6** | **Bytecode VM (`ys vm`) introduced in v2.0, reached full language coverage in v2.6: closures, try/catch/throw, enums, both forms of import, impl blocks, array index assignment** |
+| **v2.9** | **TCP networking (`y.net.*`, interpreter + VM), bitwise operators (`& \| ^ << >> ~`), hashmap (`y.map.*`), binary-safe `y.fs.*`, native-compile safety net (refuses to write a broken executable on unresolved symbols), Windows double-click console pause, two stack-overflow fixes in the string library** |
 
 ### Upcoming
 

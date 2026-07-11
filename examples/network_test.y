@@ -1,0 +1,5 @@
+sock = y.net.connect("google.com", 80)
+y.net.send(sock, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+resp = y.net.recv(sock, 200)
+y.net.close(sock)
+y.net.last_error()   

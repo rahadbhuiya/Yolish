@@ -859,17 +859,25 @@ static void compile_block(Node *b){
 
 /*  main entry  */
 
-/* resolve all call patches */
-static void resolve_calls(void){
+/* resolve all call patches — returns the number of symbols that
+   could not be resolved (e.g. a builtin like y.net.connect that isn't
+   implemented for native compilation yet). Callers must NOT write out
+   an executable when this is nonzero — the code contains raw call
+   rel32 instructions still pointing at placeholder offset 0, which
+   would jump to garbage at runtime instead of failing to build. */
+static int resolve_calls(void){
+    int nfail=0;
     for(int i=0;i<ncall_patches;i++){
         int target=sym_find(call_patches[i].target);
         if(target<0){
             fprintf(stderr,"ys: unresolved symbol: %s\n",call_patches[i].target);
+            nfail++;
             continue;
         }
         int off=call_patches[i].code_off;
         patch_i32(off,(int32_t)(target-(off+4)));
     }
+    return nfail;
 }
 
 /*  public compile function  */
@@ -1029,8 +1037,8 @@ static void emit_win32_helpers(void){
 }
 
 /*  compile_program  */
-void ys_compile(Node *prog, Target target, const char *outfile){
-    if(!prog){ fprintf(stderr,"ys: no AST to compile\n"); return; }
+int ys_compile(Node *prog, Target target, const char *outfile){
+    if(!prog){ fprintf(stderr,"ys: no AST to compile\n"); return 1; }
     g_target=target;
 
     code_len=0; data_len=0; nrelocs=0;
@@ -1093,7 +1101,14 @@ void ys_compile(Node *prog, Target target, const char *outfile){
     patch_i32(sub_patch+3,frame);
 
     /* resolve all calls */
-    resolve_calls();
+    int unresolved=resolve_calls();
+    if(unresolved>0){
+        fprintf(stderr,"ys: compile failed — %d unresolved symbol(s) "
+                        "(likely a builtin not yet supported for native "
+                        "compilation on this target); no file written.\n",
+                        unresolved);
+        return 1;
+    }
 
     /* collect reloc arrays */
     static int rc[RELOC_MAX], rd[RELOC_MAX]; int nr=0;
@@ -1124,4 +1139,5 @@ void ys_compile(Node *prog, Target target, const char *outfile){
         break;
     }
     if(ret==0) fprintf(stdout,"ys: compiled → %s\n",outfile);
+    return ret;
 }

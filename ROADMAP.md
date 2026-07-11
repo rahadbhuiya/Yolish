@@ -42,10 +42,20 @@ Exploidus, readable, safe, and practical.
 | **v2.4** | **Unlimited strings, `Val.sval`/`Node.sval` moved to the heap and GC-tracked, dynamic lexer string buffers; fixed a critical closure-corruption bug (self-referencing env parent chain) that had existed since v1.5's GC introduction** |
 | **v2.5** | **Unlimited variables per scope, `Env.names`/`Env.vals` converted from a fixed 48-slot array to a dynamically-growing heap array; also fixed seven builtin short-name aliases (`y.replace`, `y.join`, `y.repeat`, `y.starts_with`, `y.ends_with`, `y.reverse`, `y.index_of`) that were documented but silently returned `nil` because only their namespaced forms were registered |
 | **v2.6** | **Bytecode VM reaches full language coverage. `ys vm` now compiles for-in loops, `break`/`continue`, `match`/match guards, closures (dispatched through the tree-walking interpreter so they work with `y.map`/`y.filter`/`y.reduce`/`y.sort`/`y.each`), `try`/`catch`/`throw` (native VM frame unwinding, so a throw several calls deep is still caught correctly), `enum`, both forms of `import`, `impl` blocks and struct methods, and array index assignment. Only string interpolation and `@intent`/`@audit` annotations still fall back to the AST interpreter. Also fixed three interpreter bugs found while building this out: a loop-scoped local going stale after the first iteration, `g_returning` staying set after a caught throw and silently truncating the rest of the calling scope, and module functions being unable to reference other names from their own module** |
+| **v2.9** | **Windows PE backend fixes: correct RVA (not VA) in the import table, IAT call-site patching, Microsoft x64 ABI calling convention for `print`/`exit`, full 8-byte NULL for `WriteFile`'s `lpOverlapped`, and an auto-pause on double-click-launched consoles. Native compiler safety net: `ys -c` now refuses to write an executable if any symbol failed to resolve. TCP client sockets (`y.net.connect/send/recv/close/last_error`, interpreter + VM — native `-c` compilation not yet covered, see Upcoming). Bitwise operators (`& \| ^ << >> ~`, interpreter + VM + lexer/parser). Hashmap (`y.map.new/set/get/has/delete/keys/values/len`, open-addressing with automatic growth). Binary-safe `y.fs.read/write/append` (previously `y.fs.read` silently truncated at 8191 bytes and `y.fs.write`/`append` truncated at the first embedded NUL byte). Two stack buffer overflow fixes in `y.string.repeat`/`y.string.replace` (both wrote up to 8188 bytes into 512-byte stack arrays)** |
 
 ---
 
 ## Upcoming
+
+### v2.9: Networking (in progress)
+- Done: TCP client sockets (`y.net.connect/send/recv/close/last_error`),
+  tree-walking interpreter + bytecode VM
+- Pending: native compilation (`ys -c`) support — raw syscalls on Linux,
+  Winsock2 imports on Windows, BSD sockets via libSystem on macOS
+- Pending: UDP sockets
+- Pending: server-side (`listen`/`accept`)
+- Pending: HTTP client convenience wrapper built on top of TCP
 
 ### v1.8: Native Compiler Expansion
 - Exploidus OS native binary target
@@ -58,8 +68,17 @@ Exploidus, readable, safe, and practical.
   capture, match expressions, enums, try/catch, both forms of import,
   impl blocks, array index assignment). Only string interpolation and
   `@intent`/`@audit` annotations still fall back to the AST interpreter
+- Done: binary-safe `y.fs.read/write/append` — a self-hosted PE/ELF/Mach-O
+  writer needs to read arbitrary-size source files and write arbitrary
+  binary output without null-byte truncation
+- Done: bitwise operators (`& | ^ << >> ~`) — needed for emitting machine
+  code bytes, packing header flags, etc.
+- Done: hashmap (`y.map.*`) — needed for a real symbol table
 - Pending: String interpolation and annotation support in the VM
-- Pending: Yolish compiles itself
+- Pending: Yolish compiles itself — realistic next step is porting the
+  **lexer** first and diffing its token stream against the C lexer's,
+  then the parser, then the compiler backends, rather than attempting
+  the whole toolchain at once
 - Pending: Constant folding and dead code elimination
 
 ### v3.0: Exploidus Integration

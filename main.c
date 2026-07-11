@@ -25,7 +25,7 @@ int  ys_check(Node *prog, const char *filename);
 /*  REPL */
 
 static void run_repl(void){
-    fprintf(stdout,"  Yolish v2.8 (Exploidus Runtime)\n");
+    fprintf(stdout,"  Yolish v2.9 (Exploidus Runtime)\n");
     fprintf(stdout,"  Type \"help\" or \"exit\" to quit.\n\n");
 
     Env *env=env_new(NULL);
@@ -273,7 +273,8 @@ int main(int argc,char **argv){
             if(target==TARGET_WINDOWS) strcat(out_buf,".exe");
             outfile=out_buf;
         }
-        ys_compile(prog,target,outfile);
+        int rc=ys_compile(prog,target,outfile);
+        if(rc!=0) return 1;
     } else {
         Env *env=env_new(NULL);
         eval_program(prog,env);

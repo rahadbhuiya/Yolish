@@ -33,7 +33,7 @@ typedef enum {
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_GT, TK_LTE, TK_GTE,
     TK_AND, TK_OR, TK_NOT, TK_ARROW, TK_FAT_ARROW, TK_DOTDOT, TK_DOT,
-    TK_AMP, TK_PIPE, TK_CARET, TK_BANG,
+    TK_AMP, TK_PIPE, TK_CARET, TK_BANG, TK_SHL, TK_SHR, TK_TILDE,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE,
     TK_LBRACKET, TK_RBRACKET, TK_COMMA, TK_COLON,
     TK_SEMICOLON, TK_AT,
@@ -120,6 +120,16 @@ struct Val {
     Val     *field_vals;
     char   (*field_names)[32];
     int      field_count;
+    /* Hashmap storage (YS_MAP). Open-addressing hash table: map_keys[i]/
+       map_vals[i] are parallel slots, map_cap is always a power of two.
+       An empty slot has map_keys[i].type==YS_NIL && ival==0 (the zeroed
+       default); a deleted slot (tombstone, so probing keeps working)
+       has map_keys[i].type==YS_NIL && ival==1. map_len counts live
+       (non-empty, non-tombstone) entries. */
+    Val     *map_keys;
+    Val     *map_vals;
+    int      map_len;
+    int      map_cap;
 };
 
 /* Value type constants */
@@ -133,6 +143,7 @@ struct Val {
 #define YS_ARR    7
 #define YS_STRUCT 8
 #define YS_ERR    9
+#define YS_MAP    10
 
 /* Environment */
 /* v2.5: names/vals are now dynamically grown (start small, double on demand)
@@ -182,7 +193,7 @@ void  parser_pool_restore(void);
 extern char g_src_dir[512];
 /* compiler target — defined in compiler.c */
 typedef enum { TARGET_LINUX, TARGET_WINDOWS, TARGET_MACOS } Target;
-void ys_compile(Node *prog, Target target, const char *outfile);
+int ys_compile(Node *prog, Target target, const char *outfile);
 /* v2.1: exposed for main.c test runner */
 extern int  g_throwing;
 extern int  g_returning;

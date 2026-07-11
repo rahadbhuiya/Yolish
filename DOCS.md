@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.8  
+**Version:** v2.9  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -51,6 +51,9 @@
 41. [Static Checker: ys check](#41-static-checker-ys-check)
 42. [Formatter: ys fmt](#42-formatter-ys-fmt)
 43. [Bytecode VM: ys vm](#43-bytecode-vm-ys-vm)
+44. [Networking: y.net.*](#44-networking-ynet)
+45. [Bitwise Operators](#45-bitwise-operators)
+46. [Hashmap: y.map.*](#46-hashmap-ymap)
 
 ---
 
@@ -1758,6 +1761,11 @@ y.fs.delete(path)          -- delete file or empty directory (bool)
 y.fs.rename(old, new)      -- rename/move file (bool)
 ```
 
+> `y.fs.read/write/append` are binary-safe (as of v2.9) — strings with
+> embedded NUL bytes round-trip correctly, and `y.fs.read` reads the
+> whole file regardless of size (older versions truncated writes at the
+> first NUL byte and truncated reads at 8191 bytes).
+
 **Examples:**
 ```yolish
 -- Write and read
@@ -2281,3 +2289,136 @@ y.println(add5(10))
 - String interpolation is the main remaining gap. It needs a small
   amount of runtime support to compile, and is the next thing planned
   for the bytecode compiler.
+
+---
+
+## 44. Networking: y.net.*
+
+TCP client sockets. Available in the tree-walking interpreter (`ys file.y`)
+and the bytecode VM (`ys vm file.y`). **Not yet available under native
+compilation** (`ys -c` / `--target ...`) — see the roadmap for status;
+compiling a program that calls `y.net.*` fails cleanly at compile time
+rather than producing a broken executable.
+
+```yolish
+y.net.connect(host, port)  -- opens a TCP connection, returns a socket
+                            -- handle (int), or -1 on failure
+y.net.send(sock, data)     -- sends a string, returns bytes sent or -1
+y.net.recv(sock, maxlen)   -- reads up to maxlen bytes, returns a string
+                            -- ("" on EOF/closed connection or error)
+y.net.close(sock)          -- closes the socket
+y.net.last_error()         -- string describing the most recent y.net.*
+                            -- failure, for debugging
+```
+
+```yolish
+let sock = y.net.connect("example.com", 80)
+if sock == -1 {
+    y.println("connect failed: " + y.net.last_error())
+} else {
+    y.net.send(sock, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+    let resp = y.net.recv(sock, 4096)
+    y.println(resp)
+    y.net.close(sock)
+}
+```
+
+### Notes
+
+- `host` accepts both hostnames (resolved via `getaddrinfo`, so both IPv4
+  and IPv6 are tried) and literal IP addresses.
+- There is no automatic retry or timeout handling — `y.net.recv` blocks
+  until data arrives, the peer closes the connection, or an error occurs.
+- On Windows, building `ys` from source requires linking against
+  `ws2_32` (e.g. `gcc ... -lws2_32`, or add `ws2_32.lib` in MSVC).
+
+---
+
+## 45. Bitwise Operators
+
+```yolish
+a & b     -- bitwise AND
+a | b     -- bitwise OR
+a ^ b     -- bitwise XOR
+a << n    -- shift left
+a >> n    -- shift right (arithmetic, sign-preserving)
+~a        -- bitwise NOT (unary)
+```
+
+```yolish
+y.println(5 & 3)    -- 1
+y.println(5 | 2)    -- 7
+y.println(5 ^ 1)    -- 4
+y.println(1 << 4)   -- 16
+y.println(256 >> 4) -- 16
+y.println(~0)       -- -1
+```
+
+Operands are coerced to integers. Precedence (highest to lowest binds
+tighter): `* / %`  >  `+ -`  >  `<< >>`  >  comparisons  >  `&`  >  `^`
+`>` `|`  >  `&&`  >  `||`  — matching C's precedence ordering. Use
+parentheses when mixing bitwise and comparison/logical operators in the
+same expression if you're not sure, since this differs from some other
+languages (e.g. Python).
+
+Supported everywhere: lexer, parser, tree-walking interpreter, and the
+bytecode VM. Not yet supported in native compilation (`ys -c`).
+
+---
+
+## 46. Hashmap: y.map.*
+
+An open-addressing hash table with automatic growth. Keys must be
+`string`, `int`, or `bool`; values can be anything.
+
+```yolish
+y.map.new()             -- creates a new, empty map
+y.map.set(m, k, v)      -- inserts/updates a key, returns the map
+y.map.get(m, k)         -- returns the value, or nil if absent
+y.map.has(m, k)         -- bool: does the key exist?
+y.map.delete(m, k)      -- removes a key, returns bool (did it exist?)
+y.map.keys(m)           -- array of all keys
+y.map.values(m)         -- array of all values
+y.map.len(m)            -- number of entries
+```
+
+```yolish
+let m = y.map.new()
+m = y.map.set(m, "name", "Yolish")
+m = y.map.set(m, "version", 29)
+
+y.println(y.map.get(m, "name"))      -- Yolish
+y.println(y.map.has(m, "missing"))   -- false
+y.println(y.map.len(m))              -- 2
+
+for k in y.map.keys(m) {
+    y.println(k)
+}
+```
+
+### Important: maps mutate in place — unlike arrays
+
+`y.push`/`y.pop` are explicitly **immutable** — they always return a new
+array and never touch the original. Maps are the opposite, deliberately:
+**`y.map.set` and `y.map.delete` mutate the map in place**, through its
+internal shared storage, which is the usual hashmap contract and needed
+for reasonable performance (an immutable map would have to copy the whole
+table on every insert).
+
+- **`y.map.set`** — still reassign the result (`m = y.map.set(m, k, v)`).
+  A set can trigger the table to grow, which allocates a new internal
+  buffer; reassigning is what carries that new buffer back into your
+  variable. If you forget to reassign, small maps will often *appear* to
+  work anyway (since nothing grew yet) and then mysteriously stop working
+  once they cross the growth threshold — always reassign to be safe.
+- **`y.map.delete`** — do **not** reassign. It returns a `bool` (whether
+  the key existed), not the map. `y.map.delete(m, k)` as a bare statement
+  is correct and already mutates `m`; writing `m = y.map.delete(m, k)`
+  will overwrite your map variable with `true`/`false`.
+
+### Notes
+
+- Available in the tree-walking interpreter and the bytecode VM. Not yet
+  supported in native compilation (`ys -c`).
+- `y.len(m)` also works on maps (in addition to `y.map.len(m)`).
+- Load factor is capped at 70%; the table doubles in size automatically.
