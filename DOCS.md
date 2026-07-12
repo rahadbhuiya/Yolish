@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.10 
+**Version:** v2.10  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2304,11 +2304,16 @@ values.
 
 ```yolish
 y.net.connect(host, port)  -- opens a TCP connection, returns a socket
-                            -- handle (int), or -1 on failure
+                            -- handle (int), or -1 on failure/timeout
+                            -- (10s default connect timeout)
 y.net.send(sock, data)     -- sends a string, returns bytes sent or -1
 y.net.recv(sock, maxlen)   -- reads up to maxlen bytes, returns a string
                             -- ("" on EOF/closed connection or error)
 y.net.close(sock)          -- closes the socket
+y.net.listen(port)         -- binds + listens on 0.0.0.0:port (backlog
+                            -- 128), returns a listening socket, or -1
+y.net.accept(server_sock)  -- blocks until a client connects, returns a
+                            -- new connected socket for that client, or -1
 y.net.last_error()         -- string describing the most recent y.net.*
                             -- failure, for debugging
 ```
@@ -2325,11 +2330,38 @@ if sock == -1 {
 }
 ```
 
+A minimal echo server:
+
+```yolish
+let srv = y.net.listen(9000)
+while true {
+    let client = y.net.accept(srv)
+    let msg = y.net.recv(client, 1024)
+    y.net.send(client, msg)
+    y.net.close(client)
+}
+```
+
 `host` accepts both hostnames (resolved via `getaddrinfo`, IPv4 and IPv6
 both tried) and literal IP addresses.
 
 > On Windows, building `ys` from source requires linking against `ws2_32`
 > (e.g. `gcc ... -lws2_32`, or add `ws2_32.lib` in MSVC).
+
+### Notes
+
+- `y.net.connect` uses a non-blocking connect + a 10-second timeout
+  internally, rather than a bare blocking `connect()` — against an
+  unreachable or silently-filtered address, a bare blocking connect can
+  hang for the OS's own (often much longer) TCP timeout instead of
+  failing promptly.
+- `y.net.accept` has **no** timeout — it blocks until a client connects,
+  which is the normal shape of a server accept loop. This means the
+  echo server example above runs forever until killed; that's expected.
+- This is a single-threaded, one-connection-at-a-time server model —
+  handle one client fully (or at least far enough to hand it off) before
+  calling `accept` again. There's no built-in concurrency primitive yet
+  for handling multiple clients at once.
 
 ### Native compilation, Linux only (`ys -c file.y --target linux`)
 

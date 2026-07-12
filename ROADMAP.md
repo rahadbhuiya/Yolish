@@ -44,33 +44,35 @@ Exploidus, readable, safe, and practical.
 | **v2.6** | **Bytecode VM reaches full language coverage. `ys vm` now compiles for-in loops, `break`/`continue`, `match`/match guards, closures (dispatched through the tree-walking interpreter so they work with `y.map`/`y.filter`/`y.reduce`/`y.sort`/`y.each`), `try`/`catch`/`throw` (native VM frame unwinding, so a throw several calls deep is still caught correctly), `enum`, both forms of `import`, `impl` blocks and struct methods, and array index assignment. Only string interpolation and `@intent`/`@audit` annotations still fall back to the AST interpreter. Also fixed three interpreter bugs found while building this out: a loop-scoped local going stale after the first iteration, `g_returning` staying set after a caught throw and silently truncating the rest of the calling scope, and module functions being unable to reference other names from their own module** |
 | **v2.9** | **Windows PE backend fixes: correct RVA (not VA) in the import table, IAT call-site patching, Microsoft x64 ABI calling convention for `print`/`exit`, full 8-byte NULL for `WriteFile`'s `lpOverlapped`, and an auto-pause on double-click-launched consoles. Native compiler safety net: `ys -c` now refuses to write an executable if any symbol failed to resolve. TCP client sockets (`y.net.connect/send/recv/close/last_error`, interpreter + VM — native `-c` compilation not yet covered, see Upcoming). Bitwise operators (`& \| ^ << >> ~`, interpreter + VM + lexer/parser). Hashmap (`y.map.new/set/get/has/delete/keys/values/len`, open-addressing with automatic growth). Binary-safe `y.fs.read/write/append` (previously `y.fs.read` silently truncated at 8191 bytes and `y.fs.write`/`append` truncated at the first embedded NUL byte). Two stack buffer overflow fixes in `y.string.repeat`/`y.string.replace` (both wrote up to 8188 bytes into 512-byte stack arrays)** |
 | **v2.10** | **Native TCP networking on Linux (`ys -c file.y --target linux`): raw `socket`/`connect`/`read`/`write`/`close` syscalls, no libc — a hand-written IPv4 dotted-decimal parser (there's no DNS-resolution syscall to lean on), `y.net.connect/send/recv_print/close`. Along the way: fixed the ELF writer marking its data segment read-only, which made any runtime write into that segment (e.g. `recv`'s destination buffer) fail with EFAULT** |
+| **v2.11** | **Connect timeout (10s default, non-blocking connect + poll) for the interpreter/VM networking path — a bare blocking connect() to an unreachable address could previously hang for the OS's own TCP timeout. Server-side sockets, interpreter + VM (`y.net.listen/accept`), tested with a real two-process client/server exchange over both the tree-walking interpreter and the bytecode VM** |
 
 ---
 
 ## Upcoming
 
-### v2.10: Networking (in progress)
-- Done: TCP client sockets, interpreter + bytecode VM
+### v2.11: Networking (in progress)
+- Done: connect timeout (10s default) for the interpreter/VM path —
+  previously a bare blocking connect() to an unreachable address could
+  hang for the OS's own TCP timeout
+- Done: server-side sockets, interpreter + VM (`y.net.listen(port)`,
+  `y.net.accept(server_sock)`) — single-threaded, one connection at a
+  time; tested with a real two-process client/server exchange
+- Done (v2.10): TCP client sockets, native compilation on Linux (raw
+  syscalls, no libc) — narrower API: `y.net.connect/send/recv_print/
+  close`, IPv4 literal addresses and literal string data only
+- Done (v2.9): TCP client sockets, interpreter + bytecode VM
   (`y.net.connect/send/recv/close/last_error`) — hostnames, arbitrary
   receive length, string return values
-- Done: TCP client sockets, native compilation on Linux (raw syscalls,
-  no libc) — narrower API: `y.net.connect/send/recv_print/close`, IPv4
-  literal addresses and literal string data only (no hostnames, no
-  general runtime string type to receive into — see DOCS.md §44 for
-  why the shapes differ), no connect timeout
-- Pending: native compilation on Windows (Winsock2 imports — the
-  PE writer already supports multi-DLL imports as of the console-pause
-  work, so this is mainly wiring up ws2_32 calls the same way
-  kernel32 calls already work) and macOS (BSD sockets via libSystem —
-  needs the Mach-O writer to support dynamic linking first, currently
-  doesn't)
+- Pending: native compilation on Windows (Winsock2 imports) and macOS
+  (BSD sockets via libSystem, needs Mach-O dynamic linking first)
 - Pending: hostname resolution for native builds — needs either a
   hand-rolled DNS client (raw UDP) or dynamic linking against libc
+- Pending: native listen/accept (currently interpreter/VM only)
+- Pending: concurrency for the server path — right now handling a
+  second client means finishing (or at least accepting past) the first
+- Pending: recv timeout (accept and recv both still block indefinitely)
 - Pending: UDP sockets
-- Pending: server-side (`listen`/`accept`)
 - Pending: HTTP client convenience wrapper built on top of TCP
-- Pending: connect/recv timeouts (currently a bare blocking syscall in
-  both the interpreter's libc path and the native raw-syscall path)
 
 ### v1.8: Native Compiler Expansion
 - Exploidus OS native binary target

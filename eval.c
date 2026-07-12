@@ -15,6 +15,7 @@
 #  include <netdb.h>
 #  include <fcntl.h>
 #  include <errno.h>
+#  include <poll.h>
 #  define YS_SOCK_INVALID (-1)
 #else
 #  include <direct.h>
@@ -472,8 +473,14 @@ static void ys_net_ensure_init(void){ /* no-op on POSIX */ }
 typedef int ys_sock_t;
 #endif
 
+#define YS_NET_CONNECT_TIMEOUT_MS 10000  /* 10s default connect timeout */
+
 /* connect(2)/getaddrinfo — returns the OS socket handle as a plain
-   integer (cast to int64_t), or -1 on failure with g_net_err set. */
+   integer (cast to int64_t), or -1 on failure with g_net_err set.
+   Uses a non-blocking connect + poll() with a timeout rather than a
+   bare blocking connect(), which could otherwise hang for the OS's
+   own TCP timeout (often much longer than 10s) against an unreachable
+   or silently-filtered address. */
 static int64_t ys_net_connect(const char *host, int port){
     ys_net_ensure_init();
     char portbuf[16];
@@ -494,7 +501,51 @@ static int64_t ys_net_connect(const char *host, int port){
     for(rp=res; rp; rp=rp->ai_next){
         s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if(s==YS_SOCK_INVALID) continue;
-        if(connect(s, rp->ai_addr, (int)rp->ai_addrlen)==0) break; /* success */
+
+#ifdef _WIN32
+        u_long nb=1; ioctlsocket(s, FIONBIO, &nb);
+#else
+        int fl=fcntl(s,F_GETFL,0); fcntl(s,F_SETFL,fl|O_NONBLOCK);
+#endif
+        int cr=connect(s, rp->ai_addr, (int)rp->ai_addrlen);
+        int connected=0;
+        if(cr==0){
+            connected=1;
+        } else {
+#ifdef _WIN32
+            int in_progress=(WSAGetLastError()==WSAEWOULDBLOCK);
+#else
+            int in_progress=(errno==EINPROGRESS);
+#endif
+            if(in_progress){
+                struct pollfd pfd; pfd.fd=s; pfd.events=POLLOUT; pfd.revents=0;
+#ifdef _WIN32
+                int pr=WSAPoll(&pfd,1,YS_NET_CONNECT_TIMEOUT_MS);
+#else
+                int pr=poll(&pfd,1,YS_NET_CONNECT_TIMEOUT_MS);
+#endif
+                if(pr>0 && (pfd.revents&POLLOUT)){
+                    int soerr=0;
+#ifdef _WIN32
+                    int sl=sizeof(soerr);
+                    getsockopt(s,SOL_SOCKET,SO_ERROR,(char*)&soerr,&sl);
+#else
+                    socklen_t sl=sizeof(soerr);
+                    getsockopt(s,SOL_SOCKET,SO_ERROR,&soerr,&sl);
+#endif
+                    if(soerr==0) connected=1;
+                }
+            }
+        }
+
+        /* restore blocking mode for the subsequent send/recv calls */
+#ifdef _WIN32
+        u_long bl=0; ioctlsocket(s, FIONBIO, &bl);
+#else
+        fcntl(s,F_SETFL,fl);
+#endif
+
+        if(connected) break;
 #ifdef _WIN32
         closesocket(s);
 #else
@@ -505,7 +556,7 @@ static int64_t ys_net_connect(const char *host, int port){
     freeaddrinfo(res);
 
     if(s==YS_SOCK_INVALID){
-        ys_net_set_err("connect failed");
+        ys_net_set_err("connect failed or timed out");
         return -1;
     }
     return (int64_t)s;
@@ -542,6 +593,57 @@ static void ys_net_close(int64_t sock){
 #else
     close(s);
 #endif
+}
+
+/* listen(port) -> a listening TCP socket bound to 0.0.0.0:port
+   (backlog fixed at 128), or -1. */
+static int64_t ys_net_listen(int port){
+    ys_net_ensure_init();
+    ys_sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+    if(s==YS_SOCK_INVALID){ ys_net_set_err("socket failed"); return -1; }
+
+    int yes=1;
+#ifdef _WIN32
+    setsockopt(s,SOL_SOCKET,SO_REUSEADDR,(const char*)&yes,sizeof(yes));
+#else
+    setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
+#endif
+
+    struct sockaddr_in addr;
+    memset(&addr,0,sizeof(addr));
+    addr.sin_family=AF_INET;
+    addr.sin_addr.s_addr=INADDR_ANY;
+    addr.sin_port=htons((uint16_t)port);
+
+    if(bind(s,(struct sockaddr*)&addr,sizeof(addr))!=0){
+        ys_net_set_err("bind failed (port already in use?)");
+#ifdef _WIN32
+        closesocket(s);
+#else
+        close(s);
+#endif
+        return -1;
+    }
+    if(listen(s,128)!=0){
+        ys_net_set_err("listen failed");
+#ifdef _WIN32
+        closesocket(s);
+#else
+        close(s);
+#endif
+        return -1;
+    }
+    return (int64_t)s;
+}
+
+/* accept(server_sock) -> a new connected client socket, or -1. Blocks
+   until a connection arrives — no timeout, matching the usual shape of
+   a server accept loop. */
+static int64_t ys_net_accept(int64_t server_sock){
+    ys_sock_t s=(ys_sock_t)server_sock;
+    ys_sock_t c = accept(s, NULL, NULL);
+    if(c==YS_SOCK_INVALID){ ys_net_set_err("accept failed"); return -1; }
+    return (int64_t)c;
 }
 
 /*
@@ -3510,6 +3612,18 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     }
     if(strcmp_u(name,"y.net.last_error")==0){
         return make_str(g_net_err);
+    }
+    if(strcmp_u(name,"y.net.listen")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_int(-1);
+        Val pv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        return make_int(ys_net_listen((int)val_int(pv)));
+    }
+    if(strcmp_u(name,"y.net.accept")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_int(-1);
+        Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        return make_int(ys_net_accept(val_int(sv)));
     }
 
     /* y.map.* — hashmap (see ys_map_* engine near top of file) */
