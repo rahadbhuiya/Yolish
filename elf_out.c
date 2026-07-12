@@ -110,7 +110,7 @@ int elf_write(const char *path,
     if(data_len>0){
         Elf64_Phdr ph2; memset(&ph2,0,sizeof(ph2));
         ph2.p_type  =PT_LOAD;
-        ph2.p_flags =PF_R;
+        ph2.p_flags =PF_R|PF_W;
         ph2.p_offset=data_off_f;
         ph2.p_vaddr =data_vaddr;
         ph2.p_paddr =data_vaddr;

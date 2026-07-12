@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.9  
+**Version:** v2.10 
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2294,11 +2294,13 @@ y.println(add5(10))
 
 ## 44. Networking: y.net.*
 
-TCP client sockets. Available in the tree-walking interpreter (`ys file.y`)
-and the bytecode VM (`ys vm file.y`). **Not yet available under native
-compilation** (`ys -c` / `--target ...`) — see the roadmap for status;
-compiling a program that calls `y.net.*` fails cleanly at compile time
-rather than producing a broken executable.
+TCP client sockets. Two independent implementations exist, with **different
+capabilities** — read this section carefully before relying on either.
+
+### Interpreter + VM (`ys file.y`, `ys vm file.y`)
+
+Full-featured: hostnames, arbitrary-length receive buffers, string return
+values.
 
 ```yolish
 y.net.connect(host, port)  -- opens a TCP connection, returns a socket
@@ -2323,14 +2325,69 @@ if sock == -1 {
 }
 ```
 
-### Notes
+`host` accepts both hostnames (resolved via `getaddrinfo`, IPv4 and IPv6
+both tried) and literal IP addresses.
 
-- `host` accepts both hostnames (resolved via `getaddrinfo`, so both IPv4
-  and IPv6 are tried) and literal IP addresses.
-- There is no automatic retry or timeout handling — `y.net.recv` blocks
-  until data arrives, the peer closes the connection, or an error occurs.
-- On Windows, building `ys` from source requires linking against
-  `ws2_32` (e.g. `gcc ... -lws2_32`, or add `ws2_32.lib` in MSVC).
+> On Windows, building `ys` from source requires linking against `ws2_32`
+> (e.g. `gcc ... -lws2_32`, or add `ws2_32.lib` in MSVC).
+
+### Native compilation, Linux only (`ys -c file.y --target linux`)
+
+Raw syscalls (`socket`/`connect`/`read`/`write`/`close`), no libc linking
+— this backend produces a fully static ELF binary with no dynamic
+linker at all, which is why the API shape here is narrower:
+
+```yolish
+y.net.connect(ip, port)         -- ip MUST be a literal IPv4 dotted-decimal
+                                 -- string ("93.184.216.34") — NOT a
+                                 -- hostname. Returns a socket fd, or -1.
+y.net.send(sock, data)          -- data MUST be a string literal.
+                                 -- Returns bytes sent, or -1.
+y.net.recv_print(sock, maxlen)  -- reads up to maxlen bytes (capped at an
+                                 -- internal 4096-byte buffer) and prints
+                                 -- them straight to stdout. NOT the same
+                                 -- as y.net.recv — see below.
+y.net.close(sock)
+```
+
+```yolish
+let sock = y.net.connect("93.184.216.34", 80)
+if sock < 0 {
+    y.println("connect failed")
+} else {
+    y.net.send(sock, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+    y.net.recv_print(sock, 500)
+    y.net.close(sock)
+}
+```
+
+**Why the native API is different, not just a subset:**
+
+- **No hostnames.** There is no syscall for DNS resolution, and nothing
+  is dynamically linked (no libc, so no `getaddrinfo`). Resolve hostnames
+  yourself (e.g. hardcode the IP, or resolve it another way ahead of
+  time) — a real DNS client is a separate future batch (see ROADMAP.md).
+- **`ip` and `data` must be string literals**, not variables or
+  expressions. The native backend has no general runtime string type —
+  only compile-time string literals exist as a concept there (the same
+  ceiling `y.print`/`y.println` already have for non-literal strings).
+  `port` and `sock`, by contrast, can be any integer expression
+  (variables, arithmetic, etc.) — only the *string* arguments are
+  literal-only.
+- **`recv_print` instead of `recv`.** A value-returning `recv(sock,
+  maxlen)` would need to hand back a string of runtime-determined
+  length, which — again — the native backend has no representation for.
+  `recv_print` reads into an internal fixed buffer and writes it
+  directly to stdout instead of returning it as a value.
+- **No connect timeout.** `connect()` is a bare blocking syscall; against
+  an unreachable address this can hang for a long time (whatever the
+  kernel's own TCP connect timeout is), not just fail fast.
+
+Not implemented for native compilation on **macOS** — macOS syscall
+numbers and calling convention differ substantially from Linux's, and
+this hasn't been ported yet (also tracked in ROADMAP.md). Calling
+`y.net.*` while compiling for macOS or Windows hits the "unresolved
+symbol" safety net (a clean compile failure, not a broken binary).
 
 ---
 

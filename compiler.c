@@ -246,6 +246,34 @@ static int x_jz_rel32(){  emit2(0x0f,0x84); int p=code_len; emit_i32(0); return 
 static int x_jnz_rel32(){ emit2(0x0f,0x85); int p=code_len; emit_i32(0); return p; }
 /* jg rel32 (signed greater-than) */
 static int x_jg_rel32(){  emit2(0x0f,0x8f); int p=code_len; emit_i32(0); return p; }
+/* jl rel32 (signed less-than) */
+static int x_jl_rel32(){  emit2(0x0f,0x8c); int p=code_len; emit_i32(0); return p; }
+/* jge rel32 (signed greater-or-equal) */
+static int x_jge_rel32(){ emit2(0x0f,0x8d); int p=code_len; emit_i32(0); return p; }
+/* jle rel32 (signed less-or-equal) */
+static int x_jle_rel32(){ emit2(0x0f,0x8e); int p=code_len; emit_i32(0); return p; }
+
+/* Generic helpers for "reg64 <-> [rbp+disp8]" and "mov reg64,imm32" —
+   reg is the 3-bit x86 register code with NO REX extension needed:
+   rax=0 rcx=1 rdx=2 rbx=3 rsp=4 rbp=5 rsi=6 rdi=7. Restricting to these
+   eight keeps every encoding a plain 2-byte REX+opcode with no
+   REX.R/X/B extension bits to track, which is much less error-prone
+   for hand-written machine code than allowing r8-r15 here too. */
+static void x_mov_r64_rbpN(int reg, int8_t disp){
+    emit2(0x48,0x8b); emit1((uint8_t)(0x45|(reg<<3))); emit1((uint8_t)disp);
+}
+static void x_mov_rbpN_r64(int8_t disp, int reg){
+    emit2(0x48,0x89); emit1((uint8_t)(0x45|(reg<<3))); emit1((uint8_t)disp);
+}
+static void x_lea_r64_rbpN(int reg, int8_t disp){
+    emit2(0x48,0x8d); emit1((uint8_t)(0x45|(reg<<3))); emit1((uint8_t)disp);
+}
+static void x_mov_r64_imm32(int reg, int32_t imm){
+    emit2(0x48,0xc7); emit1((uint8_t)(0xc0|reg)); emit_i32(imm);
+}
+static void x_mov_qword_rbpN_imm32(int8_t disp, int32_t imm){
+    emit2(0x48,0xc7); emit1((uint8_t)(0x45|0)); emit1((uint8_t)disp); emit_i32(imm);
+}
 
 /* patch jump at patch_off to jump to here */
 static void x_patch_here(int patch_off){
@@ -481,6 +509,203 @@ static void emit_helpers(void){
         emit2(0x0f,0x05);
         x_ret();
     }
+
+    /* ---- native TCP networking (Linux only — raw syscalls, no libc) ----
+       Batch 2: IPv4 literal addresses only ("93.184.216.34"), NOT
+       hostnames — there is no syscall for DNS resolution, and this
+       backend links nothing (no libc, no PT_DYNAMIC), so getaddrinfo()
+       isn't available. Resolving a hostname natively would need either
+       a hand-rolled DNS client (raw UDP + manually building/parsing
+       query packets) or teaching the ELF writer to dynamically link
+       against libc — both bigger, separate efforts. See ROADMAP.md.
+       macOS uses entirely different syscall numbers/ABI and isn't
+       covered here either; calling y.net.* when compiling for macOS
+       hits the "unresolved symbol" safety net, same as before. */
+    if(g_target==TARGET_LINUX){
+        /* __ys_net_connect(rdi=ip_str, rsi=ip_str_len, rdx=port) -> rax=fd or -1
+           Stack layout (all offsets from rbp):
+             -8  current char pointer (starts at ip_str, incremented per byte)
+             -16 end pointer (ip_str + ip_str_len)
+             -24 port
+             -32 octet accumulator
+             -40 octet_idx (0..3)
+             -48..-45 parsed IPv4 bytes
+             -56 fd (once socket() succeeds)
+             -96..-81 struct sockaddr_in (16 bytes) */
+        sym_define("__ys_net_connect",code_len);
+        x_push_rbp(); x_mov_rbp_rsp();
+        emit3(0x48,0x81,0xec); emit_i32(112); /* sub rsp,112 */
+
+        x_mov_rbpN_r64(-8,7);  /* [rbp-8]=rdi (str ptr) */
+        x_mov_r64_rbpN(0,-8);  /* rax = str ptr */
+        emit3(0x48,0x01,0xf0); /* add rax,rsi -> end ptr */
+        x_mov_rbpN_r64(-16,0); /* [rbp-16] = end ptr */
+        x_mov_rbpN_r64(-24,2); /* [rbp-24] = rdx (port) */
+        x_mov_qword_rbpN_imm32(-32,0); /* octet=0 */
+        x_mov_qword_rbpN_imm32(-40,0); /* octet_idx=0 */
+
+        int loop_start=code_len;
+        x_mov_r64_rbpN(0,-8);  /* rax = cur ptr */
+        x_mov_r64_rbpN(1,-16); /* rcx = end ptr */
+        emit3(0x48,0x39,0xc8); /* cmp rax,rcx */
+        int j_loop_end=x_jge_rel32();
+
+        x_mov_r64_rbpN(2,-8);         /* rdx = cur ptr */
+        emit3(0x0f,0xb6,0x02);        /* movzx eax, byte [rdx] */
+        emit2(0x3c,0x2e);             /* cmp al, '.' */
+        int j_digit=x_jnz_rel32();
+
+        /* dot case */
+        x_mov_r64_rbpN(1,-40);        /* rcx = octet_idx */
+        x_mov_r64_rbpN(2,-32);        /* rdx = octet */
+        x_lea_r64_rbpN(3,-48);        /* rbx = &ipbuf[0] */
+        emit3(0x88,0x14,0x0b);        /* mov [rbx+rcx], dl */
+        emit3(0x48,0xff,0x45); emit1((uint8_t)-40); /* inc qword [rbp-40] */
+        x_mov_qword_rbpN_imm32(-32,0);/* octet=0 */
+        int j_next1=x_jmp_rel32();
+
+        x_patch_here(j_digit);
+        emit2(0x2c,0x30);             /* sub al,'0' */
+        emit3(0x0f,0xb6,0xc0);        /* movzx eax,al */
+        x_mov_r64_rbpN(2,-32);        /* rdx = octet */
+        emit4(0x48,0x6b,0xd2,0x0a);   /* imul rdx,rdx,10 */
+        emit3(0x48,0x01,0xc2);        /* add rdx,rax */
+        x_mov_rbpN_r64(-32,2);        /* octet = rdx */
+
+        x_patch_here(j_next1);
+        emit3(0x48,0xff,0x45); emit1((uint8_t)-8); /* inc qword [rbp-8] (cur ptr) */
+        int j_back=x_jmp_rel32();
+        patch_i32(j_back,(int32_t)(loop_start-(j_back+4)));
+
+        x_patch_here(j_loop_end);
+        /* final octet */
+        x_mov_r64_rbpN(1,-40);
+        x_mov_r64_rbpN(2,-32);
+        x_lea_r64_rbpN(3,-48);
+        emit3(0x88,0x14,0x0b);
+
+        /* build sockaddr_in at [rbp-96] */
+        x_lea_r64_rbpN(3,-96);              /* rbx = &sockaddr */
+        emit4(0x66,0xc7,0x03,0x02); emit1(0x00); /* mov word [rbx],2 (AF_INET) */
+        x_mov_r64_rbpN(0,-24);               /* rax = port */
+        emit2(0x86,0xc4);                    /* xchg al,ah (htons) */
+        emit4(0x66,0x89,0x43,0x02);          /* mov word [rbx+2],ax */
+        x_lea_r64_rbpN(1,-48);                /* rcx = &ipbuf */
+        emit2(0x8b,0x01);                     /* mov eax,[rcx] */
+        emit3(0x89,0x43,0x04);                /* mov [rbx+4],eax */
+        emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0); /* mov qword [rbx+8],0 */
+
+        /* socket(AF_INET=2, SOCK_STREAM=1, 0) */
+        x_mov_r64_imm32(7,2);  /* rdi=2 */
+        x_mov_r64_imm32(6,1);  /* rsi=1 */
+        x_mov_r64_imm32(2,0);  /* rdx=0 */
+        x_mov_r64_imm32(0,41); /* rax=SYS_socket */
+        emit2(0x0f,0x05);
+        emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+        int j_fail1=x_jl_rel32();
+        x_mov_rbpN_r64(-56,0); /* [rbp-56]=fd */
+
+        /* connect(fd,&sockaddr,16) */
+        x_mov_r64_rbpN(7,-56);      /* rdi=fd */
+        x_lea_r64_rbpN(6,-96);      /* rsi=&sockaddr */
+        x_mov_r64_imm32(2,16);      /* rdx=16 */
+        x_mov_r64_imm32(0,42);      /* rax=SYS_connect */
+        emit2(0x0f,0x05);
+        emit4(0x48,0x83,0xf8,0x00);
+        int j_fail2=x_jl_rel32();
+
+        x_mov_r64_rbpN(0,-56); /* rax=fd (return value) */
+        int j_done1=x_jmp_rel32();
+
+        x_patch_here(j_fail2);
+        x_mov_r64_rbpN(7,-56);
+        x_mov_r64_imm32(0,3); /* SYS_close */
+        emit2(0x0f,0x05);
+        x_mov_r64_imm32(0,-1);
+        int j_done2=x_jmp_rel32();
+
+        x_patch_here(j_fail1);
+        x_mov_r64_imm32(0,-1);
+
+        x_patch_here(j_done1);
+        x_patch_here(j_done2);
+        x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+
+        /* __ys_net_send(rdi=buf, rsi=len, rdx=fd) -> rax=bytes written or -1
+           Argument order is (buf,len,fd) rather than the more natural
+           (fd,buf,len) specifically so the call site can stage the
+           literal buf/len first (cheap, no register risk) and the
+           fd expression last, without needing to re-shuffle anything
+           already in place. Just SYS_write on a connected TCP socket,
+           internally reordered to the real write(fd,buf,len) ABI. */
+        sym_define("__ys_net_send",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x89,0xf8); /* mov rax,rdi (buf) */
+            emit3(0x48,0x89,0xd7); /* mov rdi,rdx (fd) */
+            emit3(0x48,0x89,0xf2); /* mov rdx,rsi (len) */
+            emit3(0x48,0x89,0xc6); /* mov rsi,rax (buf) */
+            x_mov_r64_imm32(0,1); /* SYS_write */
+            emit2(0x0f,0x05);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
+        /* __ys_net_recv_print(rdi=fd, rsi=maxlen) -> rax=bytes read or -1
+           Reads into an internal static buffer and writes it straight
+           to stdout. Stands in for a value-returning recv() — see the
+           comment at the y.net.recv_print call site in compile_node for
+           why. Caps at a fixed internal buffer size regardless of the
+           requested maxlen. */
+        sym_define("__ys_net_recv_print",code_len);
+        {
+            int recvbuf_off=data_len;
+            static const int RECVBUF_CAP=4096;
+            for(int i=0;i<RECVBUF_CAP;i++) data_buf[data_len++]=0;
+
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x83,0xec); emit1(0x10); /* sub rsp,16 */
+            x_mov_rbpN_r64(-8,7);  /* [rbp-8]=fd */
+            /* clamp maxlen to RECVBUF_CAP */
+            emit3(0x48,0x81,0xfe); emit_i32(RECVBUF_CAP); /* cmp rsi, RECVBUF_CAP */
+            int j_ok=x_jl_rel32();
+            x_mov_r64_imm32(6,RECVBUF_CAP); /* rsi = RECVBUF_CAP */
+            x_patch_here(j_ok);
+            x_mov_rbpN_r64(-16,6); /* [rbp-16]=maxlen (clamped) */
+
+            /* read(fd, recvbuf, maxlen) */
+            x_mov_r64_rbpN(7,-8);  /* rdi=fd */
+            emit3(0x48,0x8d,0x35); /* lea rsi,[rip+recvbuf] */
+            add_reloc(RELOC_DATA,code_len,recvbuf_off); emit_i32(0);
+            x_mov_r64_rbpN(2,-16); /* rdx=maxlen */
+            x_mov_r64_imm32(0,0);  /* SYS_read */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+            int j_nowrite=x_jle_rel32(); /* n<=0: nothing to print */
+            x_mov_rbpN_r64(-16,0); /* [rbp-16] = n (bytes actually read) */
+
+            /* write(1, recvbuf, n) */
+            x_mov_r64_imm32(7,1); /* fd=1 */
+            emit3(0x48,0x8d,0x35); /* lea rsi,[rip+recvbuf] */
+            add_reloc(RELOC_DATA,code_len,recvbuf_off); emit_i32(0);
+            x_mov_r64_rbpN(2,-16); /* rdx=n */
+            x_mov_r64_imm32(0,1);  /* SYS_write */
+            emit2(0x0f,0x05);
+            x_mov_r64_rbpN(0,-16); /* rax = n (return the byte count, not write()'s retval) */
+
+            x_patch_here(j_nowrite);
+            emit3(0x48,0x83,0xc4); emit1(0x10); /* add rsp,16 */
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
+        /* __ys_net_close(rdi=fd) */
+        sym_define("__ys_net_close",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            x_mov_r64_imm32(0,3); /* SYS_close */
+            emit2(0x0f,0x05);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+    }
     emit_float_helper();
 }
 
@@ -596,6 +821,17 @@ static void compile_expr(Node *n){
     case ND_CALL:{
         /* handle builtins */
         const char *fn=n->name;
+        /* Is this call really y.NAMESPACE.method(...)? n->name is only
+           the trailing segment ("connect" for y.net.connect(...)), so
+           for method names generic enough to plausibly be a user
+           function (connect/send/recv/close, unlike e.g. println),
+           verify the receiver chain before treating it as a builtin —
+           otherwise a user's own `fn connect(...)` would get silently
+           hijacked. */
+        int is_y_net = n->left && n->left->kind==ND_DOT
+            && strcmp(n->left->name,"net")==0
+            && n->left->left && n->left->left->kind==ND_IDENT
+            && strcmp(n->left->left->name,"y")==0;
         /* y.println(val) */
         if(strcmp(fn,"println")==0||strcmp(fn,"y.println")==0){
             if(n->argc>0){
@@ -647,6 +883,74 @@ static void compile_expr(Node *n){
             if(arg){ compile_expr(arg); x_arg1_from_rax(); }
             else { x_mov_rax_imm32(0); x_arg1_from_rax(); }
             int p=x_call_unresolved(); add_call_patch(p,"__ys_exit");
+            break;
+        }
+        /* y.net.connect(ip, port) -> fd or -1
+           ip MUST be a string literal — the native backend has no
+           general runtime string type yet (only literals, the same
+           ceiling println/print already have), so a variable holding
+           an IP string can't be passed through here. Arguments are
+           marshaled via push/pop rather than assuming evaluation order
+           leaves earlier registers untouched — robust regardless of
+           what compile_expr does internally. */
+        if(is_y_net && strcmp(fn,"connect")==0){
+            int base=n->left?1:0;
+            Node *ip_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *port_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            int off, len;
+            if(ip_arg && ip_arg->kind==ND_STR){ off=data_add_str(ip_arg->sval); len=ystrlen(ip_arg->sval); }
+            else { off=data_add_str(""); len=0; } /* unsupported shape: fails to connect cleanly rather than miscompiling */
+            if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(0);
+            emit1(0x50); /* push rax (port) */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off); emit_i32(0); /* lea rdi,[rip+off] */
+            x_mov_rax_imm32(len); emit3(0x48,0x89,0xc6); /* mov rsi,rax (len) */
+            emit1(0x5a); /* pop rdx (port) */
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_connect");
+            break;
+        }
+        /* y.net.send(sock, data) -> bytes written or -1. data MUST be a
+           string literal, same reasoning as connect's ip above. */
+        if(is_y_net && strcmp(fn,"send")==0){
+            int base=n->left?1:0;
+            Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *data_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            int off, len;
+            if(data_arg && data_arg->kind==ND_STR){ off=data_add_str(data_arg->sval); len=ystrlen(data_arg->sval); }
+            else { off=data_add_str(""); len=0; }
+            if(sock_arg) compile_expr(sock_arg); else x_mov_rax_imm32(-1);
+            emit1(0x50); /* push rax (fd) */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off); emit_i32(0); /* lea rdi,[rip+off] */
+            x_mov_rax_imm32(len); emit3(0x48,0x89,0xc6); /* mov rsi,rax (len) */
+            emit1(0x5a); /* pop rdx (fd) */
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_send");
+            break;
+        }
+        /* y.net.recv_print(sock, maxlen) — reads up to maxlen bytes and
+           prints them directly to stdout. This stands in for a
+           value-returning recv() in native-compiled code: the native
+           backend has no runtime string type to hand a received buffer
+           back as a Yolish value (only compile-time string literals
+           exist there), so "read and print" is the honest capability
+           on offer for this batch, not a real y.net.recv(sock,maxlen)
+           returning a string. */
+        if(is_y_net && strcmp(fn,"recv_print")==0){
+            int base=n->left?1:0;
+            Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *maxlen_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            if(maxlen_arg) compile_expr(maxlen_arg); else x_mov_rax_imm32(1024);
+            emit1(0x50); /* push rax (maxlen) */
+            if(sock_arg) compile_expr(sock_arg); else x_mov_rax_imm32(-1);
+            emit3(0x48,0x89,0xc7); /* mov rdi,rax (fd) */
+            emit1(0x5e); /* pop rsi (maxlen) */
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_recv_print");
+            break;
+        }
+        /* y.net.close(sock) */
+        if(is_y_net && strcmp(fn,"close")==0){
+            int base=n->left?1:0;
+            Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
+            if(sock_arg){ compile_expr(sock_arg); x_arg1_from_rax(); }
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close");
             break;
         }
         /* user function call — pass args in registers (SysV) */
