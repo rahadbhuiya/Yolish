@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.10  
+**Version:** v2.12  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2365,9 +2365,10 @@ both tried) and literal IP addresses.
 
 ### Native compilation, Linux only (`ys -c file.y --target linux`)
 
-Raw syscalls (`socket`/`connect`/`read`/`write`/`close`), no libc linking
-— this backend produces a fully static ELF binary with no dynamic
-linker at all, which is why the API shape here is narrower:
+Raw syscalls (`socket`/`connect`/`bind`/`listen`/`accept`/`read`/`write`/
+`close`), no libc linking — this backend produces a fully static ELF
+binary with no dynamic linker at all, which is why the API shape here
+is narrower:
 
 ```yolish
 y.net.connect(ip, port)         -- ip MUST be a literal IPv4 dotted-decimal
@@ -2379,6 +2380,10 @@ y.net.recv_print(sock, maxlen)  -- reads up to maxlen bytes (capped at an
                                  -- internal 4096-byte buffer) and prints
                                  -- them straight to stdout. NOT the same
                                  -- as y.net.recv — see below.
+y.net.listen(port)              -- binds 0.0.0.0:port (backlog 128),
+                                 -- returns a listening socket, or -1
+y.net.accept(server_sock)       -- blocks for a client, returns its
+                                 -- socket, or -1
 y.net.close(sock)
 ```
 
@@ -2392,6 +2397,27 @@ if sock < 0 {
     y.net.close(sock)
 }
 ```
+
+A minimal native server:
+
+```yolish
+let srv = y.net.listen(9000)
+let client = y.net.accept(srv)
+y.net.recv_print(client, 1024)
+y.net.send(client, "hello from native Yolish")
+y.net.close(client)
+y.net.close(srv)
+```
+
+Native and interpreter/VM sockets are wire-compatible — a native-compiled
+server can accept a connection from an interpreted client and vice versa,
+they're both just standard TCP underneath.
+
+`y.net.listen` does **not** set `SO_REUSEADDR` here (unlike the
+interpreter/VM version) — the `setsockopt` syscall's argument-passing
+ABI needs registers this backend's hand-written encoder doesn't cover
+yet, so restarting a native server quickly can hit "address already in
+use" for a short while after the previous instance exits.
 
 **Why the native API is different, not just a subset:**
 

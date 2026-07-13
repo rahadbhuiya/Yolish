@@ -45,18 +45,19 @@ Exploidus, readable, safe, and practical.
 | **v2.9** | **Windows PE backend fixes: correct RVA (not VA) in the import table, IAT call-site patching, Microsoft x64 ABI calling convention for `print`/`exit`, full 8-byte NULL for `WriteFile`'s `lpOverlapped`, and an auto-pause on double-click-launched consoles. Native compiler safety net: `ys -c` now refuses to write an executable if any symbol failed to resolve. TCP client sockets (`y.net.connect/send/recv/close/last_error`, interpreter + VM — native `-c` compilation not yet covered, see Upcoming). Bitwise operators (`& \| ^ << >> ~`, interpreter + VM + lexer/parser). Hashmap (`y.map.new/set/get/has/delete/keys/values/len`, open-addressing with automatic growth). Binary-safe `y.fs.read/write/append` (previously `y.fs.read` silently truncated at 8191 bytes and `y.fs.write`/`append` truncated at the first embedded NUL byte). Two stack buffer overflow fixes in `y.string.repeat`/`y.string.replace` (both wrote up to 8188 bytes into 512-byte stack arrays)** |
 | **v2.10** | **Native TCP networking on Linux (`ys -c file.y --target linux`): raw `socket`/`connect`/`read`/`write`/`close` syscalls, no libc — a hand-written IPv4 dotted-decimal parser (there's no DNS-resolution syscall to lean on), `y.net.connect/send/recv_print/close`. Along the way: fixed the ELF writer marking its data segment read-only, which made any runtime write into that segment (e.g. `recv`'s destination buffer) fail with EFAULT** |
 | **v2.11** | **Connect timeout (10s default, non-blocking connect + poll) for the interpreter/VM networking path — a bare blocking connect() to an unreachable address could previously hang for the OS's own TCP timeout. Server-side sockets, interpreter + VM (`y.net.listen/accept`), tested with a real two-process client/server exchange over both the tree-walking interpreter and the bytecode VM** |
+| **v2.12** | **Native listen/accept on Linux (`y.net.listen/accept` compiled to raw bind/listen/accept syscalls) — tested with real native-compiled client/server pairs and cross-compatibility between native and interpreted endpoints (they're both just standard TCP)** |
 
 ---
 
 ## Upcoming
 
-### v2.11: Networking (in progress)
-- Done: connect timeout (10s default) for the interpreter/VM path —
-  previously a bare blocking connect() to an unreachable address could
-  hang for the OS's own TCP timeout
-- Done: server-side sockets, interpreter + VM (`y.net.listen(port)`,
-  `y.net.accept(server_sock)`) — single-threaded, one connection at a
-  time; tested with a real two-process client/server exchange
+### v2.12: Networking (in progress)
+- Done: native listen/accept on Linux (`y.net.listen/accept`, raw
+  bind/listen/accept syscalls) — tested with real native-compiled
+  client/server pairs, and cross-compatibility (native server with an
+  interpreter client and vice versa, both just standard TCP underneath)
+- Done (v2.11): connect timeout (10s default) for the interpreter/VM
+  path; server-side sockets, interpreter + VM (`y.net.listen/accept`)
 - Done (v2.10): TCP client sockets, native compilation on Linux (raw
   syscalls, no libc) — narrower API: `y.net.connect/send/recv_print/
   close`, IPv4 literal addresses and literal string data only
@@ -67,10 +68,12 @@ Exploidus, readable, safe, and practical.
   (BSD sockets via libSystem, needs Mach-O dynamic linking first)
 - Pending: hostname resolution for native builds — needs either a
   hand-rolled DNS client (raw UDP) or dynamic linking against libc
-- Pending: native listen/accept (currently interpreter/VM only)
+- Pending: SO_REUSEADDR for native listen (needs setsockopt's 5-arg
+  syscall ABI, which needs r8/r10 — outside the 8-base-register
+  encoding this file currently sticks to)
 - Pending: concurrency for the server path — right now handling a
   second client means finishing (or at least accepting past) the first
-- Pending: recv timeout (accept and recv both still block indefinitely)
+- Pending: recv/accept timeout (only connect() has one so far)
 - Pending: UDP sockets
 - Pending: HTTP client convenience wrapper built on top of TCP
 

@@ -705,6 +705,84 @@ static void emit_helpers(void){
             emit2(0x0f,0x05);
             x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
         }
+
+        /* __ys_net_listen(rdi=port) -> rax=fd or -1
+           socket + bind(INADDR_ANY:port) + listen(backlog=128).
+           NOTE: does not set SO_REUSEADDR (setsockopt's 5-arg syscall
+           ABI needs r8/r10, outside the 8-base-register encoding this
+           file sticks to for simplicity) — restarting a native server
+           quickly can hit "address already in use" for a short while.
+           The interpreter/VM version does set it. */
+        sym_define("__ys_net_listen",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(64); /* sub rsp,64 */
+            x_mov_rbpN_r64(-8,7); /* [rbp-8]=port */
+
+            x_mov_r64_imm32(7,2); x_mov_r64_imm32(6,1); x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41); /* SYS_socket */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_fail1=x_jl_rel32();
+            x_mov_rbpN_r64(-16,0); /* [rbp-16]=fd */
+
+            /* sockaddr_in at [rbp-48]: AF_INET, htons(port), INADDR_ANY, zero */
+            x_lea_r64_rbpN(3,-48);
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00); /* mov word [rbx],2 */
+            x_mov_r64_rbpN(0,-8);
+            emit2(0x86,0xc4); /* xchg al,ah (htons) */
+            emit4(0x66,0x89,0x43,0x02); /* mov word [rbx+2],ax */
+            emit3(0x48,0xc7,0x43); emit1(0x04); emit_i32(0); /* mov qword [rbx+4],0 — zeros sin_addr (4B) + overlaps into sin_zero's first 4B, harmless since the next instruction zeros that whole range again */
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0); /* mov qword [rbx+8],0 (sin_zero) */
+
+            x_mov_r64_rbpN(7,-16); /* rdi=fd */
+            x_lea_r64_rbpN(6,-48); /* rsi=&addr */
+            x_mov_r64_imm32(2,16); /* rdx=16 */
+            x_mov_r64_imm32(0,49); /* SYS_bind */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_fail2=x_jl_rel32();
+
+            x_mov_r64_rbpN(7,-16); /* rdi=fd */
+            x_mov_r64_imm32(6,128); /* rsi=backlog */
+            x_mov_r64_imm32(0,50); /* SYS_listen */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_fail3=x_jl_rel32();
+
+            x_mov_r64_rbpN(0,-16); /* return fd */
+            int j_done1=x_jmp_rel32();
+
+            x_patch_here(j_fail2);
+            x_patch_here(j_fail3);
+            x_mov_r64_rbpN(7,-16);
+            x_mov_r64_imm32(0,3); /* SYS_close */
+            emit2(0x0f,0x05);
+            x_mov_r64_imm32(0,-1);
+            int j_done2=x_jmp_rel32();
+
+            x_patch_here(j_fail1);
+            x_mov_r64_imm32(0,-1);
+
+            x_patch_here(j_done1);
+            x_patch_here(j_done2);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
+        /* __ys_net_accept(rdi=server_fd) -> rax=client fd or -1 */
+        sym_define("__ys_net_accept",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            x_mov_r64_imm32(6,0); /* rsi=NULL */
+            x_mov_r64_imm32(2,0); /* rdx=NULL */
+            x_mov_r64_imm32(0,43); /* SYS_accept */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_ok=x_jge_rel32();
+            x_mov_r64_imm32(0,-1);
+            x_patch_here(j_ok);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
     }
     emit_float_helper();
 }
@@ -951,6 +1029,22 @@ static void compile_expr(Node *n){
             Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
             if(sock_arg){ compile_expr(sock_arg); x_arg1_from_rax(); }
             int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close");
+            break;
+        }
+        /* y.net.listen(port) -> fd or -1 */
+        if(is_y_net && strcmp(fn,"listen")==0){
+            int base=n->left?1:0;
+            Node *port_arg=(n->argc>base)?n->args[base]:NULL;
+            if(port_arg){ compile_expr(port_arg); x_arg1_from_rax(); } else { x_mov_rax_imm32(0); x_arg1_from_rax(); }
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_listen");
+            break;
+        }
+        /* y.net.accept(server_sock) -> fd or -1 */
+        if(is_y_net && strcmp(fn,"accept")==0){
+            int base=n->left?1:0;
+            Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
+            if(sock_arg){ compile_expr(sock_arg); x_arg1_from_rax(); } else { x_mov_rax_imm32(-1); x_arg1_from_rax(); }
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_accept");
             break;
         }
         /* user function call — pass args in registers (SysV) */
