@@ -16,6 +16,8 @@
 #  include <fcntl.h>
 #  include <errno.h>
 #  include <poll.h>
+#  include <signal.h>
+#  include <sys/wait.h>
 #  define YS_SOCK_INVALID (-1)
 #else
 #  include <direct.h>
@@ -26,6 +28,20 @@
    /* NOTE: building ys.exe on Windows with this file requires linking
       against ws2_32 (e.g. `gcc ... -lws2_32` or add ws2_32.lib in MSVC). */
 #  define YS_SOCK_INVALID INVALID_SOCKET
+#endif
+
+/* TLS support is opt-in at build time: `gcc ... -DYS_WITH_TLS -lssl
+   -lcrypto`. Kept optional (rather than a hard dependency) because
+   this project's existing Windows builds go through CI where OpenSSL
+   for MinGW isn't guaranteed to be set up — this way those builds
+   keep working unchanged, and TLS becomes available wherever the
+   extra flag + libraries are added (trivial on Linux/macOS, a bit
+   more setup on Windows). Without the flag, y.net.tls_* builtins
+   return a clear "not compiled in" error instead of failing to link. */
+#ifdef YS_WITH_TLS
+#  include <openssl/ssl.h>
+#  include <openssl/err.h>
+#  include <openssl/x509v3.h>
 #endif
 
 /*  Memory pools  */
@@ -562,15 +578,33 @@ static int64_t ys_net_connect(const char *host, int port){
     return (int64_t)s;
 }
 
+/* Loops until all of data is sent, an error occurs, or the connection
+   closes. A single send() syscall can write fewer bytes than requested
+   for large payloads ("short write") — treating that as "done" (the
+   previous behavior) silently truncates data if the caller doesn't
+   check and retry the remainder themselves, which almost nothing does
+   in practice. Returns the total bytes sent (== len on full success),
+   or -1 if nothing could be sent at all. */
 static int64_t ys_net_send(int64_t sock, const char *data, int len){
     ys_sock_t s=(ys_sock_t)sock;
+    int64_t total=0;
+    while(total<len){
 #ifdef _WIN32
-    int n=send(s,data,len,0);
+        int n=send(s,data+total,len-(int)total,0);
 #else
-    ssize_t n=send(s,data,(size_t)len,0);
+        ssize_t n=send(s,data+total,(size_t)(len-total),0);
 #endif
-    if(n<0){ ys_net_set_err("send failed"); return -1; }
-    return (int64_t)n;
+        if(n<0){
+#ifndef _WIN32
+            if(errno==EINTR) continue; /* interrupted, just retry */
+#endif
+            ys_net_set_err("send failed");
+            return total>0?total:-1;
+        }
+        if(n==0) break; /* shouldn't normally happen for a TCP send, but don't spin if it does */
+        total+=n;
+    }
+    return total;
 }
 
 /* returns bytes read into buf (caller-provided, size maxlen), or -1 on
@@ -594,6 +628,127 @@ static void ys_net_close(int64_t sock){
     close(s);
 #endif
 }
+
+/*
+   TLS (y.net.tls_*) — real TLS via OpenSSL, opt-in at build time
+   ------------------------------------------------------------------
+   NOT a custom crypto implementation — this wraps OpenSSL's SSL_*
+   API, an audited, industry-standard library, rather than hand-rolling
+   a TLS handshake/cipher suite/certificate parser. A from-scratch TLS
+   stack is a project on its own and not something to trust without
+   serious, dedicated security review.
+
+   Certificate verification IS enabled (SSL_VERIFY_PEER + hostname
+   verification via SSL_set1_host, using the system's default CA
+   trust store) — a connection to a server presenting an invalid,
+   expired, or mismatched-hostname certificate fails, it does not
+   silently proceed. SNI is sent (SSL_set_tlsext_host_name), required
+   by most modern virtual-hosted HTTPS servers.
+
+   Handles are a distinct id space from plain y.net.* socket fds
+   (offset by TLS_HANDLE_BASE) — a TLS handle must only be used with
+   y.net.tls_* functions, never with plain y.net.send/recv/close, and
+   vice versa. Mixing them is a programming error, not something this
+   layer tries to detect for you.
+*/
+#ifdef YS_WITH_TLS
+#define YS_TLS_MAX 64
+#define YS_TLS_HANDLE_BASE 1000000
+typedef struct { SSL *ssl; int64_t fd; int used; } YsTlsConn;
+static YsTlsConn ys_tls_table[YS_TLS_MAX];
+static SSL_CTX *ys_tls_ctx=NULL;
+
+static int ys_tls_ensure_ctx(void){
+    if(ys_tls_ctx) return 1;
+    ys_tls_ctx = SSL_CTX_new(TLS_client_method());
+    if(!ys_tls_ctx) return 0;
+    SSL_CTX_set_verify(ys_tls_ctx, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_min_proto_version(ys_tls_ctx, TLS1_2_VERSION);
+    if(!SSL_CTX_set_default_verify_paths(ys_tls_ctx)){
+        SSL_CTX_free(ys_tls_ctx); ys_tls_ctx=NULL; return 0;
+    }
+    return 1;
+}
+
+static YsTlsConn *ys_tls_lookup(int64_t handle){
+    int64_t slot=handle-YS_TLS_HANDLE_BASE;
+    if(slot<0||slot>=YS_TLS_MAX||!ys_tls_table[slot].used) return NULL;
+    return &ys_tls_table[slot];
+}
+
+static int64_t ys_tls_connect(const char *host, int port){
+    if(!ys_tls_ensure_ctx()){ ys_net_set_err("TLS context init failed"); return -1; }
+
+    int slot=-1;
+    for(int i=0;i<YS_TLS_MAX;i++) if(!ys_tls_table[i].used){ slot=i; break; }
+    if(slot<0){ ys_net_set_err("too many concurrent TLS connections"); return -1; }
+
+    int64_t fd=ys_net_connect(host,port); /* plain TCP connect first, reusing the existing timeout-aware helper */
+    if(fd<0) return -1; /* ys_net_connect already set the error */
+
+    SSL *ssl=SSL_new(ys_tls_ctx);
+    if(!ssl){ ys_net_close(fd); ys_net_set_err("SSL_new failed"); return -1; }
+
+    SSL_set_fd(ssl,(int)fd);
+    SSL_set_tlsext_host_name(ssl,host);  /* SNI */
+    SSL_set1_host(ssl,host);              /* hostname check during verification */
+
+    if(SSL_connect(ssl)!=1){
+        ys_net_set_err("TLS handshake failed");
+        SSL_free(ssl); ys_net_close(fd);
+        return -1;
+    }
+    if(SSL_get_verify_result(ssl)!=X509_V_OK){
+        ys_net_set_err("TLS certificate verification failed");
+        SSL_free(ssl); ys_net_close(fd);
+        return -1;
+    }
+
+    ys_tls_table[slot].ssl=ssl;
+    ys_tls_table[slot].fd=fd;
+    ys_tls_table[slot].used=1;
+    return YS_TLS_HANDLE_BASE+slot;
+}
+
+static int64_t ys_tls_send(int64_t handle, const char *data, int len){
+    YsTlsConn *c=ys_tls_lookup(handle);
+    if(!c){ ys_net_set_err("invalid TLS handle"); return -1; }
+    int64_t total=0;
+    while(total<len){
+        int n=SSL_write(c->ssl,data+total,len-(int)total);
+        if(n<=0){
+            int err=SSL_get_error(c->ssl,n);
+            if(err==SSL_ERROR_WANT_READ||err==SSL_ERROR_WANT_WRITE) continue;
+            ys_net_set_err("TLS send failed");
+            return total>0?total:-1;
+        }
+        total+=n;
+    }
+    return total;
+}
+
+static int64_t ys_tls_recv(int64_t handle, char *buf, int maxlen){
+    YsTlsConn *c=ys_tls_lookup(handle);
+    if(!c){ ys_net_set_err("invalid TLS handle"); return -1; }
+    int n=SSL_read(c->ssl,buf,maxlen);
+    if(n<0){
+        int err=SSL_get_error(c->ssl,n);
+        if(err==SSL_ERROR_ZERO_RETURN) return 0;
+        ys_net_set_err("TLS recv failed");
+        return -1;
+    }
+    return n;
+}
+
+static void ys_tls_close(int64_t handle){
+    YsTlsConn *c=ys_tls_lookup(handle);
+    if(!c) return;
+    SSL_shutdown(c->ssl);
+    SSL_free(c->ssl);
+    ys_net_close(c->fd);
+    c->used=0;
+}
+#endif /* YS_WITH_TLS */
 
 /* listen(port) -> a listening TCP socket bound to 0.0.0.0:port
    (backlog fixed at 128), or -1. */
@@ -3017,6 +3172,48 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #endif
     }
 
+    /* process.fork() → 0 in the child, the child's pid in the parent,
+       -1 on failure or if unsupported (Windows: fork() doesn't exist
+       there at all — POSIX only). Lazily sets SIGCHLD to SIG_IGN on
+       first use so the OS auto-reaps children without needing an
+       explicit process.wait() call — the common case for a
+       fork-per-connection server, where the parent just wants to keep
+       accepting without tracking every child. Call process.wait(pid)
+       yourself if you need to know when a *specific* child finished
+       (that still works — SIG_IGN only skips automatic zombie cleanup
+       for children nobody ever waits on). */
+    if(strcmp_u(name,"process.fork")==0){
+#ifndef _WIN32
+        static int sigchld_ignored=0;
+        if(!sigchld_ignored){ signal(SIGCHLD, SIG_IGN); sigchld_ignored=1; }
+        pid_t pid=fork();
+        if(pid<0) return make_int(-1);
+        return make_int((int64_t)pid);
+#else
+        return make_int(-1); /* not supported on Windows */
+#endif
+    }
+
+    /* process.wait(pid) → exit code, or -1 on failure/unsupported.
+       NOTE: if process.fork() has already been called at least once,
+       SIGCHLD is SIG_IGN and the OS may have already auto-reaped this
+       child before wait() gets to it — in that case this also returns
+       -1. Use this only for children you intend to explicitly track,
+       not in combination with a fire-and-forget fork-per-connection
+       loop that never calls process.wait() at all. */
+    if(strcmp_u(name,"process.wait")==0){
+#ifndef _WIN32
+        int s=(argc>1)?1:0;
+        Val pv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        int status=0;
+        pid_t r=waitpid((pid_t)val_int(pv), &status, 0);
+        if(r<0) return make_int(-1);
+        return make_int(WIFEXITED(status)?WEXITSTATUS(status):-1);
+#else
+        return make_int(-1);
+#endif
+    }
+
     /* sys.exit(code?) */
     if(strcmp_u(name,"sys.exit")==0){
         int s=(argc>1)?1:0;
@@ -3624,6 +3821,65 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         if(argc<s+1) return make_int(-1);
         Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
         return make_int(ys_net_accept(val_int(sv)));
+    }
+
+    /* y.net.tls_* — see the TLS engine comment near ys_net_close for
+       what this does and doesn't cover. Every branch here compiles
+       regardless of YS_WITH_TLS so a program using these builtins
+       always at least parses/runs; without the build flag they just
+       report a clear "not compiled in" error instead of connecting. */
+    if(strcmp_u(name,"y.net.tls_connect")==0){
+#ifdef YS_WITH_TLS
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_int(-1);
+        Val hv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val pv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        return make_int(ys_tls_connect(hv.type==YS_STR?hv.sval:"", (int)val_int(pv)));
+#else
+        ys_net_set_err("ys was built without TLS support (rebuild with -DYS_WITH_TLS -lssl -lcrypto)");
+        return make_int(-1);
+#endif
+    }
+    if(strcmp_u(name,"y.net.tls_send")==0){
+#ifdef YS_WITH_TLS
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_int(-1);
+        Val sv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val dv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(dv.type!=YS_STR) return make_int(-1);
+        return make_int(ys_tls_send(val_int(sv), dv.sval, dv.slen));
+#else
+        return make_int(-1);
+#endif
+    }
+    if(strcmp_u(name,"y.net.tls_recv")==0){
+#ifdef YS_WITH_TLS
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_str("");
+        Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        int maxlen=1024;
+        if(argc>s+1){ Val mv=eval_node(args[s+1],env); if(g_throwing) return make_nil(); maxlen=(int)val_int(mv); }
+        if(maxlen<=0) maxlen=1024;
+        char *buf=gc_alloc_str(maxlen+1);
+        int64_t n=ys_tls_recv(val_int(sv), buf, maxlen);
+        if(n<=0) return make_str("");
+        buf[n]=0;
+        Val r=make_nil(); r.type=YS_STR; r.sval=buf; r.slen=(int)n;
+        return r;
+#else
+        return make_str("");
+#endif
+    }
+    if(strcmp_u(name,"y.net.tls_close")==0){
+#ifdef YS_WITH_TLS
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        ys_tls_close(val_int(sv));
+        return make_nil();
+#else
+        return make_nil();
+#endif
     }
 
     /* y.map.* — hashmap (see ys_map_* engine near top of file) */

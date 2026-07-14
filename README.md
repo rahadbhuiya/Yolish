@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.12-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.14-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -21,7 +21,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.12 |
+| **Version** | v2.14 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -338,6 +338,8 @@ fn fetch_and_save(url, path) { ... }
 | **v2.10** | **Native TCP networking on Linux — `ys -c file.y --target linux` can now compile `y.net.connect/send/recv_print/close` down to raw syscalls, no libc. Narrower API than the interpreter/VM version (IPv4 literals only, no hostnames — see DOCS.md). Also fixed the ELF writer marking its whole data segment read-only, which broke any runtime write into that memory** |
 | **v2.11** | **Connect timeout for `y.net.connect` (10s default — previously a bare blocking connect() could hang indefinitely against an unreachable address). Server-side sockets (`y.net.listen/accept`), interpreter + VM, tested with a real two-process client/server exchange** |
 | **v2.12** | **Native listen/accept on Linux — `y.net.listen/accept` now compiles to raw syscalls too, tested with real native-compiled client/server pairs (and cross-compatibility with the interpreter's sockets)** |
+| **v2.13** | **`process.fork()`/`process.wait()` for real concurrent servers (fork-per-connection, tested with two simultaneous clients). Fixed `y.net.send` silently truncating large payloads on a short write — verified with a 5MB send** |
+| **v2.14** | **Real TLS/HTTPS via OpenSSL (`y.net.tls_*`) — opt-in build (`make tls`), interpreter + VM. Certificate verification actually tested: self-signed certs rejected, valid certs succeed with real HTTPS data** |
 
 ### Upcoming
 

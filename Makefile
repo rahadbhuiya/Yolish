@@ -1,4 +1,4 @@
-#  Yolish v2.8 — Makefile
+#  Yolish v2.14 — Makefile
 #  Targets: all  debug  windows  icons  release  clean
 
 CC       ?= gcc
@@ -34,6 +34,23 @@ $(EXE): $(SRCS) yolish.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LIBS)
 	@echo "Built: ./$(EXE)"
 
+#  tls: build with real TLS support (y.net.tls_*), via OpenSSL.
+#   Linux/macOS only for now — requires libssl-dev (Debian/Ubuntu:
+#   `apt install libssl-dev`, macOS: `brew install openssl`, then you
+#   may need to pass -I/-L flags pointing at brew's openssl if it's
+#   not on the default search path). This is a separate target, not
+#   folded into `all`, specifically so the default build (including
+#   Windows CI) keeps working without needing OpenSSL set up.
+#   macOS + Homebrew note: if the linker can't find -lssl/-lcrypto,
+#   Homebrew's openssl isn't symlinked onto the default search path
+#   (common on Apple Silicon). Find it with `brew --prefix openssl`
+#   and add e.g.:
+#     make tls CFLAGS="$(CFLAGS) -I$(brew --prefix openssl)/include" \
+#              LDFLAGS="-L$(brew --prefix openssl)/lib"
+tls: $(SRCS) yolish.h
+	$(CC) $(CFLAGS) -DYS_WITH_TLS $(LDFLAGS) -o $(EXE) $(SRCS) $(LIBS) -lssl -lcrypto
+	@echo "Built: ./$(EXE) (with TLS support — y.net.tls_* is live)"
+
 #  debug: address + UB sanitizers 
 debug: $(SRCS) yolish.h
 	$(CC) $(CFLAGS) $(SAN) -o ys_debug $(SRCS) $(LIBS)
@@ -56,7 +73,7 @@ icons: $(ICONS_DIR)/logo.svg
 #  windows: cross-compile PE32+ .exe (requires MinGW) 
 #   Run `make icons` first if icons/ys.ico does not exist yet.
 windows: $(ICONS_DIR)/ys.ico ys_icon.o
-	$(MINGW_CC) $(CFLAGS) -static -o ys.exe $(SRCS) ys_icon.o -lm -lws2_32
+	$(MINGW_CC) $(CFLAGS) -static -o ys.exe $(SRCS) ys_icon.o -lm
 	@echo "Built: ./ys.exe (Windows PE32+)"
 
 ys_icon.o: ys_icon.rc $(ICONS_DIR)/ys.ico
@@ -75,4 +92,4 @@ clean:
 	rm -f ys ys.exe ys_debug ys_icon.o *.o \
 	      $(ICONS_DIR)/logo_*.png $(ICONS_DIR)/ys.ico
 
-.PHONY: all debug icons windows release clean
+.PHONY: all tls debug icons windows release clean

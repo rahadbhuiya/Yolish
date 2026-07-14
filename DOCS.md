@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.12  
+**Version:** v2.14  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -1922,6 +1922,12 @@ process.spawn(cmd)          -- string (stdout output)
 process.spawn_code(cmd)     -- int (exit code)
 process.env(key)            -- string or nil (environment variable)
 process.pid()               -- int (current process ID)
+process.fork()              -- 0 in the child, child's pid in the
+                             -- parent, -1 on failure/unsupported
+                             -- (POSIX only — see §44 for the
+                             -- fork-per-connection server pattern)
+process.wait(pid)           -- blocks for a specific child, returns
+                             -- its exit code, or -1
 
 -- System
 sys.exit(code)              -- exit with given code
@@ -2356,12 +2362,129 @@ both tried) and literal IP addresses.
   hang for the OS's own (often much longer) TCP timeout instead of
   failing promptly.
 - `y.net.accept` has **no** timeout — it blocks until a client connects,
-  which is the normal shape of a server accept loop. This means the
-  echo server example above runs forever until killed; that's expected.
-- This is a single-threaded, one-connection-at-a-time server model —
-  handle one client fully (or at least far enough to hand it off) before
-  calling `accept` again. There's no built-in concurrency primitive yet
-  for handling multiple clients at once.
+  which is the normal shape of a server accept loop.
+- `y.net.send` loops internally until all of `data` is sent (or an
+  error occurs) — a single underlying `send()` syscall can write fewer
+  bytes than requested for large payloads (a "short write"), so this
+  matters for anything much bigger than a few KB. Tested with a 5MB
+  payload sent whole in one `y.net.send` call.
+
+### Handling more than one client at once: process.fork()
+
+The echo server example above handles exactly one client, start to
+finish, before accepting the next — fine for testing, not for a real
+server. Fork a child process per connection instead:
+
+```yolish
+let srv = y.net.listen(9000)
+while true {
+    let client = y.net.accept(srv)
+    let pid = process.fork()
+    if pid == 0 {
+        -- child: handle this one client, then exit
+        let msg = y.net.recv(client, 1024)
+        y.net.send(client, msg)
+        y.net.close(client)
+        y.exit(0)
+    } else {
+        -- parent: drop its copy of the fd (the child has its own) and
+        -- go straight back to accepting the next connection
+        y.net.close(client)
+    }
+}
+```
+
+```yolish
+process.fork()      -- returns 0 in the child, the child's pid in the
+                     -- parent, or -1 on failure. POSIX only — always
+                     -- returns -1 on Windows (fork() doesn't exist
+                     -- there; there's no substitute wired up yet).
+process.wait(pid)    -- blocks until the given child exits, returns its
+                     -- exit code, or -1 on failure
+```
+
+`process.fork()` sets `SIGCHLD` to `SIG_IGN` the first time it's
+called, so the OS auto-reaps finished children without your script
+needing to call `process.wait()` on each one — the right default for a
+fire-and-forget fork-per-connection loop like the example above. If you
+do need to track a *specific* child (e.g. a worker you're coordinating
+with rather than a fire-and-forget connection handler), `process.wait
+(pid)` still works — `SIG_IGN` only skips automatic cleanup for
+children nobody ever waits on.
+
+Verified with two real clients connecting at the same moment: the
+server forked two children, each received the right message with no
+cross-talk between connections.
+
+Not implemented for **native compilation** — `process.fork` is an
+interpreter/VM builtin only right now, same tier as the rest of
+`process.*`.
+
+### TLS / HTTPS: y.net.tls_*
+
+Real TLS via OpenSSL — **not** a custom crypto implementation. This
+wraps OpenSSL's `SSL_*` API (an audited, industry-standard library)
+rather than hand-rolling a handshake/cipher suite/certificate parser,
+which would be a project on its own and not something to trust without
+serious dedicated security review.
+
+**Opt-in at build time** — the default `ys`/`ys.exe` does **not**
+include TLS support, so `y.net.tls_*` returns a clear "not compiled
+in" error unless built with `make tls` (see BUILD.md). This is
+specifically so the project's existing build pipeline (including
+Windows CI, where an OpenSSL setup isn't guaranteed) keeps working
+unchanged; TLS becomes available wherever the extra dependency is
+added — trivial on Linux/macOS, not currently supported on Windows.
+
+```yolish
+y.net.tls_connect(host, port)  -- TLS handshake over a new TCP
+                                -- connection, returns a handle, or -1
+                                -- on failure (bad cert, handshake
+                                -- error, or plain connect failure)
+y.net.tls_send(handle, data)   -- sends a string, returns bytes sent
+                                -- or -1 (loops internally on short
+                                -- writes, same as y.net.send)
+y.net.tls_recv(handle, maxlen) -- reads up to maxlen bytes, returns a
+                                -- string ("" on EOF/error)
+y.net.tls_close(handle)        -- closes the connection
+```
+
+```yolish
+let sock = y.net.tls_connect("example.com", 443)
+if sock == -1 {
+    y.println("TLS connect failed: " + y.net.last_error())
+} else {
+    y.net.tls_send(sock, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+    y.println(y.net.tls_recv(sock, 4096))
+    y.net.tls_close(sock)
+}
+```
+
+**Certificate verification is enabled and enforced** — this was
+specifically tested, not just assumed from reading OpenSSL's docs: a
+connection to a server presenting a self-signed/untrusted certificate
+(verified against a local test server) is correctly rejected with a
+"TLS handshake failed" error, while a connection to a server with a
+valid certificate (verified against a real public HTTPS endpoint)
+succeeds and returns real response data. SNI is sent
+(`SSL_set_tlsext_host_name`), required by most modern virtual-hosted
+HTTPS servers, and hostname verification is checked against the
+certificate (`SSL_set1_host`), not just chain-of-trust validity.
+
+### Notes
+
+- `y.net.tls_connect` reuses `y.net.connect` for the underlying TCP
+  connection, so the same 10-second connect timeout applies.
+- TLS handles are a **separate id space** from plain `y.net.*` socket
+  handles — a TLS handle must only be used with `y.net.tls_*`
+  functions, never with plain `y.net.send`/`recv`/`close`, and vice
+  versa. Mixing them is a programming error this layer doesn't try to
+  detect for you.
+- `y.net.listen`/`y.net.accept` have no TLS equivalent yet — this
+  batch covers the client side only.
+- Not implemented for native compilation, and not implemented for
+  Windows even in the interpreter/VM build (the OpenSSL dependency
+  isn't wired up for MinGW builds yet).
 
 ### Native compilation, Linux only (`ys -c file.y --target linux`)
 

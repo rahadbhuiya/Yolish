@@ -64,6 +64,14 @@ Output: `./ys`
 ./hello                         # run the compiled binary
 ```
 
+**With TLS support** (`y.net.tls_*` — real HTTPS via OpenSSL, opt-in
+since it's a new dependency the default build doesn't require):
+
+```bash
+sudo apt install libssl-dev     # Debian/Ubuntu
+make tls
+```
+
 Install system-wide:
 ```bash
 sudo cp ys /usr/local/bin/
@@ -86,6 +94,14 @@ Install system-wide:
 sudo cp ys /usr/local/bin/
 # or
 sudo cp ys /usr/bin/
+```
+
+**With TLS support** (`y.net.tls_*`):
+```bash
+brew install openssl
+make tls   # if the linker can't find openssl, see the CFLAGS/LDFLAGS
+           # note in the Makefile — Homebrew's openssl isn't always on
+           # the default search path, especially on Apple Silicon
 ```
 
 ---
@@ -214,6 +230,7 @@ ys.exe      Windows x86-64 binary (with icon)
 | Target | Description |
 |--------|-------------|
 | `make` | Build `ys` for current OS |
+| `make tls` | Build `ys` with TLS support (`y.net.tls_*`), requires OpenSSL — Linux/macOS only |
 | `make windows` | Cross-compile `ys.exe` for Windows |
 | `make icons` | Generate `ys.ico` + PNG sizes from `logo.svg` |
 | `make release` | Build both `ys` and `ys.exe` |
@@ -236,5 +253,15 @@ GitHub Actions will:
 2. Cross-compile `ys.exe` (Ubuntu + MinGW, with icon)
 3. Build `ys-macos` (macOS runner)
 4. Create a GitHub Release with all three binaries attached
+
+> **Note:** these CI-built release binaries do **not** include TLS
+> support (`y.net.tls_*`) unless the workflow is updated to use
+> `make tls` and install `libssl-dev` on the Linux/macOS runners first
+> — see [Makefile Targets](#makefile-targets). This isn't done by
+> default because Windows CI doesn't have an OpenSSL build set up
+> (TLS isn't available for the Windows target regardless — see
+> DOCS.md §44), and it seemed better to keep all three release
+> binaries built the same way rather than have Linux/macOS silently
+> diverge in capability from Windows.
 
 Workflow file: [`.github/workflows/release.yml`](.github/workflows/release.yml)

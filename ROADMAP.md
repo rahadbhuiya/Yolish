@@ -46,34 +46,64 @@ Exploidus, readable, safe, and practical.
 | **v2.10** | **Native TCP networking on Linux (`ys -c file.y --target linux`): raw `socket`/`connect`/`read`/`write`/`close` syscalls, no libc — a hand-written IPv4 dotted-decimal parser (there's no DNS-resolution syscall to lean on), `y.net.connect/send/recv_print/close`. Along the way: fixed the ELF writer marking its data segment read-only, which made any runtime write into that segment (e.g. `recv`'s destination buffer) fail with EFAULT** |
 | **v2.11** | **Connect timeout (10s default, non-blocking connect + poll) for the interpreter/VM networking path — a bare blocking connect() to an unreachable address could previously hang for the OS's own TCP timeout. Server-side sockets, interpreter + VM (`y.net.listen/accept`), tested with a real two-process client/server exchange over both the tree-walking interpreter and the bytecode VM** |
 | **v2.12** | **Native listen/accept on Linux (`y.net.listen/accept` compiled to raw bind/listen/accept syscalls) — tested with real native-compiled client/server pairs and cross-compatibility between native and interpreted endpoints (they're both just standard TCP)** |
+| **v2.13** | **`process.fork()`/`process.wait()` — real concurrent servers via fork-per-connection, verified with two simultaneous clients and no cross-talk. Fixed `y.net.send` silently truncating large payloads on a short write (now loops until everything is sent); verified with a 5MB send delivered whole in one call** |
+| **v2.14** | **Real TLS/HTTPS (`y.net.tls_connect/send/recv/close`) via OpenSSL — opt-in build (`make tls`), interpreter + VM, Linux/macOS. Certificate verification tested both ways: a self-signed cert is correctly rejected, a valid public HTTPS endpoint succeeds with real data received over the encrypted channel** |
 
 ---
 
 ## Upcoming
 
-### v2.12: Networking (in progress)
-- Done: native listen/accept on Linux (`y.net.listen/accept`, raw
-  bind/listen/accept syscalls) — tested with real native-compiled
-  client/server pairs, and cross-compatibility (native server with an
-  interpreter client and vice versa, both just standard TCP underneath)
-- Done (v2.11): connect timeout (10s default) for the interpreter/VM
-  path; server-side sockets, interpreter + VM (`y.net.listen/accept`)
-- Done (v2.10): TCP client sockets, native compilation on Linux (raw
-  syscalls, no libc) — narrower API: `y.net.connect/send/recv_print/
-  close`, IPv4 literal addresses and literal string data only
+### v2.14: TLS/HTTPS — y.net.tls_*
+- Done: real TLS via OpenSSL (`y.net.tls_connect/send/recv/close`),
+  interpreter + VM, Linux/macOS. Opt-in build flag (`make tls`,
+  `-DYS_WITH_TLS -lssl -lcrypto`) so the existing build pipeline
+  (including Windows CI) keeps working unchanged without needing
+  OpenSSL set up.
+- Certificate verification is enabled and was actually tested both
+  ways, not just assumed: a self-signed/untrusted cert (a local test
+  server) is correctly rejected; a valid cert (a real public HTTPS
+  endpoint) succeeds with real response data received over the
+  encrypted channel. SNI and hostname verification both confirmed
+  working.
+- This closes the single biggest gap flagged in v2.13's roadmap notes
+  between "works and is tested" and genuinely usable for real traffic
+  — `y.net.tls_*` can now talk to ordinary public HTTPS APIs/websites,
+  not just plain-HTTP or internal/trusted-network services.
+- Pending: TLS on Windows (interpreter/VM) — OpenSSL isn't wired up
+  for MinGW builds yet.
+- Pending: TLS for native compilation on any target — would need the
+  native backend to support dynamic linking at all first, which it
+  currently doesn't on any target (this is a bigger, separate
+  foundational change, not a small extension of the existing raw-
+  syscall approach).
+- Pending: `y.net.tls_listen`/`tls_accept` (server-side TLS) — this
+  batch covers the client side only.
+
+### v2.13: Networking — toward production readiness
+- Done: `process.fork()`/`process.wait()`, enabling a real
+  fork-per-connection concurrent server (interpreter + VM). Verified
+  with two real clients connecting simultaneously — separate forked
+  children, no cross-talk between connections
+- Done: `y.net.send` now loops until all data is sent instead of
+  returning after a single short write, which could previously
+  silently truncate large payloads. Verified with a 5MB send in one
+  call, fully delivered
+- Done (v2.12): native listen/accept on Linux
+- Done (v2.11): connect timeout; server-side sockets, interpreter + VM
+- Done (v2.10): native TCP client sockets, Linux
 - Done (v2.9): TCP client sockets, interpreter + bytecode VM
-  (`y.net.connect/send/recv/close/last_error`) — hostnames, arbitrary
-  receive length, string return values
-- Pending: native compilation on Windows (Winsock2 imports) and macOS
-  (BSD sockets via libSystem, needs Mach-O dynamic linking first)
-- Pending: hostname resolution for native builds — needs either a
-  hand-rolled DNS client (raw UDP) or dynamic linking against libc
-- Pending: SO_REUSEADDR for native listen (needs setsockopt's 5-arg
-  syscall ABI, which needs r8/r10 — outside the 8-base-register
-  encoding this file currently sticks to)
-- Pending: concurrency for the server path — right now handling a
-  second client means finishing (or at least accepting past) the first
-- Pending: recv/accept timeout (only connect() has one so far)
+- **TLS/HTTPS: see v2.14 above** — shipped shortly after this note was
+  originally written as "not planned near-term" for the interpreter/VM
+  via OpenSSL (opt-in build flag). Still not available for native
+  compilation or on Windows — those parts of the original concern
+  still stand.
+- Pending: native compilation on Windows (Winsock2) and macOS (needs
+  Mach-O dynamic linking first)
+- Pending: hostname resolution for native builds
+- Pending: SO_REUSEADDR for native listen
+- Pending: accept()/recv() timeout (only connect() has one)
+- Pending: `process.fork()`-based concurrency for native compilation
+  (interpreter/VM only right now)
 - Pending: UDP sockets
 - Pending: HTTP client convenience wrapper built on top of TCP
 
