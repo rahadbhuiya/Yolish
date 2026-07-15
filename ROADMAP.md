@@ -48,10 +48,39 @@ Exploidus, readable, safe, and practical.
 | **v2.12** | **Native listen/accept on Linux (`y.net.listen/accept` compiled to raw bind/listen/accept syscalls) — tested with real native-compiled client/server pairs and cross-compatibility between native and interpreted endpoints (they're both just standard TCP)** |
 | **v2.13** | **`process.fork()`/`process.wait()` — real concurrent servers via fork-per-connection, verified with two simultaneous clients and no cross-talk. Fixed `y.net.send` silently truncating large payloads on a short write (now loops until everything is sent); verified with a 5MB send delivered whole in one call** |
 | **v2.14** | **Real TLS/HTTPS (`y.net.tls_connect/send/recv/close`) via OpenSSL — opt-in build (`make tls`), interpreter + VM, Linux/macOS. Certificate verification tested both ways: a self-signed cert is correctly rejected, a valid public HTTPS endpoint succeeds with real data received over the encrypted channel** |
+| **v2.15** | **HTTP client (`y.http.get/post`) built on `y.net.*`/`y.net.tls_*` — status/body/headers parsing, chunked Transfer-Encoding decoding (tested against a deliberately 3-chunk response), tested against real HTTPS endpoints and a local server confirming full POST bodies arrive intact** |
+| **v2.16** | **`y.http.*` now follows 3xx redirects automatically (up to 10 hops), with correct per-status method/body handling (303 and POST-via-301/302 downgrade to GET; 307/308 preserve method+body) — verified against local test servers for the multi-hop chain, both downgrade cases, and the loop-detection limit** |
 
 ---
 
 ## Upcoming
+
+### v2.16: HTTP redirect following
+- Done: `y.http.get`/`post` now follow 3xx redirects automatically (up
+  to 10 hops, "too many redirects" on a loop rather than hanging).
+  Correct method/body handling per redirect status: 303 and
+  POST-via-301/302 downgrade to GET with no body; 307/308 preserve the
+  original method and body. Handles both absolute and relative
+  `Location` headers. All of this — the multi-hop chain, both
+  downgrade cases, the loop-detection limit — was verified against
+  purpose-built local test servers, not just read from the HTTP spec
+  and assumed correct.
+- Not implemented for native compilation (same tier as the rest of
+  `y.http.*`/`y.net.tls_*`).
+
+### v2.15: HTTP client — y.http.*
+- Done: `y.http.get(url)`/`y.http.post(url, body, content_type)`,
+  interpreter + VM, built on `y.net.*`/`y.net.tls_*`. Returns a
+  `y.map` with status/body/headers, or nil on failure.
+- Handles both `http://` and `https://` (the latter needs `make tls`).
+  Decodes chunked `Transfer-Encoding` — tested directly against a
+  server that deliberately sent a 3-chunk response, reassembled
+  correctly. Tested against real endpoints (pypi.org, api.github.com)
+  and a local server for the POST body (confirmed the full body
+  arrives, not just headers).
+- No redirect following, no cookies, no compression, no connection
+  reuse — a basic client for straightforward request/response use.
+- Not implemented for native compilation (same tier as `y.net.tls_*`).
 
 ### v2.14: TLS/HTTPS — y.net.tls_*
 - Done: real TLS via OpenSSL (`y.net.tls_connect/send/recv/close`),

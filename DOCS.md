@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.14  
+**Version:** v2.16  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -52,6 +52,7 @@
 42. [Formatter: ys fmt](#42-formatter-ys-fmt)
 43. [Bytecode VM: ys vm](#43-bytecode-vm-ys-vm)
 44. [Networking: y.net.*](#44-networking-ynet)
+44a. [HTTP client: y.http.*](#44a-http-client-yhttp)
 45. [Bitwise Operators](#45-bitwise-operators)
 46. [Hashmap: y.map.*](#46-hashmap-ymap)
 
@@ -2569,6 +2570,85 @@ numbers and calling convention differ substantially from Linux's, and
 this hasn't been ported yet (also tracked in ROADMAP.md). Calling
 `y.net.*` while compiling for macOS or Windows hits the "unresolved
 symbol" safety net (a clean compile failure, not a broken binary).
+
+---
+
+## 44a. HTTP client: y.http.*
+
+A convenience layer on top of `y.net.*`/`y.net.tls_*` — builds a
+correct HTTP/1.1 request, sends it, reads the full response, and
+parses out the status code, headers, and body for you, instead of
+making you hand-build a raw request and parse the response yourself.
+
+```yolish
+y.http.get(url)                      -- GET request
+y.http.post(url, body, content_type) -- POST request; content_type
+                                      -- defaults to
+                                      -- "application/octet-stream"
+                                      -- if omitted
+```
+
+Both return a `y.map` with three keys, or `nil` on failure (check
+`y.net.last_error()`):
+
+```yolish
+{
+    status:  200,                       -- int
+    body:    "...",                     -- string
+    headers: { "content-type": "...", ... }  -- y.map, lowercased keys
+}
+```
+
+```yolish
+let r = y.http.get("https://pypi.org/")
+if r == nil {
+    y.println("request failed: " + y.net.last_error())
+} else {
+    y.println(y.map.get(r, "status"))
+    let headers = y.map.get(r, "headers")
+    y.println(y.map.get(headers, "content-type"))
+    y.println(y.map.get(r, "body"))
+}
+
+let r2 = y.http.post("https://httpbin.example/post",
+                      "name=yolish&version=2.15",
+                      "application/x-www-form-urlencoded")
+y.println(y.map.get(r2, "status"))
+```
+
+`https://` URLs need TLS support compiled in (`make tls`) — with the
+default build, `y.http.get`/`post` on an `https://` URL returns `nil`
+with a clear error rather than silently trying plaintext or crashing.
+
+### What this does and doesn't handle
+
+- Reads the response with a simple "read until the connection closes"
+  strategy, relying on the request always sending `Connection: close`
+  — correct framing for both `Content-Length` and chunked bodies as
+  long as the server honors the header (virtually all do).
+- **Chunked `Transfer-Encoding` is decoded** — tested directly against
+  a server that deliberately sent a three-chunk response; the
+  reassembled body matched exactly.
+- **3xx redirects are followed automatically**, up to 10 hops (a loop
+  or excessively long chain fails cleanly with "too many redirects"
+  rather than hanging — tested directly against a server that always
+  redirects back to itself). `Location` can be a full URL or a
+  relative path, both are handled; the final response (after
+  following) is what's returned. Method/body handling on redirect
+  matches curl/browser default behavior: a `303` always downgrades to
+  `GET` with no body; `301`/`302` downgrade a `POST` to `GET` too
+  (servers commonly rely on this); `307`/`308` preserve the original
+  method and body unchanged. All three cases were tested directly
+  against local servers built to check exactly what arrived at the
+  redirect target.
+- No cookies, no compression (`Accept-Encoding` isn't sent, so a
+  compliant server responds uncompressed), no connection reuse
+  (matches the `Connection: close` framing strategy above — each
+  request/redirect hop opens a fresh connection).
+- This is a basic client for straightforward request/response use, not
+  a full-featured one.
+
+Not implemented for native compilation, same tier as `y.net.tls_*`.
 
 ---
 

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.14-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.16-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -21,7 +21,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.14 |
+| **Version** | v2.16 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -340,6 +340,8 @@ fn fetch_and_save(url, path) { ... }
 | **v2.12** | **Native listen/accept on Linux — `y.net.listen/accept` now compiles to raw syscalls too, tested with real native-compiled client/server pairs (and cross-compatibility with the interpreter's sockets)** |
 | **v2.13** | **`process.fork()`/`process.wait()` for real concurrent servers (fork-per-connection, tested with two simultaneous clients). Fixed `y.net.send` silently truncating large payloads on a short write — verified with a 5MB send** |
 | **v2.14** | **Real TLS/HTTPS via OpenSSL (`y.net.tls_*`) — opt-in build (`make tls`), interpreter + VM. Certificate verification actually tested: self-signed certs rejected, valid certs succeed with real HTTPS data** |
+| **v2.15** | **HTTP client (`y.http.get/post`) — status/body/headers as a `y.map`, chunked Transfer-Encoding decoding, works over both plain HTTP and HTTPS** |
+| **v2.16** | **`y.http.*` follows redirects automatically (up to 10 hops) with correct 301/302/303/307/308 method-downgrade semantics — verified against local test servers, not just assumed from the spec** |
 
 ### Upcoming
 

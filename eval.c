@@ -750,6 +750,325 @@ static void ys_tls_close(int64_t handle){
 }
 #endif /* YS_WITH_TLS */
 
+/*
+   HTTP client (y.http.get / y.http.post)
+   ---------------------------------------
+   A convenience layer on top of the y.net connect/send/recv functions
+   above (both the plain and TLS variants) — builds a
+   correct HTTP/1.1 request, sends it, reads the full response
+   (relying on "Connection: close" so a simple read-until-EOF is
+   sufficient framing for either Content-Length or chunked bodies),
+   and parses out the status code, headers, and body (decoding
+   chunked Transfer-Encoding if present). Returns a y.map with
+   "status" (int), "body" (string), and "headers" (a y.map of
+   lowercased header names to values), or nil on failure (check
+   y.net.last_error()).
+
+   Scope: no redirect following, no cookies, no compression
+   (Accept-Encoding is not sent, so a compliant server sends the body
+   uncompressed) — this is a basic client, not a full one.
+*/
+/* forward decls: the hashmap engine (ys_map_*) is defined further
+   below, but the HTTP client (right here) needs it for building the
+   headers/result maps */
+static void ys_map_init(Val *m, int cap);
+static void ys_map_set(Val *m, Val k, Val v);
+static Val *ys_map_get(Val *m, Val k);
+
+static int ys_ieq(const char *a, const char *b){
+    while(*a && *b){
+        char ca=*a, cb=*b;
+        if(ca>='A'&&ca<='Z') ca+=32;
+        if(cb>='A'&&cb<='Z') cb+=32;
+        if(ca!=cb) return 0;
+        a++; b++;
+    }
+    return *a==0 && *b==0;
+}
+
+typedef struct { char scheme[8]; char host[256]; int port; char path[1024]; } YsUrl;
+
+static int ys_url_parse(const char *url, YsUrl *out){
+    out->scheme[0]=0; out->host[0]=0; out->port=0; out->path[0]=0;
+
+    const char *p=url;
+    const char *scheme_end=strstr(p,"://");
+    if(scheme_end){
+        int slen=(int)(scheme_end-p);
+        if(slen<=0||slen>=(int)sizeof(out->scheme)) return 0;
+        memcpy(out->scheme,p,slen); out->scheme[slen]=0;
+        p=scheme_end+3;
+    } else {
+        strcpy(out->scheme,"http");
+    }
+    if(!ys_ieq(out->scheme,"http") && !ys_ieq(out->scheme,"https")) return 0;
+    if(*p==0) return 0;
+
+    const char *host_start=p;
+    const char *path_start=strchr(p,'/');
+    const char *host_end = path_start ? path_start : p+strlen(p);
+
+    const char *colon=NULL;
+    for(const char *q=host_start;q<host_end;q++) if(*q==':'){ colon=q; break; }
+
+    int host_len = colon ? (int)(colon-host_start) : (int)(host_end-host_start);
+    if(host_len<=0||host_len>=(int)sizeof(out->host)) return 0;
+    memcpy(out->host,host_start,host_len); out->host[host_len]=0;
+
+    if(colon && colon+1<host_end){
+        out->port=atoi(colon+1);
+        if(out->port<=0||out->port>65535) return 0;
+    } else {
+        out->port = ys_ieq(out->scheme,"https") ? 443 : 80;
+    }
+
+    if(path_start){
+        int plen=(int)strlen(path_start);
+        if(plen>=(int)sizeof(out->path)) plen=(int)sizeof(out->path)-1;
+        memcpy(out->path,path_start,plen); out->path[plen]=0;
+    } else {
+        strcpy(out->path,"/");
+    }
+    return 1;
+}
+
+/* Reads from a socket (plain fd, or TLS handle when is_tls) until the
+   connection closes, growing a plain malloc'd buffer as needed —
+   NOT gc_alloc_str, since this is a C-side scratch buffer freed
+   before this function's caller ever hands anything back to Yolish
+   code. Returns NULL on a read error with nothing yet received. */
+static char *ys_http_read_all(int64_t handle, int is_tls, int *out_len){
+    size_t cap=8192, len=0;
+    char *buf=malloc(cap);
+    if(!buf){ *out_len=0; return NULL; }
+    for(;;){
+        if(len+4096>cap){
+            cap*=2;
+            char *nb=realloc(buf,cap);
+            if(!nb) break;
+            buf=nb;
+        }
+        int64_t n;
+#ifdef YS_WITH_TLS
+        if(is_tls) n=ys_tls_recv(handle, buf+len, 4096);
+        else n=ys_net_recv(handle, buf+len, 4096);
+#else
+        (void)is_tls;
+        n=ys_net_recv(handle, buf+len, 4096);
+#endif
+        if(n<=0) break;
+        len+=(size_t)n;
+    }
+    *out_len=(int)len;
+    if(len==0){ free(buf); return NULL; }
+    return buf;
+}
+
+static Val ys_http_request_once(const char *method, const char *url, const char *body, int body_len, const char *content_type){
+    YsUrl u;
+    if(!ys_url_parse(url,&u)){ ys_net_set_err("invalid URL"); return make_nil(); }
+    int use_tls = ys_ieq(u.scheme,"https");
+#ifndef YS_WITH_TLS
+    if(use_tls){ ys_net_set_err("https:// requires ys built with TLS support (see: make tls)"); return make_nil(); }
+#endif
+
+    int64_t handle;
+#ifdef YS_WITH_TLS
+    if(use_tls) handle=ys_tls_connect(u.host,u.port);
+    else handle=ys_net_connect(u.host,u.port);
+#else
+    handle=ys_net_connect(u.host,u.port);
+#endif
+    if(handle<0) return make_nil(); /* error already set by connect */
+
+    char reqbuf[2048];
+    int n;
+    if(body && body_len>0){
+        n=snprintf(reqbuf,sizeof(reqbuf),
+            "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Yolish\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n",
+            method,u.path,u.host,content_type?content_type:"application/octet-stream",body_len);
+    } else {
+        n=snprintf(reqbuf,sizeof(reqbuf),
+            "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Yolish\r\n\r\n",
+            method,u.path,u.host);
+    }
+    if(n<0||n>=(int)sizeof(reqbuf)){
+        ys_net_set_err("request headers too large");
+#ifdef YS_WITH_TLS
+        if(use_tls) ys_tls_close(handle); else ys_net_close(handle);
+#else
+        ys_net_close(handle);
+#endif
+        return make_nil();
+    }
+
+#ifdef YS_WITH_TLS
+    if(use_tls) ys_tls_send(handle,reqbuf,n); else ys_net_send(handle,reqbuf,n);
+    if(body && body_len>0){ if(use_tls) ys_tls_send(handle,body,body_len); else ys_net_send(handle,body,body_len); }
+#else
+    ys_net_send(handle,reqbuf,n);
+    if(body && body_len>0) ys_net_send(handle,body,body_len);
+#endif
+
+    int raw_len=0;
+    char *raw=ys_http_read_all(handle, use_tls, &raw_len);
+#ifdef YS_WITH_TLS
+    if(use_tls) ys_tls_close(handle); else ys_net_close(handle);
+#else
+    ys_net_close(handle);
+#endif
+
+    if(!raw || raw_len==0){ if(raw) free(raw); ys_net_set_err("empty response"); return make_nil(); }
+
+    char *sep=NULL;
+    for(int i=0;i+3<raw_len;i++){
+        if(raw[i]=='\r'&&raw[i+1]=='\n'&&raw[i+2]=='\r'&&raw[i+3]=='\n'){ sep=raw+i; break; }
+    }
+    char *headers_end = sep ? sep : raw+raw_len;
+    char *body_start   = sep ? sep+4 : raw+raw_len;
+    int body_len_actual=(int)((raw+raw_len)-body_start);
+
+    int status=0;
+    {
+        char *line_end=memchr(raw,'\n',(size_t)(headers_end-raw));
+        int line_len = line_end ? (int)(line_end-raw) : (int)(headers_end-raw);
+        for(int i=0;i<line_len;i++){ if(raw[i]==' '){ status=atoi(raw+i+1); break; } }
+    }
+
+    Val hdrs=make_nil(); ys_map_init(&hdrs,8);
+    {
+        char *p2=memchr(raw,'\n',(size_t)(headers_end-raw));
+        if(p2) p2++;
+        while(p2 && p2<headers_end){
+            char *line_end=memchr(p2,'\n',(size_t)(headers_end-p2));
+            int line_len = line_end ? (int)(line_end-p2) : (int)(headers_end-p2);
+            int ll=line_len; if(ll>0 && p2[ll-1]=='\r') ll--;
+            if(ll>0){
+                char *colon=memchr(p2,':',(size_t)ll);
+                if(colon){
+                    int klen=(int)(colon-p2);
+                    char *vstart=colon+1;
+                    int vlen=ll-(klen+1);
+                    while(vlen>0 && *vstart==' '){ vstart++; vlen--; }
+                    char kbuf[128]; int kk=klen<127?klen:127;
+                    for(int j=0;j<kk;j++){ char c=p2[j]; if(c>='A'&&c<='Z') c+=32; kbuf[j]=c; }
+                    kbuf[kk]=0;
+                    char vbuf[512]; int vv=vlen<511?vlen:511;
+                    if(vv>0) memcpy(vbuf,vstart,(size_t)vv);
+                    vbuf[vv>0?vv:0]=0;
+                    ys_map_set(&hdrs, make_str(kbuf), make_str(vbuf));
+                }
+            }
+            p2 = line_end ? line_end+1 : NULL;
+        }
+    }
+
+    char *final_body; int final_body_len;
+    Val *te=ys_map_get(&hdrs, make_str("transfer-encoding"));
+    if(te && te->type==YS_STR && strstr(te->sval,"chunked")){
+        size_t cap=(size_t)(body_len_actual>0?body_len_actual:256), outlen=0;
+        char *outbuf=malloc(cap);
+        char *cp=body_start; char *cend=raw+raw_len;
+        while(outbuf && cp<cend){
+            char *line_end=NULL;
+            for(char *q=cp;q+1<cend;q++){ if(q[0]=='\r'&&q[1]=='\n'){ line_end=q; break; } }
+            if(!line_end) break;
+            long chunk_size=strtol(cp,NULL,16);
+            if(chunk_size<=0) break;
+            char *data_start=line_end+2;
+            if(data_start+chunk_size>cend) break;
+            if(outlen+(size_t)chunk_size>cap){
+                cap=(outlen+(size_t)chunk_size)*2;
+                char *nb=realloc(outbuf,cap);
+                if(!nb) break;
+                outbuf=nb;
+            }
+            memcpy(outbuf+outlen,data_start,(size_t)chunk_size);
+            outlen+=(size_t)chunk_size;
+            cp=data_start+chunk_size+2;
+        }
+        final_body=outbuf; final_body_len=(int)outlen;
+    } else {
+        final_body=malloc((size_t)(body_len_actual>0?body_len_actual:1));
+        if(final_body && body_len_actual>0) memcpy(final_body,body_start,(size_t)body_len_actual);
+        final_body_len=body_len_actual;
+    }
+    free(raw);
+
+    Val result=make_nil(); ys_map_init(&result,4);
+    ys_map_set(&result, make_str("status"), make_int(status));
+    if(final_body){
+        char *gcbuf=gc_alloc_str(final_body_len+1);
+        if(final_body_len>0) memcpy(gcbuf,final_body,(size_t)final_body_len);
+        gcbuf[final_body_len]=0;
+        free(final_body);
+        Val bodyval=make_nil(); bodyval.type=YS_STR; bodyval.sval=gcbuf; bodyval.slen=final_body_len;
+        ys_map_set(&result, make_str("body"), bodyval);
+    } else {
+        ys_map_set(&result, make_str("body"), make_str(""));
+    }
+    ys_map_set(&result, make_str("headers"), hdrs);
+    return result;
+}
+
+/* Resolves a Location header against the URL it came from — Location
+   is very commonly just a path ("/login"), occasionally a full
+   absolute URL. This handles both; it does NOT handle relative paths
+   like "../x" or "x" without a leading slash beyond treating them as
+   host-root-relative, which covers the overwhelming majority of real
+   redirects without a full RFC 3986 relative-resolution algorithm. */
+static void ys_url_resolve(const char *base_url, const char *location, char *out, size_t outsz){
+    if(strstr(location,"://")){ snprintf(out,(int)outsz,"%s",location); return; }
+    YsUrl bu;
+    if(!ys_url_parse(base_url,&bu)){ snprintf(out,(int)outsz,"%s",location); return; }
+    int default_port = ys_ieq(bu.scheme,"https") ? 443 : 80;
+    const char *path = (location[0]=='/') ? location+1 : location;
+    if(bu.port==default_port) snprintf(out,(int)outsz,"%s://%s/%s",bu.scheme,bu.host,path);
+    else snprintf(out,(int)outsz,"%s://%s:%d/%s",bu.scheme,bu.host,bu.port,path);
+}
+
+#define YS_HTTP_MAX_REDIRECTS 10
+
+/* Follows 3xx redirects automatically (up to YS_HTTP_MAX_REDIRECTS),
+   otherwise just forwards to ys_http_request_once. 303 always
+   downgrades to GET; 301/302 downgrade a POST to GET too (matching
+   curl/browser default behavior, for compatibility with servers that
+   rely on it); 307/308 preserve the original method and body — this
+   matches how virtually every mainstream HTTP client behaves by
+   default. */
+static Val ys_http_request(const char *method, const char *url, const char *body, int body_len, const char *content_type){
+    char cur_url[2048];
+    snprintf(cur_url,sizeof(cur_url),"%s",url);
+    const char *cur_method=method;
+    const char *cur_body=body;
+    int cur_body_len=body_len;
+
+    for(int attempt=0; attempt<=YS_HTTP_MAX_REDIRECTS; attempt++){
+        Val r=ys_http_request_once(cur_method,cur_url,cur_body,cur_body_len,content_type);
+        if(r.type!=YS_MAP) return r; /* connection/parse failure, error already set */
+
+        Val *status_v=ys_map_get(&r, make_str("status"));
+        int status = status_v ? (int)val_int(*status_v) : 0;
+        if(status<300||status>399) return r; /* not a redirect — final answer */
+
+        Val *headers_v=ys_map_get(&r, make_str("headers"));
+        Val *loc_v = headers_v ? ys_map_get(headers_v, make_str("location")) : NULL;
+        if(!loc_v || loc_v->type!=YS_STR || loc_v->slen==0) return r; /* redirect with no Location to follow */
+
+        if(attempt==YS_HTTP_MAX_REDIRECTS){ ys_net_set_err("too many redirects"); return make_nil(); }
+
+        char next_url[2048];
+        ys_url_resolve(cur_url, loc_v->sval, next_url, sizeof(next_url));
+
+        if(status==303 || ((status==301||status==302) && ys_ieq(cur_method,"POST"))){
+            cur_method="GET"; cur_body=NULL; cur_body_len=0;
+        }
+        snprintf(cur_url,sizeof(cur_url),"%s",next_url);
+    }
+    ys_net_set_err("too many redirects");
+    return make_nil();
+}
+
 /* listen(port) -> a listening TCP socket bound to 0.0.0.0:port
    (backlog fixed at 128), or -1. */
 static int64_t ys_net_listen(int port){
@@ -3880,6 +4199,35 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #else
         return make_nil();
 #endif
+    }
+
+    /* y.http.* — convenience HTTP client built on the y.net connect/
+       send/recv functions (see ys_http_request near the TLS engine
+       for what this does and doesn't handle). Returns a map with
+       status, body, headers, or nil on failure (check
+       y.net.last_error()). */
+    if(strcmp_u(name,"y.http.get")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val uv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        if(uv.type!=YS_STR) return make_nil();
+        return ys_http_request("GET", uv.sval, NULL, 0, NULL);
+    }
+    if(strcmp_u(name,"y.http.post")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val uv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        if(uv.type!=YS_STR) return make_nil();
+        Val bv=make_nil();
+        if(argc>s+1){ bv=eval_node(args[s+1],env); if(g_throwing) return make_nil(); }
+        const char *ctype="application/octet-stream";
+        if(argc>s+2){
+            Val cv=eval_node(args[s+2],env); if(g_throwing) return make_nil();
+            if(cv.type==YS_STR) ctype=cv.sval;
+        }
+        const char *bdata = (bv.type==YS_STR) ? bv.sval : "";
+        int blen = (bv.type==YS_STR) ? bv.slen : 0;
+        return ys_http_request("POST", uv.sval, bdata, blen, ctype);
     }
 
     /* y.map.* — hashmap (see ys_map_* engine near top of file) */
