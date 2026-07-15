@@ -73,7 +73,7 @@ icons: $(ICONS_DIR)/logo.svg
 #  windows: cross-compile PE32+ .exe (requires MinGW) 
 #   Run `make icons` first if icons/ys.ico does not exist yet.
 windows: $(ICONS_DIR)/ys.ico ys_icon.o
-	$(MINGW_CC) $(CFLAGS) -static -o ys.exe $(SRCS) ys_icon.o -lm
+	$(MINGW_CC) $(CFLAGS) -static -o ys.exe $(SRCS) ys_icon.o -lws2_32 -lm
 	@echo "Built: ./ys.exe (Windows PE32+)"
 
 ys_icon.o: ys_icon.rc $(ICONS_DIR)/ys.ico

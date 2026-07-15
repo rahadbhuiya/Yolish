@@ -1,0 +1,59 @@
+v2.16: HTTP redirect following (y.http.get/post)
+
+Automatic 3xx redirect following
+--------------------------------------
+- ys_http_request_once (the previous single-shot implementation,
+  renamed) is now wrapped by ys_http_request, which follows redirects
+  in a loop up to YS_HTTP_MAX_REDIRECTS (10) hops.
+- Per-status method/body handling matches curl/browser default
+  behavior: 303 always downgrades to GET with no body; 301/302
+  downgrade a POST to GET too (a lot of real servers rely on this,
+  even though it's not strictly what the RFC says); 307/308 preserve
+  the original method and body unchanged.
+- Location header resolution (ys_url_resolve): handles both a full
+  absolute URL and the far more common case of a path-only value
+  ("/login"). Does not implement full RFC 3986 relative resolution
+  (../, etc.) — anything without a leading "://" is treated as
+  host-root-relative, which covers the overwhelming majority of real
+  redirects.
+- A redirect loop (or just an excessively long chain) fails cleanly
+  with "too many redirects" after 10 hops rather than hanging or
+  recursing unboundedly.
+
+Testing
+--------
+Every piece of the redirect logic was checked against a purpose-built
+local test server, not just read from the HTTP spec and assumed
+correct:
+- Multi-hop chain: 8001 (302) -> 8002 (302) -> 8003 (200), confirmed
+  the final response ("final", status 200) is what's returned, and all
+  three hops received GET requests.
+- POST through a 301: confirmed the redirect target received a GET
+  with no body (not the original POST/body).
+- POST through a 307: confirmed the redirect target received the
+  original POST with the exact original body intact
+  ("orig=data", Content-Length: 9).
+- Redirect loop: a server that always 302s back to itself was met with
+  "too many redirects" rather than hanging.
+
+Docs
+-----
+- DOCS.md: updated the "what this does and doesn't handle" list under
+  y.http.* — redirect-following behavior documented in detail
+  (including the status-code-dependent method/body semantics), no
+  longer listed as unimplemented.
+- ROADMAP.md / README.md: v2.16 changelog entries.
+
+No other behavior changed this batch — y.net.*, y.net.tls_*, bitwise
+ops, hashmap, process.fork/wait, and the native compiler are all
+untouched.
+
+Known gaps carried forward (tracked in ROADMAP.md)
+------------------------------------------------------
+- No cookies, no compression, no connection reuse (each
+  request/redirect hop opens a fresh connection) — unchanged from
+  v2.15.
+- Not implemented for native compilation (same tier as the rest of
+  y.http.*/y.net.tls_*).
+- Everything from v2.15's list (TLS on Windows, TLS for native
+  compilation, server-side TLS) is unchanged by this batch.
