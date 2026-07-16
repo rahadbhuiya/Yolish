@@ -1,4 +1,4 @@
-#  Yolish v2.14 — Makefile
+#  Yolish v2.16 — Makefile
 #  Targets: all  debug  windows  icons  release  clean
 
 CC       ?= gcc
@@ -19,7 +19,7 @@ ICONS_DIR = icons
 #  Detect host OS 
 ifeq ($(OS),Windows_NT)
     EXE    = ys.exe
-    LIBS   =
+    LIBS   = -lws2_32
     CFLAGS += -D_WIN32
 else
     UNAME := $(shell uname -s)
@@ -73,7 +73,7 @@ icons: $(ICONS_DIR)/logo.svg
 #  windows: cross-compile PE32+ .exe (requires MinGW) 
 #   Run `make icons` first if icons/ys.ico does not exist yet.
 windows: $(ICONS_DIR)/ys.ico ys_icon.o
-	$(MINGW_CC) $(CFLAGS) -static -o ys.exe $(SRCS) ys_icon.o -lws2_32 -lm
+	$(MINGW_CC) $(CFLAGS) -static -o ys.exe $(SRCS) ys_icon.o -lm -lws2_32
 	@echo "Built: ./ys.exe (Windows PE32+)"
 
 ys_icon.o: ys_icon.rc $(ICONS_DIR)/ys.ico

@@ -20,11 +20,14 @@
 #  include <sys/wait.h>
 #  define YS_SOCK_INVALID (-1)
 #else
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
 #  include <direct.h>
 #  include <windows.h>
 #  include <io.h>
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
    /* NOTE: building ys.exe on Windows with this file requires linking
       against ws2_32 (e.g. `gcc ... -lws2_32` or add ws2_32.lib in MSVC). */
 #  define YS_SOCK_INVALID INVALID_SOCKET

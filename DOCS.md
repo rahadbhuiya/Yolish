@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.16  
+**Version:** v2.17  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2352,8 +2352,10 @@ while true {
 `host` accepts both hostnames (resolved via `getaddrinfo`, IPv4 and IPv6
 both tried) and literal IP addresses.
 
-> On Windows, building `ys` from source requires linking against `ws2_32`
-> (e.g. `gcc ... -lws2_32`, or add `ws2_32.lib` in MSVC).
+> The Makefile's `windows`/cross-compile target and native Windows
+> builds both link against `ws2_32` automatically as of v2.17. Building
+> by hand outside the Makefile (e.g. a custom MSVC project) still needs
+> it added explicitly (`gcc ... -lws2_32`, or `ws2_32.lib` in MSVC).
 
 ### Notes
 

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.16-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.17-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -21,7 +21,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.16 |
+| **Version** | v2.17 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -342,6 +342,7 @@ fn fetch_and_save(url, path) { ... }
 | **v2.14** | **Real TLS/HTTPS via OpenSSL (`y.net.tls_*`) — opt-in build (`make tls`), interpreter + VM. Certificate verification actually tested: self-signed certs rejected, valid certs succeed with real HTTPS data** |
 | **v2.15** | **HTTP client (`y.http.get/post`) — status/body/headers as a `y.map`, chunked Transfer-Encoding decoding, works over both plain HTTP and HTTPS** |
 | **v2.16** | **`y.http.*` follows redirects automatically (up to 10 hops) with correct 301/302/303/307/308 method-downgrade semantics — verified against local test servers, not just assumed from the spec** |
+| **v2.17** | **Build fix: Windows target was never actually linking `ws2_32`, breaking Windows builds since v2.9's networking landed. Fixed in the Makefile, verified with a real MinGW cross-compile run through Wine (builds, runs, networking works)** |
 
 ### Upcoming
 
