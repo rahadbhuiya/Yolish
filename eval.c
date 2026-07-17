@@ -18,6 +18,7 @@
 #  include <poll.h>
 #  include <signal.h>
 #  include <sys/wait.h>
+#  include <sys/time.h>
 #  define YS_SOCK_INVALID (-1)
 #else
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -619,7 +620,17 @@ static int64_t ys_net_recv(int64_t sock, char *buf, int maxlen){
 #else
     ssize_t n=recv(s,buf,(size_t)maxlen,0);
 #endif
-    if(n<0){ ys_net_set_err("recv failed"); return -1; }
+    if(n<0){
+#ifdef _WIN32
+        if(WSAGetLastError()==WSAETIMEDOUT) ys_net_set_err("recv timed out");
+        else
+#else
+        if(errno==EAGAIN||errno==EWOULDBLOCK) ys_net_set_err("recv timed out");
+        else
+#endif
+        ys_net_set_err("recv failed");
+        return -1;
+    }
     return (int64_t)n;
 }
 
@@ -1114,13 +1125,46 @@ static int64_t ys_net_listen(int port){
 }
 
 /* accept(server_sock) -> a new connected client socket, or -1. Blocks
-   until a connection arrives — no timeout, matching the usual shape of
-   a server accept loop. */
+   until a connection arrives, unless a timeout was set via
+   y.net.set_timeout on the listening socket — see that function. */
 static int64_t ys_net_accept(int64_t server_sock){
     ys_sock_t s=(ys_sock_t)server_sock;
     ys_sock_t c = accept(s, NULL, NULL);
-    if(c==YS_SOCK_INVALID){ ys_net_set_err("accept failed"); return -1; }
+    if(c==YS_SOCK_INVALID){
+#ifdef _WIN32
+        if(WSAGetLastError()==WSAETIMEDOUT) ys_net_set_err("accept timed out");
+        else
+#else
+        if(errno==EAGAIN||errno==EWOULDBLOCK) ys_net_set_err("accept timed out");
+        else
+#endif
+        ys_net_set_err("accept failed");
+        return -1;
+    }
     return (int64_t)c;
+}
+
+/* set_timeout(sock, ms) -> bool. Sets SO_RCVTIMEO, the standard
+   portable way to time out either accept() (set on a listening
+   socket — a client just never showing up) or recv() (set on a
+   connected socket — the peer goes quiet). ms<=0 clears the timeout
+   (blocks indefinitely again, the default). On timeout, the
+   corresponding call returns -1 and y.net.last_error() reports
+   "accept timed out" / "recv timed out" specifically, distinguishable
+   from other failures. connect() already has its own built-in 10s
+   timeout (see ys_net_connect) and isn't affected by this. */
+static int ys_net_set_timeout(int64_t sock, int ms){
+    ys_sock_t s=(ys_sock_t)sock;
+    if(ms<0) ms=0;
+#ifdef _WIN32
+    DWORD timeout=(DWORD)ms;
+    return setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,(const char*)&timeout,sizeof(timeout))==0;
+#else
+    struct timeval tv;
+    tv.tv_sec=ms/1000;
+    tv.tv_usec=(ms%1000)*1000;
+    return setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv))==0;
+#endif
 }
 
 /*
@@ -4143,6 +4187,13 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         if(argc<s+1) return make_int(-1);
         Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
         return make_int(ys_net_accept(val_int(sv)));
+    }
+    if(strcmp_u(name,"y.net.set_timeout")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_bool(0);
+        Val sv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val mv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        return make_bool(ys_net_set_timeout(val_int(sv), (int)val_int(mv)));
     }
 
     /* y.net.tls_* — see the TLS engine comment near ys_net_close for

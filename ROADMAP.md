@@ -51,10 +51,25 @@ Exploidus, readable, safe, and practical.
 | **v2.15** | **HTTP client (`y.http.get/post`) built on `y.net.*`/`y.net.tls_*` — status/body/headers parsing, chunked Transfer-Encoding decoding (tested against a deliberately 3-chunk response), tested against real HTTPS endpoints and a local server confirming full POST bodies arrive intact** |
 | **v2.16** | **`y.http.*` now follows 3xx redirects automatically (up to 10 hops), with correct per-status method/body handling (303 and POST-via-301/302 downgrade to GET; 307/308 preserve method+body) — verified against local test servers for the multi-hop chain, both downgrade cases, and the loop-detection limit** |
 | **v2.17** | **Build fix: the Windows target never actually linked against `ws2_32`, so any Windows build broke as soon as v2.9's networking code landed — introduced then, only caught now via a real CI failure. Fixed in the Makefile (both the MinGW cross-compile target and native-Windows `LIBS`); also fixed a `winsock2.h`/`windows.h` include-order warning in the same area. Verified with an actual MinGW cross-compile run through Wine: builds clean, runs, and its networking works** |
+| **v2.18** | **`y.net.set_timeout(sock, ms)` — `accept()`/`recv()` can now time out instead of blocking forever (verified: an idle listener times out at the requested duration, a connected-but-silent peer's `recv()` does too, both reporting a distinguishable "timed out" error)** |
 
 ---
 
 ## Upcoming
+
+### v2.18: accept()/recv() timeout
+- Done: `y.net.set_timeout(sock, ms)` — sets `SO_RCVTIMEO`, the
+  standard portable way to time out either `accept()` (set on a
+  listening socket) or `recv()` (set on a connected socket) instead of
+  blocking forever. `ms<=0` clears it. Verified both cases directly:
+  an idle listener with a 2000ms timeout returns after ~2s reporting
+  "accept timed out"; a connected-but-silent peer's `recv()` with a
+  1500ms timeout returns after ~1.5s reporting "recv timed out" — both
+  distinguishable from other failures via `y.net.last_error()`.
+  `connect()`'s own existing 10s timeout is unaffected (separate
+  mechanism, unrelated to this).
+- Interpreter + VM only, matching the tier the rest of `y.net.*` not
+  already covering native compilation is at.
 
 ### v2.16: HTTP redirect following
 - Done: `y.http.get`/`post` now follow 3xx redirects automatically (up
@@ -131,7 +146,6 @@ Exploidus, readable, safe, and practical.
   Mach-O dynamic linking first)
 - Pending: hostname resolution for native builds
 - Pending: SO_REUSEADDR for native listen
-- Pending: accept()/recv() timeout (only connect() has one)
 - Pending: `process.fork()`-based concurrency for native compilation
   (interpreter/VM only right now)
 - Pending: UDP sockets

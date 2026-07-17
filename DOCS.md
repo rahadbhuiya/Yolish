@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.17  
+**Version:** v2.18  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2321,6 +2321,12 @@ y.net.listen(port)         -- binds + listens on 0.0.0.0:port (backlog
                             -- 128), returns a listening socket, or -1
 y.net.accept(server_sock)  -- blocks until a client connects, returns a
                             -- new connected socket for that client, or -1
+y.net.set_timeout(sock, ms) -- sets a receive timeout: makes accept()
+                            -- (on a listening socket) or recv() (on a
+                            -- connected socket) give up and return -1
+                            -- after ms milliseconds instead of blocking
+                            -- forever. ms<=0 clears it (blocks again,
+                            -- the default). Returns bool (success).
 y.net.last_error()         -- string describing the most recent y.net.*
                             -- failure, for debugging
 ```
@@ -2364,8 +2370,13 @@ both tried) and literal IP addresses.
   unreachable or silently-filtered address, a bare blocking connect can
   hang for the OS's own (often much longer) TCP timeout instead of
   failing promptly.
-- `y.net.accept` has **no** timeout — it blocks until a client connects,
-  which is the normal shape of a server accept loop.
+- By default `y.net.accept` blocks until a client connects and
+  `y.net.recv` blocks until data arrives — the normal shape of a
+  server accept loop / a blocking read. Use `y.net.set_timeout(sock,
+  ms)` if you need either to give up after a while instead (tested:
+  both an idle listener and a connected-but-silent peer correctly
+  time out and report `y.net.last_error()` as "accept timed out" /
+  "recv timed out", distinguishable from other failures).
 - `y.net.send` loops internally until all of `data` is sent (or an
   error occurs) — a single underlying `send()` syscall can write fewer
   bytes than requested for large payloads (a "short write"), so this
