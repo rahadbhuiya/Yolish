@@ -244,6 +244,8 @@ int64_t val_int(Val v);
 double  val_float(Val v);
 int     val_bool(Val v);
 Val    *alloc_arr(int n);
+Val    *gc_alloc(int n);
+char   *gc_alloc_str(int len);
 void    ys_print_val(Val v);
 extern int  g_assert_count;  /* v2.1: assertions in current test */
 extern char g_src_file[512]; /* v1.4: current source filename */

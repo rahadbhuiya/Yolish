@@ -52,10 +52,29 @@ Exploidus, readable, safe, and practical.
 | **v2.16** | **`y.http.*` now follows 3xx redirects automatically (up to 10 hops), with correct per-status method/body handling (303 and POST-via-301/302 downgrade to GET; 307/308 preserve method+body) — verified against local test servers for the multi-hop chain, both downgrade cases, and the loop-detection limit** |
 | **v2.17** | **Build fix: the Windows target never actually linked against `ws2_32`, so any Windows build broke as soon as v2.9's networking code landed — introduced then, only caught now via a real CI failure. Fixed in the Makefile (both the MinGW cross-compile target and native-Windows `LIBS`); also fixed a `winsock2.h`/`windows.h` include-order warning in the same area. Verified with an actual MinGW cross-compile run through Wine: builds clean, runs, and its networking works** |
 | **v2.18** | **`y.net.set_timeout(sock, ms)` — `accept()`/`recv()` can now time out instead of blocking forever (verified: an idle listener times out at the requested duration, a connected-but-silent peer's `recv()` does too, both reporting a distinguishable "timed out" error)** |
+| **v2.19** | **Refactor: networking/TLS/HTTP/hashmap engine moved out of eval.c into net_runtime.c (eval.c: 4538 → 3705 lines), no behavior change. Native `y.net.listen` now sets `SO_REUSEADDR` (verified via strace and a real rapid-rebind test), matching the interpreter/VM version — needed extending the native compiler to use r10/r8 for the first time** |
 
 ---
 
 ## Upcoming
+
+### v2.19: net_runtime.c split + native SO_REUSEADDR
+- Refactor: the networking/TLS/HTTP/hashmap engine (previously ~840
+  lines inline in eval.c) moved to its own file, net_runtime.c, with
+  a small net_runtime.h declaring what eval.c's call_builtin()
+  dispatch needs. eval.c dropped from 4538 to 3705 lines. No behavior
+  change — every feature re-tested after the move (bitwise, hashmap,
+  plain networking, TLS, HTTP client + redirects, process.fork
+  concurrency, native compilation) to confirm the split didn't break
+  anything.
+- Done: native `y.net.listen` now sets `SO_REUSEADDR`, matching the
+  interpreter/VM version. This needed extending the native compiler's
+  hand-written machine code to use r10/r8 (setsockopt's raw-syscall
+  ABI for arguments 4/5) — the first native-compiler code to use
+  registers outside the base 8 the rest of the file sticks to.
+  Verified via strace (exact setsockopt call with correct arguments)
+  and in practice (bind, use, close, and immediately rebind the same
+  port in one run, no failure).
 
 ### v2.18: accept()/recv() timeout
 - Done: `y.net.set_timeout(sock, ms)` — sets `SO_RCVTIMEO`, the
@@ -145,7 +164,6 @@ Exploidus, readable, safe, and practical.
 - Pending: native compilation on Windows (Winsock2) and macOS (needs
   Mach-O dynamic linking first)
 - Pending: hostname resolution for native builds
-- Pending: SO_REUSEADDR for native listen
 - Pending: `process.fork()`-based concurrency for native compilation
   (interpreter/VM only right now)
 - Pending: UDP sockets

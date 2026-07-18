@@ -10,7 +10,7 @@ CONVERT   = convert
 CFLAGS    = -std=c11 -Wall -O2
 SAN       = -fsanitize=address,undefined -fno-omit-frame-pointer -g
 
-SRCS      = lexer.c parser.c eval.c compiler.c \
+SRCS      = lexer.c parser.c eval.c net_runtime.c compiler.c \
             elf_out.c pe_out.c macho_out.c formatter.c checker.c \
             bytecode.c bcompiler.c vm.c main.c
 

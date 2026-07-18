@@ -275,6 +275,22 @@ static void x_mov_qword_rbpN_imm32(int8_t disp, int32_t imm){
     emit2(0x48,0xc7); emit1((uint8_t)(0x45|0)); emit1((uint8_t)disp); emit_i32(imm);
 }
 
+/* r10/r8-specific helpers — used for exactly one thing so far:
+   setsockopt's raw syscall ABI, where argument 4 goes in r10 (not rcx
+   — the syscall instruction clobbers rcx, so the kernel ABI uses r10
+   in its place) and argument 5 goes in r8. Not folded into the
+   generic reg-parameter helpers above since r8-r15 need a REX.R/B
+   extension bit the 0x45|(reg<<3) trick above doesn't account for;
+   easier to hand-write the two specific instructions actually needed
+   than to generalize the whole helper set for registers nothing else
+   here uses yet. */
+static void x_lea_r10_rbpN(int8_t disp){
+    emit2(0x4c,0x8d); emit1(0x55); emit1((uint8_t)disp); /* lea r10,[rbp+disp8] */
+}
+static void x_mov_r8d_imm32(int32_t imm){
+    emit2(0x41,0xb8); emit_i32(imm); /* mov r8d,imm32 (zero-extends to r8) */
+}
+
 /* patch jump at patch_off to jump to here */
 static void x_patch_here(int patch_off){
     patch_i32(patch_off, (int32_t)(code_len - (patch_off+4)));
@@ -707,12 +723,8 @@ static void emit_helpers(void){
         }
 
         /* __ys_net_listen(rdi=port) -> rax=fd or -1
-           socket + bind(INADDR_ANY:port) + listen(backlog=128).
-           NOTE: does not set SO_REUSEADDR (setsockopt's 5-arg syscall
-           ABI needs r8/r10, outside the 8-base-register encoding this
-           file sticks to for simplicity) — restarting a native server
-           quickly can hit "address already in use" for a short while.
-           The interpreter/VM version does set it. */
+           socket + setsockopt(SO_REUSEADDR) + bind(INADDR_ANY:port) +
+           listen(backlog=128). */
         sym_define("__ys_net_listen",code_len);
         {
             x_push_rbp(); x_mov_rbp_rsp();
@@ -725,6 +737,22 @@ static void emit_helpers(void){
             emit4(0x48,0x83,0xf8,0x00);
             int j_fail1=x_jl_rel32();
             x_mov_rbpN_r64(-16,0); /* [rbp-16]=fd */
+
+            /* setsockopt(fd, SOL_SOCKET=1, SO_REUSEADDR=2, &optval, 4)
+               — lets a restarted server rebind the same port
+               immediately instead of failing with "address already in
+               use" while the old socket sits in TIME_WAIT. Return
+               value ignored: a failed setsockopt here isn't fatal,
+               bind() below just behaves as it did before this call
+               existed. */
+            x_mov_qword_rbpN_imm32(-24,1); /* [rbp-24] = optval = 1 */
+            x_mov_r64_rbpN(7,-16);         /* rdi=fd */
+            x_mov_r64_imm32(6,1);          /* rsi=SOL_SOCKET */
+            x_mov_r64_imm32(2,2);          /* rdx=SO_REUSEADDR */
+            x_lea_r10_rbpN(-24);           /* r10=&optval */
+            x_mov_r8d_imm32(4);            /* r8=optlen */
+            x_mov_r64_imm32(0,54);         /* rax=SYS_setsockopt */
+            emit2(0x0f,0x05);
 
             /* sockaddr_in at [rbp-48]: AF_INET, htons(port), INADDR_ANY, zero */
             x_lea_r64_rbpN(3,-48);

@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.18  
+**Version:** v2.19  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2550,11 +2550,13 @@ Native and interpreter/VM sockets are wire-compatible — a native-compiled
 server can accept a connection from an interpreted client and vice versa,
 they're both just standard TCP underneath.
 
-`y.net.listen` does **not** set `SO_REUSEADDR` here (unlike the
-interpreter/VM version) — the `setsockopt` syscall's argument-passing
-ABI needs registers this backend's hand-written encoder doesn't cover
-yet, so restarting a native server quickly can hit "address already in
-use" for a short while after the previous instance exits.
+`y.net.listen` sets `SO_REUSEADDR` here too, matching the interpreter/VM
+version — a restarted native server can rebind the same port
+immediately rather than hitting "address already in use" while the
+previous instance's socket sits in `TIME_WAIT`. Verified both via
+`strace` (confirmed the exact `setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+[1], 4)` call) and in practice (bound, used, closed, and immediately
+rebound the same port in one run with no failure).
 
 **Why the native API is different, not just a subset:**
 
