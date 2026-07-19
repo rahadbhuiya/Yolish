@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.20  
+**Version:** v2.21  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 

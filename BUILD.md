@@ -120,15 +120,17 @@ Output: `ys.exe`
 **Without make (manual):**
 ```cmd
 gcc -std=c11 -O2 -o ys.exe ^
-  lexer.c parser.c eval.c compiler.c ^
-  elf_out.c pe_out.c macho_out.c main.c
+  lexer.c parser.c eval.c net_runtime.c compiler.c ^
+  elf_out.c pe_out.c macho_out.c formatter.c checker.c ^
+  bytecode.c bcompiler.c vm.c main.c -lm -lws2_32
 ```
 
 **With MSVC (Developer Command Prompt):**
 ```cmd
 cl /std:c11 /O2 /Fe:ys.exe ^
-  lexer.c parser.c eval.c compiler.c ^
-  elf_out.c pe_out.c macho_out.c main.c
+  lexer.c parser.c eval.c net_runtime.c compiler.c ^
+  elf_out.c pe_out.c macho_out.c formatter.c checker.c ^
+  bytecode.c bcompiler.c vm.c main.c ws2_32.lib
 ```
 
 Add to PATH:
@@ -152,8 +154,9 @@ make windows
 # Or manually
 x86_64-w64-mingw32-gcc -std=c11 -O2 -static \
   -o ys.exe \
-  lexer.c parser.c eval.c compiler.c \
-  elf_out.c pe_out.c macho_out.c main.c -lm
+  lexer.c parser.c eval.c net_runtime.c compiler.c \
+  elf_out.c pe_out.c macho_out.c formatter.c checker.c \
+  bytecode.c bcompiler.c vm.c main.c -lm -lws2_32
 ```
 
 Output: `./ys.exe`, a valid Windows PE32+ binary.
@@ -180,9 +183,10 @@ x86_64-w64-mingw32-windres ys_icon.rc -O coff -o ys_icon.o
 # 3. Build ys.exe with icon embedded
 x86_64-w64-mingw32-gcc -std=c11 -O2 -static \
   -o ys.exe \
-  lexer.c parser.c eval.c compiler.c \
-  elf_out.c pe_out.c macho_out.c main.c \
-  ys_icon.o -lm
+  lexer.c parser.c eval.c net_runtime.c compiler.c \
+  elf_out.c pe_out.c macho_out.c formatter.c checker.c \
+  bytecode.c bcompiler.c vm.c main.c \
+  ys_icon.o -lm -lws2_32
 ```
 
 Or simply:

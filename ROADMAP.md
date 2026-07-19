@@ -54,6 +54,7 @@ Exploidus, readable, safe, and practical.
 | **v2.18** | **`y.net.set_timeout(sock, ms)` — `accept()`/`recv()` can now time out instead of blocking forever (verified: an idle listener times out at the requested duration, a connected-but-silent peer's `recv()` does too, both reporting a distinguishable "timed out" error)** |
 | **v2.19** | **Refactor: networking/TLS/HTTP/hashmap engine moved out of eval.c into net_runtime.c (eval.c: 4538 → 3705 lines), no behavior change. Native `y.net.listen` now sets `SO_REUSEADDR` (verified via strace and a real rapid-rebind test), matching the interpreter/VM version — needed extending the native compiler to use r10/r8 for the first time** |
 | **v2.20** | **UDP sockets (`y.net.udp_socket/udp_bind/udp_send/udp_recv/udp_close`), interpreter + VM — `udp_recv` returns the sender's address alongside the data, verified with a real two-process client/server exchange and with `y.net.set_timeout` on a UDP socket** |
+| **v2.21** | **Build fix: CI and the release workflow's Linux/macOS build steps use hardcoded source-file lists (not the Makefile), and never got updated when v2.19 split net_runtime.c out of eval.c — every CI run and release build has been failing to link since. Fixed in ci.yml, release.yml (both jobs), and four stale manual-build snippets in BUILD.md (which were also still missing several older files like formatter.c/checker.c, and missing -lws2_32 on the Windows ones) — verified by running each fixed command exactly as it now appears in its file** |
 
 ---
 
