@@ -25,6 +25,12 @@ int64_t ys_net_listen(int port);
 int64_t ys_net_accept(int64_t server_sock);
 int     ys_net_set_timeout(int64_t sock, int ms);
 
+/* y.net.udp_* — UDP datagram sockets */
+int64_t ys_udp_socket(void);
+int64_t ys_udp_bind(int port);
+int64_t ys_udp_send(int64_t sock, const char *host, int port, const char *data, int len);
+Val     ys_udp_recv(int64_t sock, int maxlen);
+
 /* y.net.tls_* — TLS client sockets via OpenSSL (opt-in, YS_WITH_TLS).
    Declared unconditionally so eval.c's dispatch compiles either way;
    without YS_WITH_TLS these simply aren't defined in net_runtime.c and

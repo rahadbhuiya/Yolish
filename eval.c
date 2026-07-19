@@ -3363,6 +3363,45 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_bool(ys_net_set_timeout(val_int(sv), (int)val_int(mv)));
     }
 
+    /* y.net.udp_* — UDP datagram sockets (see the UDP engine comment
+       in net_runtime.c). udp_close reuses ys_net_close directly —
+       closing a UDP socket is identical to closing a TCP one at the
+       OS level, no separate function needed. */
+    if(strcmp_u(name,"y.net.udp_socket")==0){
+        return make_int(ys_udp_socket());
+    }
+    if(strcmp_u(name,"y.net.udp_bind")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_int(-1);
+        Val pv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        return make_int(ys_udp_bind((int)val_int(pv)));
+    }
+    if(strcmp_u(name,"y.net.udp_send")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+4) return make_int(-1);
+        Val sv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val hv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        Val pv=eval_node(args[s+2],env); if(g_throwing) return make_nil();
+        Val dv=eval_node(args[s+3],env); if(g_throwing) return make_nil();
+        if(hv.type!=YS_STR || dv.type!=YS_STR) return make_int(-1);
+        return make_int(ys_udp_send(val_int(sv), hv.sval, (int)val_int(pv), dv.sval, dv.slen));
+    }
+    if(strcmp_u(name,"y.net.udp_recv")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        int maxlen=1024;
+        if(argc>s+1){ Val mv=eval_node(args[s+1],env); if(g_throwing) return make_nil(); maxlen=(int)val_int(mv); }
+        return ys_udp_recv(val_int(sv), maxlen);
+    }
+    if(strcmp_u(name,"y.net.udp_close")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val sv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        ys_net_close(val_int(sv));
+        return make_nil();
+    }
+
     /* y.net.tls_* — see the TLS engine comment near ys_net_close for
        what this does and doesn't cover. Every branch here compiles
        regardless of YS_WITH_TLS so a program using these builtins

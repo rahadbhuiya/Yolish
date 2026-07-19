@@ -53,10 +53,25 @@ Exploidus, readable, safe, and practical.
 | **v2.17** | **Build fix: the Windows target never actually linked against `ws2_32`, so any Windows build broke as soon as v2.9's networking code landed — introduced then, only caught now via a real CI failure. Fixed in the Makefile (both the MinGW cross-compile target and native-Windows `LIBS`); also fixed a `winsock2.h`/`windows.h` include-order warning in the same area. Verified with an actual MinGW cross-compile run through Wine: builds clean, runs, and its networking works** |
 | **v2.18** | **`y.net.set_timeout(sock, ms)` — `accept()`/`recv()` can now time out instead of blocking forever (verified: an idle listener times out at the requested duration, a connected-but-silent peer's `recv()` does too, both reporting a distinguishable "timed out" error)** |
 | **v2.19** | **Refactor: networking/TLS/HTTP/hashmap engine moved out of eval.c into net_runtime.c (eval.c: 4538 → 3705 lines), no behavior change. Native `y.net.listen` now sets `SO_REUSEADDR` (verified via strace and a real rapid-rebind test), matching the interpreter/VM version — needed extending the native compiler to use r10/r8 for the first time** |
+| **v2.20** | **UDP sockets (`y.net.udp_socket/udp_bind/udp_send/udp_recv/udp_close`), interpreter + VM — `udp_recv` returns the sender's address alongside the data, verified with a real two-process client/server exchange and with `y.net.set_timeout` on a UDP socket** |
 
 ---
 
 ## Upcoming
+
+### v2.20: UDP sockets
+- Done: `y.net.udp_socket()`/`udp_bind(port)`/`udp_send(sock, host,
+  port, data)`/`udp_recv(sock, maxlen)`/`udp_close(sock)`, interpreter
+  + VM. `udp_recv` returns the sender's address alongside the data
+  (essential for UDP, unlike TCP where the peer is already known) —
+  `{data, host, port}` as a `y.map`.
+- Verified with a real two-process client/server exchange (client
+  sends, server receives and replies to the captured sender address,
+  client receives the reply) on both the interpreter and the VM, and
+  confirmed `y.net.set_timeout` works identically on a UDP socket as
+  it does on TCP (reuses the same `SO_RCVTIMEO` mechanism).
+- Not implemented for native compilation, same tier as `y.net.tls_*`/
+  `y.http.*`.
 
 ### v2.19: net_runtime.c split + native SO_REUSEADDR
 - Refactor: the networking/TLS/HTTP/hashmap engine (previously ~840
@@ -166,8 +181,6 @@ Exploidus, readable, safe, and practical.
 - Pending: hostname resolution for native builds
 - Pending: `process.fork()`-based concurrency for native compilation
   (interpreter/VM only right now)
-- Pending: UDP sockets
-- Pending: HTTP client convenience wrapper built on top of TCP
 
 ### v1.8: Native Compiler Expansion
 - Exploidus OS native binary target

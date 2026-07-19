@@ -749,6 +749,140 @@ int ys_net_set_timeout(int64_t sock, int ms){
 }
 
 /*
+   UDP (y.net.udp_*)
+   -------------------
+   Connectionless datagram sockets — no handshake, no ordering/
+   delivery guarantees, each send/recv is one whole packet. Uses the
+   same YS_SOCK_INVALID/ys_sock_t infrastructure as the TCP code above,
+   and reuses ys_net_close/ys_net_set_timeout as-is (closing or
+   setting a receive timeout on a UDP socket is identical to doing so
+   on a TCP one at the OS level — no UDP-specific behavior needed
+   there).
+*/
+
+/* udp_socket() -> an unbound UDP socket (OS assigns a local port on
+   first send), for a "client" that only sends/receives replies. */
+int64_t ys_udp_socket(void){
+    ys_net_ensure_init();
+    ys_sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if(s==YS_SOCK_INVALID){ ys_net_set_err("udp socket failed"); return -1; }
+    return (int64_t)s;
+}
+
+/* udp_bind(port) -> a UDP socket bound to 0.0.0.0:port, for a
+   "server" that needs to receive on a known port. */
+int64_t ys_udp_bind(int port){
+    ys_net_ensure_init();
+    ys_sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if(s==YS_SOCK_INVALID){ ys_net_set_err("udp socket failed"); return -1; }
+
+    int yes=1;
+#ifdef _WIN32
+    setsockopt(s,SOL_SOCKET,SO_REUSEADDR,(const char*)&yes,sizeof(yes));
+#else
+    setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
+#endif
+
+    struct sockaddr_in addr;
+    memset(&addr,0,sizeof(addr));
+    addr.sin_family=AF_INET;
+    addr.sin_addr.s_addr=INADDR_ANY;
+    addr.sin_port=htons((uint16_t)port);
+
+    if(bind(s,(struct sockaddr*)&addr,sizeof(addr))!=0){
+        ys_net_set_err("udp bind failed (port already in use?)");
+#ifdef _WIN32
+        closesocket(s);
+#else
+        close(s);
+#endif
+        return -1;
+    }
+    return (int64_t)s;
+}
+
+/* udp_send(sock, host, port, data) -> bytes sent, or -1. host is
+   resolved fresh on every call (getaddrinfo, same as TCP connect) —
+   simpler than caching a resolved address, and sending is rare enough
+   relative to the cost of a DNS lookup that this isn't worth
+   optimizing yet. UDP sends are one full datagram in one syscall (no
+   short-write concept the way a TCP stream has), so unlike
+   ys_net_send there's no retry loop needed here. */
+int64_t ys_udp_send(int64_t sock, const char *host, int port, const char *data, int len){
+    ys_sock_t s=(ys_sock_t)sock;
+    struct addrinfo hints, *res=NULL;
+    memset(&hints,0,sizeof(hints));
+    hints.ai_family=AF_INET;
+    hints.ai_socktype=SOCK_DGRAM;
+    char portbuf[16];
+    snprintf(portbuf,sizeof(portbuf),"%d",port);
+    if(getaddrinfo(host,portbuf,&hints,&res)!=0 || !res){ ys_net_set_err("could not resolve host"); return -1; }
+#ifdef _WIN32
+    int n=sendto(s,data,len,0,res->ai_addr,(int)res->ai_addrlen);
+#else
+    ssize_t n=sendto(s,data,(size_t)len,0,res->ai_addr,res->ai_addrlen);
+#endif
+    freeaddrinfo(res);
+    if(n<0){ ys_net_set_err("udp send failed"); return -1; }
+    return (int64_t)n;
+}
+
+/* udp_recv(sock, maxlen) -> a y.map {data, host, port} describing the
+   received datagram and who sent it (unlike TCP, where the peer is
+   already known from connect()/accept(), a UDP socket can receive
+   from anyone, so the sender's address is essential — e.g. to reply
+   to it — not just a nice-to-have), or nil on failure. Blocks until a
+   datagram arrives unless y.net.set_timeout was called on sock. */
+Val ys_udp_recv(int64_t sock, int maxlen){
+    ys_sock_t s=(ys_sock_t)sock;
+    if(maxlen<=0) maxlen=1024;
+    char *buf=malloc((size_t)maxlen);
+    if(!buf){ ys_net_set_err("out of memory"); return make_nil(); }
+
+    struct sockaddr_in from;
+    memset(&from,0,sizeof(from));
+#ifdef _WIN32
+    int fromlen=(int)sizeof(from);
+    int n=recvfrom(s,buf,maxlen,0,(struct sockaddr*)&from,&fromlen);
+#else
+    socklen_t fromlen=sizeof(from);
+    ssize_t n=recvfrom(s,buf,(size_t)maxlen,0,(struct sockaddr*)&from,&fromlen);
+#endif
+    if(n<0){
+#ifdef _WIN32
+        if(WSAGetLastError()==WSAETIMEDOUT) ys_net_set_err("recv timed out");
+        else
+#else
+        if(errno==EAGAIN||errno==EWOULDBLOCK) ys_net_set_err("recv timed out");
+        else
+#endif
+        ys_net_set_err("udp recv failed");
+        free(buf);
+        return make_nil();
+    }
+
+    char ipstr[64];
+#ifdef _WIN32
+    /* InetNtopA is the ws2tcpip.h equivalent of POSIX inet_ntop */
+    InetNtopA(AF_INET,&from.sin_addr,ipstr,sizeof(ipstr));
+#else
+    inet_ntop(AF_INET,&from.sin_addr,ipstr,sizeof(ipstr));
+#endif
+
+    char *gcbuf=gc_alloc_str((int)n+1);
+    if(n>0) memcpy(gcbuf,buf,(size_t)n);
+    gcbuf[n]=0;
+    free(buf);
+
+    Val result=make_nil(); ys_map_init(&result,4);
+    Val dataval=make_nil(); dataval.type=YS_STR; dataval.sval=gcbuf; dataval.slen=(int)n;
+    ys_map_set(&result, make_str("data"), dataval);
+    ys_map_set(&result, make_str("host"), make_str(ipstr));
+    ys_map_set(&result, make_str("port"), make_int(ntohs(from.sin_port)));
+    return result;
+}
+
+/*
    Hashmap (y.map.*)
    -----------------
    Open-addressing hash table with linear probing, storing parallel

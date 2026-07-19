@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.19  
+**Version:** v2.20  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2433,6 +2433,64 @@ cross-talk between connections.
 Not implemented for **native compilation** — `process.fork` is an
 interpreter/VM builtin only right now, same tier as the rest of
 `process.*`.
+
+### UDP: y.net.udp_*
+
+Connectionless datagram sockets — no handshake, no ordering or
+delivery guarantees, each send/receive is one whole packet.
+
+```yolish
+y.net.udp_socket()                    -- an unbound socket (OS assigns
+                                       -- a local port on first send) —
+                                       -- for a "client" that sends and
+                                       -- waits for replies
+y.net.udp_bind(port)                  -- a socket bound to 0.0.0.0:port
+                                       -- — for a "server" that needs a
+                                       -- known port to receive on
+y.net.udp_send(sock, host, port, data) -- sends one datagram, returns
+                                       -- bytes sent or -1
+y.net.udp_recv(sock, maxlen)          -- blocks for one datagram (unless
+                                       -- y.net.set_timeout was called),
+                                       -- returns a map {data, host,
+                                       -- port} describing it and who
+                                       -- sent it, or nil on failure
+y.net.udp_close(sock)
+```
+
+`udp_recv` returning the sender's address isn't just a nice-to-have —
+unlike TCP, where the peer is already known from `connect()`/
+`accept()`, a UDP socket can receive from anyone, so knowing who sent
+a datagram is usually essential (e.g. to reply to it).
+
+```yolish
+-- server
+let srv = y.net.udp_bind(9000)
+let msg = y.net.udp_recv(srv, 1024)
+y.println(y.map.get(msg, "data"))
+y.net.udp_send(srv, y.map.get(msg, "host"), y.map.get(msg, "port"),
+                "echo: " + y.map.get(msg, "data"))
+y.net.udp_close(srv)
+
+-- client
+let sock = y.net.udp_socket()
+y.net.udp_send(sock, "127.0.0.1", 9000, "hello")
+let resp = y.net.udp_recv(sock, 1024)
+y.println(y.map.get(resp, "data"))
+y.net.udp_close(sock)
+```
+
+Tested with a real two-process client/server exchange (client sends,
+server receives + replies to the captured sender address, client
+receives the reply) on both the interpreter and the VM, and with
+`y.net.set_timeout` on a UDP socket (works identically to the TCP
+case — same underlying `SO_RCVTIMEO` mechanism, verified it actually
+times out rather than blocking).
+
+`y.net.udp_close` is literally `y.net.close` under the hood — closing
+a UDP socket is identical to closing a TCP one at the OS level.
+
+Not implemented for native compilation, same tier as `y.net.tls_*`/
+`y.http.*`.
 
 ### TLS / HTTPS: y.net.tls_*
 
