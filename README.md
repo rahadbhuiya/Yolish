@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.21-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.22-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -21,7 +21,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.21 |
+| **Version** | v2.22 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -347,6 +347,7 @@ fn fetch_and_save(url, path) { ... }
 | **v2.19** | **Refactor: split networking/TLS/HTTP/hashmap engine out of eval.c into net_runtime.c (no behavior change, re-tested everything). Native `y.net.listen` now sets `SO_REUSEADDR` too** |
 | **v2.20** | **UDP sockets (`y.net.udp_*`) — `udp_recv` returns the sender's address alongside the data, tested with a real client/server exchange and a socket timeout** |
 | **v2.21** | **Build fix: CI and the release workflow use hardcoded source lists that never got updated when v2.19 split out net_runtime.c — every CI run and release build has been failing since. Fixed in ci.yml, release.yml, and four stale BUILD.md snippets** |
+| **v2.22** | **Native DNS hostname resolution — `y.net.connect("example.com", port)` now works in native-compiled (`ys -c --target linux`) binaries, not just dotted-decimal IPs. Hand-written UDP DNS client (no libc): reads `/etc/resolv.conf`, falls back to 8.8.8.8, resolves the A record, connects. Verified against real public DNS and a deliberately unresolvable hostname** |
 
 ### Upcoming
 

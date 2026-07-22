@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.21  
+**Version:** v2.22  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2566,9 +2566,14 @@ binary with no dynamic linker at all, which is why the API shape here
 is narrower:
 
 ```yolish
-y.net.connect(ip, port)         -- ip MUST be a literal IPv4 dotted-decimal
-                                 -- string ("93.184.216.34") — NOT a
-                                 -- hostname. Returns a socket fd, or -1.
+y.net.connect(host_or_ip, port)  -- MUST be a string literal (see below).
+                                  -- Accepts either a dotted-decimal IPv4
+                                  -- literal ("93.184.216.34") or a
+                                  -- hostname ("example.com") — the
+                                  -- latter is resolved via a hand-
+                                  -- written DNS client at connect time
+                                  -- (see "Hostname resolution" below).
+                                  -- Returns a socket fd, or -1.
 y.net.send(sock, data)          -- data MUST be a string literal.
                                  -- Returns bytes sent, or -1.
 y.net.recv_print(sock, maxlen)  -- reads up to maxlen bytes (capped at an
@@ -2583,7 +2588,7 @@ y.net.close(sock)
 ```
 
 ```yolish
-let sock = y.net.connect("93.184.216.34", 80)
+let sock = y.net.connect("example.com", 80)
 if sock < 0 {
     y.println("connect failed")
 } else {
@@ -2618,11 +2623,7 @@ rebound the same port in one run with no failure).
 
 **Why the native API is different, not just a subset:**
 
-- **No hostnames.** There is no syscall for DNS resolution, and nothing
-  is dynamically linked (no libc, so no `getaddrinfo`). Resolve hostnames
-  yourself (e.g. hardcode the IP, or resolve it another way ahead of
-  time) — a real DNS client is a separate future batch (see ROADMAP.md).
-- **`ip` and `data` must be string literals**, not variables or
+- **`host_or_ip` and `data` must be string literals**, not variables or
   expressions. The native backend has no general runtime string type —
   only compile-time string literals exist as a concept there (the same
   ceiling `y.print`/`y.println` already have for non-literal strings).
@@ -2637,6 +2638,19 @@ rebound the same port in one run with no failure).
 - **No connect timeout.** `connect()` is a bare blocking syscall; against
   an unreachable address this can hang for a long time (whatever the
   kernel's own TCP connect timeout is), not just fail fast.
+
+**Hostname resolution (`ys -c`, Linux):** since nothing is dynamically
+linked here (no libc, so no `getaddrinfo`), hostname literals passed to
+`y.net.connect` are resolved by a small hand-written DNS client instead:
+it reads the first `nameserver` line out of `/etc/resolv.conf` (falling
+back to `8.8.8.8` if that file is missing or has none), sends a UDP
+query for the A record over raw `socket`/`sendto`/`recvfrom` syscalls,
+and connects to whatever IP comes back — a 3-second `SO_RCVTIMEO` keeps
+an unanswered query from hanging the program. This all happens at
+runtime; the DNS query packet itself is built at compile time, same as
+the address string, since the hostname is already a compile-time
+literal either way. Dotted-decimal IPv4 literals skip all of this and
+go straight to a plain octet parser, with no DNS round trip.
 
 Not implemented for native compilation on **macOS** — macOS syscall
 numbers and calling convention differ substantially from Linux's, and

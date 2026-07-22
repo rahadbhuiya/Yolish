@@ -61,6 +61,60 @@ static int data_add_str(const char *s){
     return off;
 }
 
+/* add raw bytes (not NUL-terminated, may contain embedded zeros) to
+   rodata, return offset. Used for the DNS query packet, which has
+   zero bytes as structural content (QNAME label terminator, QDCOUNT
+   high byte, etc.) so data_add_str's NUL-scan would truncate it. */
+static int data_add_bytes(const uint8_t *b, int len){
+    int off=data_len;
+    for(int i=0;i<len;i++) data_buf[data_len++]=b[i];
+    return off;
+}
+
+/* true if s is a plain dotted-decimal IPv4 literal (digits and dots
+   only, e.g. "93.184.216.34") — the fast path that skips DNS
+   entirely and reuses the original octet-parsing __ys_net_connect.
+   Anything containing a letter (or anything else) is treated as a
+   hostname needing resolution. Doesn't validate octet ranges/count;
+   __ys_net_connect's own parser is just as forgiving of malformed
+   input, so this only needs to distinguish the two *shapes*. */
+static int is_ipv4_literal(const char *s){
+    if(!*s) return 0;
+    for(const char *p=s; *p; p++){
+        if(!((*p>='0'&&*p<='9') || *p=='.')) return 0;
+    }
+    return 1;
+}
+
+/* Build a DNS query packet (header + QNAME + QTYPE=A + QCLASS=IN) for
+   a hostname literal, entirely at compile time — safe because the
+   hostname is already required to be a compile-time string literal,
+   same as the IPv4 case. Writes into out (caller-sized buffer, host
+   length + 16 bytes is always enough) and returns the packet length.
+   Mirrors the verified prototype in proto/dnstest.c build_query(). */
+static int build_dns_query(const char *host, uint8_t *out){
+    int p=0;
+    out[p++]=0x12; out[p++]=0x34;             /* transaction ID */
+    out[p++]=0x01; out[p++]=0x00;             /* flags: RD=1 */
+    out[p++]=0x00; out[p++]=0x01;             /* QDCOUNT=1 */
+    out[p++]=0x00; out[p++]=0x00;             /* ANCOUNT=0 */
+    out[p++]=0x00; out[p++]=0x00;             /* NSCOUNT=0 */
+    out[p++]=0x00; out[p++]=0x00;             /* ARCOUNT=0 */
+    const char *s=host;
+    while(*s){
+        const char *dot=strchr(s,'.');
+        int len = dot ? (int)(dot-s) : (int)strlen(s);
+        if(len<1||len>63) len = len<1?0:63; /* defensive clamp, not a validator */
+        out[p++]=(uint8_t)len;
+        memcpy(out+p,s,len); p+=len;
+        s += len; if(*s=='.') s++;
+    }
+    out[p++]=0x00;             /* end of QNAME */
+    out[p++]=0x00; out[p++]=0x01; /* QTYPE=A */
+    out[p++]=0x00; out[p++]=0x01; /* QCLASS=IN */
+    return p;
+}
+
 /*  relocations  */
 typedef enum { RELOC_DATA, RELOC_CODE } RelocKind;
 typedef struct { RelocKind kind; int code_off; int target_off; } Reloc;
@@ -289,6 +343,53 @@ static void x_lea_r10_rbpN(int8_t disp){
 }
 static void x_mov_r8d_imm32(int32_t imm){
     emit2(0x41,0xb8); emit_i32(imm); /* mov r8d,imm32 (zero-extends to r8) */
+}
+static void x_mov_r9d_imm32(int32_t imm){
+    emit2(0x41,0xb9); emit_i32(imm); /* mov r9d,imm32 */
+}
+static void x_mov_r10d_imm32(int32_t imm){
+    emit2(0x41,0xba); emit_i32(imm); /* mov r10d,imm32 */
+}
+static void x_lea_r8_rbpN32(int32_t disp){
+    emit3(0x4c,0x8d,0x85); emit_i32(disp); /* lea r8,[rbp+disp32] */
+}
+static void x_lea_r10_rbpN32(int32_t disp){
+    emit3(0x4c,0x8d,0x95); emit_i32(disp); /* lea r10,[rbp+disp32] */
+}
+
+/* 32-bit-displacement versions of the reg<->[rbp+disp] helpers above.
+   The int8_t-disp originals only reach +/-128 bytes of frame, which
+   the DNS resolver's buffers (resolv.conf read buffer + UDP response
+   buffer) blow through easily — these use disp32 (mod=10) unconditionally
+   so any offset in a large stack frame is addressable. reg is the same
+   0..7 plain-register encoding (no REX.R/X/B) as the disp8 versions. */
+static void x_mov_r64_rbpN32(int reg, int32_t disp){
+    emit2(0x48,0x8b); emit1((uint8_t)(0x85|(reg<<3))); emit_i32(disp);
+}
+static void x_mov_rbpN32_r64(int32_t disp, int reg){
+    emit2(0x48,0x89); emit1((uint8_t)(0x85|(reg<<3))); emit_i32(disp);
+}
+static void x_lea_r64_rbpN32(int reg, int32_t disp){
+    emit2(0x48,0x8d); emit1((uint8_t)(0x85|(reg<<3))); emit_i32(disp);
+}
+static void x_mov_qword_rbpN32_imm32(int32_t disp, int32_t imm){
+    emit2(0x48,0xc7); emit1(0x85); emit_i32(disp); emit_i32(imm);
+}
+static void x_mov_byte_rbpN32_al(int32_t disp){
+    emit1(0x88); emit1(0x85); emit_i32(disp); /* mov [rbp+disp32], al */
+}
+
+/* [rbx+idxreg] byte load/store helpers, idxreg in {0=rax,1=rcx,2=rdx}.
+   Used by the DNS resolver's "nameserver " string search and IPv4
+   octet-parsing loops, which repeatedly need mov al,[rbx+idx] /
+   mov [rbx+idx],dl with idx varying between rax/rcx/rdx across call
+   sites — hand-encoding the same SIB byte pattern each time invites
+   transcription mistakes, so it's centralized here instead. */
+static void x_mov_al_rbx_idx(int idxreg){
+    emit1(0x8a); emit1(0x04); emit1((uint8_t)(0x03|(idxreg<<3)));
+}
+static void x_mov_rbx_idx_dl(int idxreg){
+    emit1(0x88); emit1(0x14); emit1((uint8_t)(0x03|(idxreg<<3)));
 }
 
 /* patch jump at patch_off to jump to here */
@@ -527,13 +628,15 @@ static void emit_helpers(void){
     }
 
     /* ---- native TCP networking (Linux only — raw syscalls, no libc) ----
-       Batch 2: IPv4 literal addresses only ("93.184.216.34"), NOT
-       hostnames — there is no syscall for DNS resolution, and this
-       backend links nothing (no libc, no PT_DYNAMIC), so getaddrinfo()
-       isn't available. Resolving a hostname natively would need either
-       a hand-rolled DNS client (raw UDP + manually building/parsing
-       query packets) or teaching the ELF writer to dynamically link
-       against libc — both bigger, separate efforts. See ROADMAP.md.
+       Both dotted-decimal IPv4 literals ("93.184.216.34") and hostname
+       literals ("example.com") are supported: __ys_net_connect handles
+       the former (parses the octets directly, no network round trip),
+       __ys_net_connect_host below handles the latter via a hand-written
+       UDP DNS client (v2.22 — no libc, no getaddrinfo, this backend
+       links nothing). The call site (search for "y.net.connect(ip_or_host"
+       further down) decides which one to emit based on the literal's
+       shape at compile time. See ROADMAP.md's v2.22 entry for how DNS
+       resolution works and what it was verified against.
        macOS uses entirely different syscall numbers/ABI and isn't
        covered here either; calling y.net.* when compiling for macOS
        hits the "unresolved symbol" safety net, same as before. */
@@ -646,6 +749,451 @@ static void emit_helpers(void){
         x_patch_here(j_done1);
         x_patch_here(j_done2);
         x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+
+        /* __ys_net_connect_host(rdi=dns_query_ptr, rsi=dns_query_len, rdx=port)
+           -> rax=fd or -1
+           Companion to __ys_net_connect above, for when y.net.connect's
+           address argument is a hostname literal rather than a dotted-
+           decimal IP. The DNS query packet itself is built at *compile
+           time* (see build_dns_query() — safe because the hostname, like
+           the IP case, must already be a compile-time string literal) and
+           handed in here as ready-to-send bytes; this function only does
+           the runtime work: find a resolver, send the query over UDP,
+           parse the A record out of the response, then connect() exactly
+           like __ys_net_connect does once it has 4 IP bytes.
+
+           Stack layout (all offsets from rbp, frame = 960 bytes):
+             -8    dns_query_ptr (arg)
+             -16   dns_query_len (arg)
+             -24   port (arg)
+             -32   resolver_ip[4]      (defaults to 8.8.8.8, overwritten
+                                         if /etc/resolv.conf yields one)
+             -40   udp_fd
+             -48   resolv.conf fd
+             -56   resolv.conf bytes_read
+             -64   DNS response recv_len
+             -72   pos (parse cursor into resp_buf; reused earlier as an
+                        IPv4-octet accumulator while parsing resolv.conf,
+                        since that happens before pos's real use begins)
+             -80   ancount (reused earlier as octet_idx, same reasoning)
+             -88   loop_i (search index / answer-record index, reused)
+             -96   found_flag
+             -104  found_ip[4]
+             -112  tcp_fd
+             -128  timeval.tv_sec (SO_RCVTIMEO, 3s)
+             -120  timeval.tv_usec
+             -144  sockaddr_in for the resolver (16 bytes)
+             -160  sockaddr_in for the TCP target (16 bytes)
+             -168  rr_type   (scratch, current answer record's TYPE)
+             -176  rr_rdlen  (scratch, current answer record's RDLENGTH)
+             -432  resolv_buf[256]     (base; buf[0] at rbp-432)
+             -944  resp_buf[512]       (base; buf[0] at rbp-944)
+
+           Every rbp-relative access here uses the 32-bit-displacement
+           helpers (x_*_rbpN32) rather than the int8-disp ones used
+           elsewhere in this file, since this frame is far larger than
+           the +/-128 byte range those support. */
+        sym_define("__ys_net_connect_host",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(960); /* sub rsp,960 */
+
+            x_mov_rbpN32_r64(-8,7);   /* [rbp-8]  = rdi (query ptr) */
+            x_mov_rbpN32_r64(-16,6);  /* [rbp-16] = rsi (query len) */
+            x_mov_rbpN32_r64(-24,2);  /* [rbp-24] = rdx (port) */
+
+            /* resolver_ip defaults to 8.8.8.8 */
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-32);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-31);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-30);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-29);
+
+            /*  try /etc/resolv.conf for a better resolver  */
+            int resolv_path_off = data_add_str("/etc/resolv.conf");
+            x_lea_arg1_data(resolv_path_off); /* rdi = &path (Linux-only fn, arg1=rdi) */
+            x_mov_r64_imm32(6,0);             /* rsi = O_RDONLY */
+            x_mov_r64_imm32(2,0);             /* rdx = mode */
+            x_mov_r64_imm32(0,2);             /* rax = SYS_open */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);       /* cmp rax,0 */
+            int j_conf_open_fail = x_jl_rel32();
+            x_mov_rbpN32_r64(-48,0);          /* conf_fd = rax */
+
+            x_mov_r64_rbpN32(7,-48);          /* rdi = conf_fd */
+            x_lea_r64_rbpN32(6,-432);         /* rsi = &resolv_buf */
+            x_mov_r64_imm32(2,255);           /* rdx = 255 */
+            x_mov_r64_imm32(0,0);             /* rax = SYS_read */
+            emit2(0x0f,0x05);
+            x_mov_rbpN32_r64(-56,0);          /* bytes_read = rax */
+
+            x_mov_r64_rbpN32(7,-48);          /* rdi = conf_fd */
+            x_mov_r64_imm32(0,3);             /* rax = SYS_close */
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(0,-56);
+            emit4(0x48,0x83,0xf8,0x00);       /* cmp rax,0 */
+            int j_bytesread_le0 = x_jle_rel32();
+
+            /* search resolv_buf for "nameserver " (11 bytes) */
+            x_mov_qword_rbpN32_imm32(-88,0);  /* loop_i = 0 */
+            int search_loop = code_len;
+            x_mov_r64_rbpN32(0,-88);          /* rax = i */
+            x_mov_r64_rbpN32(1,-56);          /* rcx = bytes_read */
+            emit4(0x48,0x83,0xe9,0x0b);       /* sub rcx,11 */
+            emit3(0x48,0x39,0xc8);            /* cmp rax,rcx */
+            int j_search_end = x_jge_rel32(); /* i >= bytes_read-11 -> not found */
+
+            x_lea_r64_rbpN32(3,-432);         /* rbx = &resolv_buf */
+            x_mov_r64_rbpN32(0,-88);          /* rax = i */
+            emit3(0x48,0x01,0xc3);            /* add rbx,rax -> &resolv_buf[i] */
+
+            int needle_off = data_add_str("nameserver ");
+            emit3(0x48,0x8d,0x35);            /* lea rsi,[rip+needle] */
+            add_reloc(RELOC_DATA,code_len,needle_off); emit_i32(0);
+
+            x_mov_r64_imm32(1,0);             /* rcx = j = 0 */
+            int cmp_loop = code_len;
+            emit4(0x48,0x83,0xf9,0x0b);       /* cmp rcx,11 */
+            int j_cmp_done = x_jge_rel32();   /* j>=11 -> full match */
+            x_mov_al_rbx_idx(1);              /* al = [rbx+rcx] */
+            emit3(0x8a,0x14,0x0e);            /* dl = [rsi+rcx] */
+            emit2(0x38,0xd0);                 /* cmp al,dl */
+            int j_byte_ne = x_jnz_rel32();
+            emit3(0x48,0xff,0xc1);            /* inc rcx */
+            int j_cmp_back = x_jmp_rel32();
+            patch_i32(j_cmp_back,(int32_t)(cmp_loop-(j_cmp_back+4)));
+
+            x_patch_here(j_byte_ne);          /* no_match: */
+            x_mov_r64_rbpN32(0,-88);
+            emit3(0x48,0xff,0xc0);            /* inc rax */
+            x_mov_rbpN32_r64(-88,0);
+            int j_search_back = x_jmp_rel32();
+            patch_i32(j_search_back,(int32_t)(search_loop-(j_search_back+4)));
+
+            x_patch_here(j_cmp_done);         /* match_found: rbx = &resolv_buf[i] */
+            emit3(0x48,0x8d,0x4b); emit1(0x0b); /* rcx = rbx+11 (first char after "nameserver ") */
+            x_lea_r64_rbpN32(2,-432);         /* rdx = &resolv_buf */
+            x_mov_r64_rbpN32(0,-56);          /* rax = bytes_read */
+            emit3(0x48,0x01,0xc2);            /* rdx += rax -> end pointer */
+
+            x_mov_qword_rbpN32_imm32(-72,0);  /* octet accumulator (reusing pos slot) */
+            x_mov_qword_rbpN32_imm32(-80,0);  /* octet_idx (reusing ancount slot) */
+
+            int parse_ip_loop = code_len;
+            emit3(0x48,0x39,0xd1);            /* cmp rcx,rdx */
+            int j_parse_ip_ge = x_jge_rel32();
+            emit3(0x0f,0xb6,0x01);            /* movzx eax,byte[rcx] */
+            emit2(0x3c,0x2e);                 /* cmp al,'.' */
+            int j_not_dot = x_jnz_rel32();
+
+            x_mov_r64_rbpN32(0,-80);          /* rax = octet_idx */
+            x_lea_r64_rbpN32(3,-32);          /* rbx = &resolver_ip */
+            x_mov_r64_rbpN32(2,-72);          /* rdx = accumulator */
+            x_mov_rbx_idx_dl(0);              /* [rbx+rax] = dl */
+            x_mov_r64_rbpN32(0,-80);
+            emit3(0x48,0xff,0xc0);            /* inc rax */
+            x_mov_rbpN32_r64(-80,0);          /* octet_idx++ */
+            x_mov_qword_rbpN32_imm32(-72,0);  /* accumulator = 0 */
+            int j_to_next1 = x_jmp_rel32();
+
+            x_patch_here(j_not_dot);
+            emit2(0x3c,0x30);                 /* cmp al,'0' */
+            int j_lt0 = x_jl_rel32();
+            emit2(0x3c,0x39);                 /* cmp al,'9' */
+            int j_gt9 = x_jg_rel32();
+            emit2(0x2c,0x30);                 /* sub al,'0' */
+            emit3(0x0f,0xb6,0xc0);            /* movzx eax,al */
+            x_mov_r64_rbpN32(2,-72);          /* rdx = accumulator */
+            emit4(0x48,0x6b,0xd2,0x0a);       /* imul rdx,rdx,10 */
+            emit3(0x48,0x01,0xc2);            /* add rdx,rax */
+            x_mov_rbpN32_r64(-72,2);          /* accumulator = rdx */
+
+            x_patch_here(j_to_next1);
+            emit3(0x48,0xff,0xc1);            /* inc rcx */
+            int j_parse_back = x_jmp_rel32();
+            patch_i32(j_parse_back,(int32_t)(parse_ip_loop-(j_parse_back+4)));
+
+            x_patch_here(j_parse_ip_ge);
+            x_patch_here(j_lt0);
+            x_patch_here(j_gt9);
+
+            x_mov_r64_rbpN32(0,-80);          /* rax = octet_idx */
+            emit4(0x48,0x83,0xf8,0x03);       /* cmp rax,3 */
+            int j_bad_octetcount = x_jnz_rel32(); /* not exactly 3 dots -> malformed, keep 8.8.8.8 */
+            x_lea_r64_rbpN32(3,-32);          /* rbx = &resolver_ip */
+            x_mov_r64_rbpN32(2,-72);          /* rdx = accumulator (4th octet) */
+            x_mov_rbx_idx_dl(0);              /* [rbx+rax] = dl  (rax still = 3) */
+            x_patch_here(j_bad_octetcount);
+
+            /* skip_resolv_conf: resolver_ip is now set (parsed, or 8.8.8.8) */
+            int skip_resolv_conf = code_len;
+            x_patch_here(j_conf_open_fail);
+            x_patch_here(j_bytesread_le0);
+            x_patch_here(j_search_end);
+            (void)skip_resolv_conf;
+
+            /*  UDP socket  */
+            x_mov_r64_imm32(7,2);  /* AF_INET */
+            x_mov_r64_imm32(6,2);  /* SOCK_DGRAM */
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41); /* SYS_socket */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_udp_fail = x_jl_rel32();
+            x_mov_rbpN32_r64(-40,0); /* udp_fd = rax */
+
+            /* SO_RCVTIMEO = 3s, so a dropped/unanswered query can't hang forever */
+            x_mov_qword_rbpN32_imm32(-128,3); /* tv_sec */
+            x_mov_qword_rbpN32_imm32(-120,0); /* tv_usec */
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_imm32(6,1);   /* SOL_SOCKET */
+            x_mov_r64_imm32(2,20);  /* SO_RCVTIMEO */
+            x_lea_r10_rbpN32(-128);
+            x_mov_r8d_imm32(16);
+            x_mov_r64_imm32(0,54);  /* SYS_setsockopt */
+            emit2(0x0f,0x05);       /* ignore result — best-effort */
+
+            /* sockaddr_in for resolver, port 53 */
+            x_lea_r64_rbpN32(3,-144);
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00); /* AF_INET */
+            x_mov_r64_imm32(0,53);
+            emit2(0x86,0xc4);                        /* xchg al,ah (htons) */
+            emit4(0x66,0x89,0x43,0x02);
+            x_mov_r64_rbpN32(0,-32);                  /* eax = resolver_ip (low 4 bytes) */
+            emit3(0x89,0x43,0x04);
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
+
+            /* sendto(udp_fd, query_ptr, query_len, 0, &sockaddr_resolver, 16) */
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_rbpN32(6,-8);
+            x_mov_r64_rbpN32(2,-16);
+            x_mov_r10d_imm32(0);
+            x_lea_r8_rbpN32(-144);
+            x_mov_r9d_imm32(16);
+            x_mov_r64_imm32(0,44); /* SYS_sendto */
+            emit2(0x0f,0x05);
+
+            /* recvfrom(udp_fd, resp_buf, 512, 0, NULL, NULL) */
+            x_mov_r64_rbpN32(7,-40);
+            x_lea_r64_rbpN32(6,-944);
+            x_mov_r64_imm32(2,512);
+            x_mov_r10d_imm32(0);
+            x_mov_r8d_imm32(0);
+            x_mov_r9d_imm32(0);
+            x_mov_r64_imm32(0,45); /* SYS_recvfrom */
+            emit2(0x0f,0x05);
+            x_mov_rbpN32_r64(-64,0); /* recv_len = rax */
+
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_imm32(0,3);  /* SYS_close (udp) */
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(0,-64);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_recv_fail = x_jle_rel32();
+
+            /* ---- parse DNS response: skip header(12) + QNAME + QTYPE/QCLASS ---- */
+            x_mov_qword_rbpN32_imm32(-72,12); /* pos = 12 */
+            int qname_loop = code_len;
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_r64_rbpN32(1,-64);
+            emit3(0x48,0x39,0xc8);            /* cmp pos,recv_len */
+            int j_qname_oob = x_jge_rel32();
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_al_rbx_idx(0);              /* al = resp_buf[pos] */
+            emit2(0x84,0xc0);                 /* test al,al */
+            int j_qname_end = x_jz_rel32();
+            emit3(0x0f,0xb6,0xc0);            /* movzx eax,al */
+            emit3(0x48,0xff,0xc0);            /* inc rax (label_len+1) */
+            x_mov_r64_rbpN32(1,-72);
+            emit3(0x48,0x01,0xc8);            /* rax += pos */
+            x_mov_rbpN32_r64(-72,0);          /* pos = rax */
+            int j_qname_back = x_jmp_rel32();
+            patch_i32(j_qname_back,(int32_t)(qname_loop-(j_qname_back+4)));
+
+            x_patch_here(j_qname_oob);
+            x_patch_here(j_qname_end);
+            x_mov_r64_rbpN32(0,-72);
+            emit4(0x48,0x83,0xc0,0x05);       /* pos += 1(terminator)+4(qtype+qclass) */
+            x_mov_rbpN32_r64(-72,0);
+
+            /* ancount = (resp[6]<<8)|resp[7] */
+            x_lea_r64_rbpN32(3,-944);
+            emit3(0x0f,0xb6,0x43); emit1(0x06);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-80,0);
+            emit3(0x0f,0xb6,0x43); emit1(0x07);
+            x_mov_r64_rbpN32(1,-80);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-80,0);          /* ancount = full */
+
+            x_mov_qword_rbpN32_imm32(-88,0);  /* loop_i = 0 */
+            x_mov_qword_rbpN32_imm32(-96,0);  /* found_flag = 0 */
+
+            int rr_loop = code_len;
+            x_mov_r64_rbpN32(0,-88);
+            x_mov_r64_rbpN32(1,-80);
+            emit3(0x48,0x39,0xc8);            /* cmp loop_i,ancount */
+            int j_rr_done1 = x_jge_rel32();
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_r64_rbpN32(1,-64);
+            emit3(0x48,0x39,0xc8);            /* cmp pos,recv_len (safety) */
+            int j_rr_done2 = x_jge_rel32();
+
+            /* NAME: compression pointer (0xC0 top bits) -> pos+=2; else walk labels */
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_al_rbx_idx(2);              /* al = resp_buf[pos] */
+            emit2(0x24,0xc0);                 /* and al,0xC0 */
+            emit2(0x3c,0xc0);                 /* cmp al,0xC0 */
+            int j_not_ptr = x_jnz_rel32();
+            x_mov_r64_rbpN32(0,-72);
+            emit4(0x48,0x83,0xc0,0x02);       /* pos += 2 */
+            x_mov_rbpN32_r64(-72,0);
+            int j_name_done = x_jmp_rel32();
+
+            x_patch_here(j_not_ptr);
+            int name_walk_loop = code_len;
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_al_rbx_idx(2);
+            emit2(0x84,0xc0);
+            int j_name_walk_zero = x_jz_rel32();
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xff,0xc0);
+            x_mov_r64_rbpN32(1,-72);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-72,0);
+            int j_name_walk_back = x_jmp_rel32();
+            patch_i32(j_name_walk_back,(int32_t)(name_walk_loop-(j_name_walk_back+4)));
+            x_patch_here(j_name_walk_zero);
+            x_mov_r64_rbpN32(0,-72);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-72,0);
+            x_patch_here(j_name_done);
+
+            /* pointer walk: rdx = &resp_buf[pos], read TYPE(2 BE), skip CLASS+TTL(6), read RDLENGTH(2 BE) */
+            x_mov_r64_rbpN32(0,-72);
+            x_lea_r64_rbpN32(3,-944);
+            emit3(0x48,0x89,0xda);            /* mov rdx,rbx */
+            emit3(0x48,0x01,0xc2);            /* add rdx,rax -> rdx = &resp_buf[pos] */
+
+            emit2(0x8a,0x02);                 /* al = [rdx] */
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-168,0);
+            emit3(0x48,0xff,0xc2);            /* inc rdx */
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN32(1,-168);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-168,0);         /* rr_type = full */
+            emit3(0x48,0xff,0xc2);            /* inc rdx -> at CLASS */
+
+            emit4(0x48,0x83,0xc2,0x06);       /* rdx += 6 (skip CLASS+TTL) */
+
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-176,0);
+            emit3(0x48,0xff,0xc2);
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN32(1,-176);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-176,0);         /* rr_rdlen = full */
+            emit3(0x48,0xff,0xc2);            /* inc rdx -> rdx now points at RDATA */
+
+            /* pos = (rdx - rbx) so it now marks the RDATA start, consistent for the advance-by-rdlength path below */
+            emit3(0x48,0x89,0xd0);            /* mov rax,rdx */
+            emit3(0x48,0x29,0xd8);            /* sub rax,rbx */
+            x_mov_rbpN32_r64(-72,0);          /* pos = rax */
+
+            x_mov_r64_rbpN32(0,-168);
+            emit4(0x48,0x83,0xf8,0x01);       /* cmp rr_type,1 (A) */
+            int j_type_no = x_jnz_rel32();
+            x_mov_r64_rbpN32(0,-176);
+            emit4(0x48,0x83,0xf8,0x04);       /* cmp rr_rdlen,4 */
+            int j_rdlen_no = x_jnz_rel32();
+
+            /* match: copy 4 bytes at rdx into found_ip, mark found, stop scanning */
+            x_lea_r64_rbpN32(1,-104);         /* rcx = &found_ip */
+            emit2(0x8b,0x02);                 /* eax = [rdx] */
+            emit2(0x89,0x01);                 /* [rcx] = eax */
+            x_mov_qword_rbpN32_imm32(-96,1);  /* found_flag = 1 */
+            int j_rr_break = x_jmp_rel32();
+
+            x_patch_here(j_type_no);
+            x_patch_here(j_rdlen_no);
+            x_mov_r64_rbpN32(0,-72);          /* rax = pos (RDATA start) */
+            x_mov_r64_rbpN32(1,-176);         /* rcx = rdlength */
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-72,0);          /* pos += rdlength */
+
+            x_mov_r64_rbpN32(0,-88);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-88,0);          /* loop_i++ */
+            int j_rr_back = x_jmp_rel32();
+            patch_i32(j_rr_back,(int32_t)(rr_loop-(j_rr_back+4)));
+
+            int rr_loop_done = code_len;
+            x_patch_here(j_rr_done1);
+            x_patch_here(j_rr_done2);
+            x_patch_here(j_rr_break);
+            (void)rr_loop_done;
+
+            x_mov_r64_rbpN32(0,-96);          /* rax = found_flag */
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_not_found = x_jz_rel32();
+
+            /*  TCP connect using found_ip + port  */
+            x_lea_r64_rbpN32(3,-160);
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00);
+            x_mov_r64_rbpN32(0,-24);          /* port */
+            emit2(0x86,0xc4);
+            emit4(0x66,0x89,0x43,0x02);
+            x_mov_r64_rbpN32(0,-104);         /* found_ip */
+            emit3(0x89,0x43,0x04);
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
+
+            x_mov_r64_imm32(7,2);
+            x_mov_r64_imm32(6,1);
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41); /* SYS_socket */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_tcp_socket_fail = x_jl_rel32();
+            x_mov_rbpN32_r64(-112,0);
+
+            x_mov_r64_rbpN32(7,-112);
+            x_lea_r64_rbpN32(6,-160);
+            x_mov_r64_imm32(2,16);
+            x_mov_r64_imm32(0,42); /* SYS_connect */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_tcp_connect_fail = x_jl_rel32();
+
+            x_mov_r64_rbpN32(0,-112);
+            int j_final_ok = x_jmp_rel32();
+
+            x_patch_here(j_tcp_connect_fail);
+            x_mov_r64_rbpN32(7,-112);
+            x_mov_r64_imm32(0,3); /* SYS_close */
+            emit2(0x0f,0x05);
+            x_mov_r64_imm32(0,-1);
+            int j_final_closed = x_jmp_rel32();
+
+            x_patch_here(j_tcp_socket_fail);
+            x_patch_here(j_udp_fail);
+            x_patch_here(j_recv_fail);
+            x_patch_here(j_not_found);
+            x_mov_r64_imm32(0,-1);
+
+            x_patch_here(j_final_ok);
+            x_patch_here(j_final_closed);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
 
         /* __ys_net_send(rdi=buf, rsi=len, rdx=fd) -> rax=bytes written or -1
            Argument order is (buf,len,fd) rather than the more natural
@@ -991,27 +1539,45 @@ static void compile_expr(Node *n){
             int p=x_call_unresolved(); add_call_patch(p,"__ys_exit");
             break;
         }
-        /* y.net.connect(ip, port) -> fd or -1
-           ip MUST be a string literal — the native backend has no
-           general runtime string type yet (only literals, the same
+        /* y.net.connect(ip_or_host, port) -> fd or -1
+           The address MUST be a string literal — the native backend has
+           no general runtime string type yet (only literals, the same
            ceiling println/print already have), so a variable holding
-           an IP string can't be passed through here. Arguments are
+           an address string can't be passed through here. Arguments are
            marshaled via push/pop rather than assuming evaluation order
            leaves earlier registers untouched — robust regardless of
-           what compile_expr does internally. */
+           what compile_expr does internally.
+
+           Dotted-decimal literals ("93.184.216.34") take the original
+           fast path straight to __ys_net_connect. Anything else with a
+           letter in it is treated as a hostname: the DNS query packet
+           for it is built here at compile time (build_dns_query — valid
+           since the literal is fixed at compile time either way) and
+           handed to __ys_net_connect_host, which resolves it over UDP
+           at runtime before connecting. Linux only, matching every
+           other y.net.* native symbol (see the TARGET_LINUX guard these
+           are defined under above) — macOS/Windows have no native y.net.*
+           support at all yet for either shape of address. */
         if(is_y_net && strcmp(fn,"connect")==0){
             int base=n->left?1:0;
             Node *ip_arg=(n->argc>base)?n->args[base]:NULL;
             Node *port_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            int is_hostname = ip_arg && ip_arg->kind==ND_STR && !is_ipv4_literal(ip_arg->sval);
             int off, len;
-            if(ip_arg && ip_arg->kind==ND_STR){ off=data_add_str(ip_arg->sval); len=ystrlen(ip_arg->sval); }
-            else { off=data_add_str(""); len=0; } /* unsupported shape: fails to connect cleanly rather than miscompiling */
+            if(is_hostname){
+                uint8_t qbuf[512];
+                int qlen = build_dns_query(ip_arg->sval, qbuf);
+                off = data_add_bytes(qbuf, qlen); len = qlen;
+            } else if(ip_arg && ip_arg->kind==ND_STR){
+                off=data_add_str(ip_arg->sval); len=ystrlen(ip_arg->sval);
+            } else { off=data_add_str(""); len=0; } /* unsupported shape: fails to connect cleanly rather than miscompiling */
             if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(0);
             emit1(0x50); /* push rax (port) */
             emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off); emit_i32(0); /* lea rdi,[rip+off] */
             x_mov_rax_imm32(len); emit3(0x48,0x89,0xc6); /* mov rsi,rax (len) */
             emit1(0x5a); /* pop rdx (port) */
-            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_connect");
+            int p=x_call_unresolved();
+            add_call_patch(p, is_hostname ? "__ys_net_connect_host" : "__ys_net_connect");
             break;
         }
         /* y.net.send(sock, data) -> bytes written or -1. data MUST be a
