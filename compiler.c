@@ -777,8 +777,11 @@ static void emit_helpers(void){
                         since that happens before pos's real use begins)
              -80   ancount (reused earlier as octet_idx, same reasoning)
              -88   loop_i (search index / answer-record index, reused)
-             -96   found_flag
-             -104  found_ip[4]
+             -96   unused (previously found_flag; connect attempts now
+                          happen inline per answer record — see the
+                          answer-record loop below — so no separate
+                          found/not-found flag is needed any more)
+             -104  found_ip[4] (current answer record's IP, reused per attempt)
              -112  tcp_fd
              -128  timeval.tv_sec (SO_RCVTIMEO, 3s)
              -120  timeval.tv_usec
@@ -808,7 +811,7 @@ static void emit_helpers(void){
             x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-30);
             x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-29);
 
-            /*  try /etc/resolv.conf for a better resolver  */
+            /* ---- try /etc/resolv.conf for a better resolver ---- */
             int resolv_path_off = data_add_str("/etc/resolv.conf");
             x_lea_arg1_data(resolv_path_off); /* rdi = &path (Linux-only fn, arg1=rdi) */
             x_mov_r64_imm32(6,0);             /* rsi = O_RDONLY */
@@ -872,14 +875,23 @@ static void emit_helpers(void){
 
             x_patch_here(j_cmp_done);         /* match_found: rbx = &resolv_buf[i] */
             emit3(0x48,0x8d,0x4b); emit1(0x0b); /* rcx = rbx+11 (first char after "nameserver ") */
-            x_lea_r64_rbpN32(2,-432);         /* rdx = &resolv_buf */
-            x_mov_r64_rbpN32(0,-56);          /* rax = bytes_read */
-            emit3(0x48,0x01,0xc2);            /* rdx += rax -> end pointer */
 
             x_mov_qword_rbpN32_imm32(-72,0);  /* octet accumulator (reusing pos slot) */
             x_mov_qword_rbpN32_imm32(-80,0);  /* octet_idx (reusing ancount slot) */
 
             int parse_ip_loop = code_len;
+            /* end pointer is recomputed fresh every iteration rather than
+               held in rdx across the whole loop -- both branches below
+               reuse rdx as scratch for the accumulator, so a value that
+               had to survive the loop body in rdx would get clobbered
+               after the first character (this was a real bug: the octet
+               parser silently never stored anything as a result, since
+               the loop's bounds check would compare rcx against whatever
+               accumulator value rdx last held instead of the real end
+               pointer, and exit after one character every time). */
+            x_lea_r64_rbpN32(2,-432);         /* rdx = &resolv_buf */
+            x_mov_r64_rbpN32(0,-56);          /* rax = bytes_read */
+            emit3(0x48,0x01,0xc2);            /* rdx += rax -> end pointer */
             emit3(0x48,0x39,0xd1);            /* cmp rcx,rdx */
             int j_parse_ip_ge = x_jge_rel32();
             emit3(0x0f,0xb6,0x01);            /* movzx eax,byte[rcx] */
@@ -932,7 +944,7 @@ static void emit_helpers(void){
             x_patch_here(j_search_end);
             (void)skip_resolv_conf;
 
-            /*  UDP socket  */
+            /* ---- UDP socket ---- */
             x_mov_r64_imm32(7,2);  /* AF_INET */
             x_mov_r64_imm32(6,2);  /* SOCK_DGRAM */
             x_mov_r64_imm32(2,0);
@@ -1029,7 +1041,6 @@ static void emit_helpers(void){
             x_mov_rbpN32_r64(-80,0);          /* ancount = full */
 
             x_mov_qword_rbpN32_imm32(-88,0);  /* loop_i = 0 */
-            x_mov_qword_rbpN32_imm32(-96,0);  /* found_flag = 0 */
 
             int rr_loop = code_len;
             x_mov_r64_rbpN32(0,-88);
@@ -1117,15 +1128,128 @@ static void emit_helpers(void){
             emit4(0x48,0x83,0xf8,0x04);       /* cmp rr_rdlen,4 */
             int j_rdlen_no = x_jnz_rel32();
 
-            /* match: copy 4 bytes at rdx into found_ip, mark found, stop scanning */
+            /* MATCH: an A record. Try connecting to it right away rather
+               than stopping at the first one found — multiple A records
+               (or a CNAME chain ending in several) are common (a plain
+               `dig`/live test against www.reddit.com turned up 4), and
+               the first one isn't guaranteed reachable. On success,
+               return this fd immediately; on failure, fall through to
+               the same "advance past this record" code the non-A-type
+               path below uses, so the loop moves on to the next answer
+               record and tries again. CNAME records (TYPE=5) need no
+               special handling at all here — they just take the j_type_no
+               branch and get skipped via rdlength like any other
+               non-A type, which already surfaces the eventual A record
+               later in the same answer section for every resolver tested
+               (verified live against www.github.com and
+               www.microsoft.com, both CNAME-chained). */
             x_lea_r64_rbpN32(1,-104);         /* rcx = &found_ip */
-            emit2(0x8b,0x02);                 /* eax = [rdx] */
-            emit2(0x89,0x01);                 /* [rcx] = eax */
-            x_mov_qword_rbpN32_imm32(-96,1);  /* found_flag = 1 */
-            int j_rr_break = x_jmp_rel32();
+            emit2(0x8b,0x02);                 /* eax = [rdx] (RDATA) */
+            emit2(0x89,0x01);                 /* found_ip = eax */
+
+            x_lea_r64_rbpN32(3,-160);         /* sockaddr_tcp */
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00);
+            x_mov_r64_rbpN32(0,-24);          /* port */
+            emit2(0x86,0xc4);
+            emit4(0x66,0x89,0x43,0x02);
+            x_mov_r64_rbpN32(0,-104);         /* found_ip */
+            emit3(0x89,0x43,0x04);
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
+
+            /* socket() as non-blocking (SOCK_STREAM|SOCK_NONBLOCK) rather
+               than a plain blocking socket -- connect() on a blocking
+               socket to an address that's routed but never answers (a
+               blackholed/firewalled IP, as opposed to one that responds
+               with an immediate RST) can hang for the OS's default TCP
+               connect timeout, which is tens of seconds to minutes. That
+               would make trying multiple A records nearly pointless in
+               practice: exactly the "verify this actually retries, don't
+               just assume the refactor works" case a live test against a
+               deliberately-blackholed first record caught. Non-blocking
+               connect + poll() bounds every attempt to 3s. */
+            x_mov_r64_imm32(7,2);
+            x_mov_r64_imm32(6,1|0x800); /* SOCK_STREAM|SOCK_NONBLOCK */
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41); /* SYS_socket */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_this_socket_fail = x_jl_rel32(); /* -> advance (no fd to close) */
+            x_mov_rbpN32_r64(-112,0);         /* tcp_fd */
+
+            x_mov_r64_rbpN32(7,-112);
+            x_lea_r64_rbpN32(6,-160);
+            x_mov_r64_imm32(2,16);
+            x_mov_r64_imm32(0,42); /* SYS_connect (non-blocking: returns
+                                       immediately, almost always with
+                                       -EINPROGRESS) */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_connect_immediate_ok = x_jge_rel32(); /* rare, but possible */
+
+            /* in progress (or some other immediate error, which poll +
+               SO_ERROR below will surface too) -- wait up to 3s for the
+               socket to become writable */
+            x_mov_r64_rbpN32(0,-112);         /* rax = tcp_fd (reload -- eax currently
+                                                   holds connect()'s return value, e.g.
+                                                   -EINPROGRESS, not the fd) */
+            emit1(0x89); emit1(0x85); emit_i32(-168); /* pollfd.fd (32-bit) = tcp_fd */
+            emit1(0x66); emit1(0xc7); emit1(0x85); emit_i32(-164); emit1(0x04); emit1(0x00); /* pollfd.events = POLLOUT */
+            emit1(0x66); emit1(0xc7); emit1(0x85); emit_i32(-162); emit1(0x00); emit1(0x00); /* pollfd.revents = 0 */
+            x_lea_r64_rbpN32(7,-168);         /* rdi = &pollfd */
+            x_mov_r64_imm32(6,1);             /* rsi = nfds = 1 */
+            x_mov_r64_imm32(2,3000);          /* rdx = timeout_ms = 3000 */
+            x_mov_r64_imm32(0,7);             /* rax = SYS_poll */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x01);       /* cmp rax,1 (exactly one fd became ready) */
+            int j_poll_fail = x_jnz_rel32();  /* 0=timeout, <0=error -> close, advance */
+
+            emit1(0x0f); emit1(0xb7); emit1(0x85); emit_i32(-162); /* movzx eax, word[pollfd.revents] */
+            emit1(0xa9); emit_i32(4);         /* test eax, POLLOUT */
+            int j_no_pollout = x_jz_rel32();  /* POLLERR/POLLHUP only -> close, advance */
+
+            /* writable doesn't necessarily mean connected -- a failed
+               non-blocking connect also wakes poll() up. SO_ERROR is the
+               real answer. */
+            x_mov_r64_rbpN32(7,-112);         /* rdi = tcp_fd */
+            x_mov_r64_imm32(6,1);             /* rsi = SOL_SOCKET */
+            x_mov_r64_imm32(2,4);             /* rdx = SO_ERROR */
+            x_lea_r10_rbpN32(-176);           /* r10 = &so_error */
+            emit1(0xc7); emit1(0x85); emit_i32(-172); emit_i32(4); /* so_error_len = 4 */
+            x_lea_r8_rbpN32(-172);            /* r8 = &so_error_len */
+            x_mov_r64_imm32(0,55);            /* rax = SYS_getsockopt */
+            emit2(0x0f,0x05);
+            emit1(0x8b); emit1(0x85); emit_i32(-176); /* eax = so_error */
+            emit2(0x85,0xc0);                 /* test eax,eax */
+            int j_so_error = x_jnz_rel32();   /* nonzero -> connect actually failed */
+
+            x_patch_here(j_connect_immediate_ok);
+            /* connected (either immediately, or confirmed via poll+SO_ERROR) --
+               clear O_NONBLOCK so the blocking send/recv_print/close paths
+               behave the way callers of a connected socket expect */
+            x_mov_r64_rbpN32(7,-112);
+            x_mov_r64_imm32(6,4);   /* F_SETFL */
+            x_mov_r64_imm32(2,0);   /* flags = 0 (blocking) */
+            x_mov_r64_imm32(0,72);  /* SYS_fcntl */
+            emit2(0x0f,0x05);       /* best-effort, ignore result */
+
+            x_mov_r64_rbpN32(0,-112);         /* rax = tcp_fd (success return value) */
+            int j_final_ok = x_jmp_rel32();
+
+            x_patch_here(j_poll_fail);
+            x_patch_here(j_no_pollout);
+            x_patch_here(j_so_error);
+            x_mov_r64_rbpN32(7,-112);
+            x_mov_r64_imm32(0,3);  /* SYS_close the failed attempt */
+            emit2(0x0f,0x05);
+            int j_after_close = x_jmp_rel32();
 
             x_patch_here(j_type_no);
             x_patch_here(j_rdlen_no);
+            x_patch_here(j_this_socket_fail);
+            x_patch_here(j_after_close);
+            /* advance past this record (whatever it was — a skipped
+               non-A type, or an A record whose connect just failed)
+               and loop for the next answer record */
             x_mov_r64_rbpN32(0,-72);          /* rax = pos (RDATA start) */
             x_mov_r64_rbpN32(1,-176);         /* rcx = rdlength */
             emit3(0x48,0x01,0xc8);
@@ -1137,61 +1261,15 @@ static void emit_helpers(void){
             int j_rr_back = x_jmp_rel32();
             patch_i32(j_rr_back,(int32_t)(rr_loop-(j_rr_back+4)));
 
-            int rr_loop_done = code_len;
-            x_patch_here(j_rr_done1);
-            x_patch_here(j_rr_done2);
-            x_patch_here(j_rr_break);
-            (void)rr_loop_done;
-
-            x_mov_r64_rbpN32(0,-96);          /* rax = found_flag */
-            emit4(0x48,0x83,0xf8,0x00);
-            int j_not_found = x_jz_rel32();
-
-            /*  TCP connect using found_ip + port  */
-            x_lea_r64_rbpN32(3,-160);
-            emit4(0x66,0xc7,0x03,0x02); emit1(0x00);
-            x_mov_r64_rbpN32(0,-24);          /* port */
-            emit2(0x86,0xc4);
-            emit4(0x66,0x89,0x43,0x02);
-            x_mov_r64_rbpN32(0,-104);         /* found_ip */
-            emit3(0x89,0x43,0x04);
-            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
-
-            x_mov_r64_imm32(7,2);
-            x_mov_r64_imm32(6,1);
-            x_mov_r64_imm32(2,0);
-            x_mov_r64_imm32(0,41); /* SYS_socket */
-            emit2(0x0f,0x05);
-            emit4(0x48,0x83,0xf8,0x00);
-            int j_tcp_socket_fail = x_jl_rel32();
-            x_mov_rbpN32_r64(-112,0);
-
-            x_mov_r64_rbpN32(7,-112);
-            x_lea_r64_rbpN32(6,-160);
-            x_mov_r64_imm32(2,16);
-            x_mov_r64_imm32(0,42); /* SYS_connect */
-            emit2(0x0f,0x05);
-            emit4(0x48,0x83,0xf8,0x00);
-            int j_tcp_connect_fail = x_jl_rel32();
-
-            x_mov_r64_rbpN32(0,-112);
-            int j_final_ok = x_jmp_rel32();
-
-            x_patch_here(j_tcp_connect_fail);
-            x_mov_r64_rbpN32(7,-112);
-            x_mov_r64_imm32(0,3); /* SYS_close */
-            emit2(0x0f,0x05);
-            x_mov_r64_imm32(0,-1);
-            int j_final_closed = x_jmp_rel32();
-
-            x_patch_here(j_tcp_socket_fail);
+            /* every answer record scanned (or the safety bounds hit) with
+               no A record we could actually connect to -> -1 */
             x_patch_here(j_udp_fail);
             x_patch_here(j_recv_fail);
-            x_patch_here(j_not_found);
+            x_patch_here(j_rr_done1);
+            x_patch_here(j_rr_done2);
             x_mov_r64_imm32(0,-1);
 
             x_patch_here(j_final_ok);
-            x_patch_here(j_final_closed);
             x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
         }
 

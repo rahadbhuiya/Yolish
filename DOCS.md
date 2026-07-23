@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.22  
+**Version:** v2.23  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2645,8 +2645,17 @@ linked here (no libc, so no `getaddrinfo`), hostname literals passed to
 it reads the first `nameserver` line out of `/etc/resolv.conf` (falling
 back to `8.8.8.8` if that file is missing or has none), sends a UDP
 query for the A record over raw `socket`/`sendto`/`recvfrom` syscalls,
-and connects to whatever IP comes back — a 3-second `SO_RCVTIMEO` keeps
-an unanswered query from hanging the program. This all happens at
+and tries connecting to every A record in the response in turn, not
+just the first, stopping at whichever one actually connects. CNAME
+chains work with no special handling — anything that isn't an A record
+is just skipped over, which surfaces the eventual A record later in the
+same answer section, the way a recursive resolver returns it for a
+name chain. Each connect attempt is capped at 3 seconds (non-blocking
+connect + `poll` + `SO_ERROR`, not a plain blocking `connect`), so an
+unreachable or blackholed record fails fast into the next one instead
+of hanging for the OS's default TCP connect timeout on every dead
+record before getting anywhere. `SO_RCVTIMEO` (3s) separately covers
+the DNS query itself, in case that goes unanswered. This all happens at
 runtime; the DNS query packet itself is built at compile time, same as
 the address string, since the hostname is already a compile-time
 literal either way. Dotted-decimal IPv4 literals skip all of this and
