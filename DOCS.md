@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.23  
+**Version:** v2.24  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2567,12 +2567,16 @@ is narrower:
 
 ```yolish
 y.net.connect(host_or_ip, port)  -- MUST be a string literal (see below).
-                                  -- Accepts either a dotted-decimal IPv4
-                                  -- literal ("93.184.216.34") or a
+                                  -- Accepts an IPv4 literal
+                                  -- ("93.184.216.34"), an IPv6 literal
+                                  -- ("::1", "2001:db8::1"), or a
                                   -- hostname ("example.com") — the
                                   -- latter is resolved via a hand-
-                                  -- written DNS client at connect time
-                                  -- (see "Hostname resolution" below).
+                                  -- written DNS client at connect time,
+                                  -- trying an A (IPv4) lookup first and
+                                  -- falling back to AAAA (IPv6) if that
+                                  -- comes back empty (see "Hostname
+                                  -- resolution" below).
                                   -- Returns a socket fd, or -1.
 y.net.send(sock, data)          -- data MUST be a string literal.
                                  -- Returns bytes sent, or -1.
@@ -2660,6 +2664,15 @@ runtime; the DNS query packet itself is built at compile time, same as
 the address string, since the hostname is already a compile-time
 literal either way. Dotted-decimal IPv4 literals skip all of this and
 go straight to a plain octet parser, with no DNS round trip.
+
+If the A lookup comes back with nothing connectable, an AAAA (IPv6)
+lookup is tried next, with the identical resolv.conf/CNAME/multi-record/
+timeout behavior described above, just matching 16-byte AAAA records
+and connecting over `AF_INET6`/`sockaddr_in6` instead. IPv4 is always
+tried first — an A success skips the AAAA attempt entirely. IPv6
+literals ("::1", "2001:db8::1") skip DNS the same way IPv4 literals do:
+parsed straight to 16 bytes at compile time and connected directly.
+
 
 Not implemented for native compilation on **macOS** — macOS syscall
 numbers and calling convention differ substantially from Linux's, and

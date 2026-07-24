@@ -16,6 +16,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <arpa/inet.h>  /* inet_pton — compile-time only, for parsing IPv6
+                           literals into 16 raw bytes. This is the ys
+                           compiler's own host code, which links against
+                           libc normally; only the machine code it *emits*
+                           for the target program is freestanding. */
 
 /*  output buffer  */
 #define CODE_MAX  (1 << 20)   /* 1 MB code */
@@ -84,6 +89,56 @@ static int is_ipv4_literal(const char *s){
         if(!((*p>='0'&&*p<='9') || *p=='.')) return 0;
     }
     return 1;
+}
+
+/* true if s looks like an IPv6 literal ("::1", "2001:db8::1", etc.) --
+   the one character that never appears in a hostname, IPv4 literal, or
+   port number but always appears in an IPv6 address (at minimum "::")
+   is ':', so that alone is a safe, sufficient shape test here. Actual
+   validation happens in parse_ipv6_literal via inet_pton. */
+static int is_ipv6_literal(const char *s){
+    return strchr(s,':') != NULL;
+}
+
+/* Parse an IPv6 literal into 16 raw bytes via the host's own inet_pton
+   (this runs at compile time, in the ys compiler's own process, which
+   is normal libc-linked code — nothing to do with the freestanding
+   machine code it emits). Returns 1 on success, 0 if s isn't a valid
+   IPv6 address (caller falls back to the unresolved-symbol safety net,
+   same as any other unsupported y.net.connect argument shape). */
+static int parse_ipv6_literal(const char *s, uint8_t out[16]){
+    return inet_pton(AF_INET6, s, out) == 1;
+}
+
+/* Build a DNS query packet (header + QNAME + QTYPE=AAAA + QCLASS=IN)
+   for a hostname literal, entirely at compile time. Identical to
+   build_dns_query except QTYPE=28 (AAAA) instead of 1 (A) -- kept as a
+   separate function rather than a shared helper with a type parameter
+   since the two query buffers need to coexist at runtime (A tried
+   first, AAAA as fallback) and duplicating twelve lines is clearer
+   here than threading a type flag through call sites that only ever
+   pass a compile-time constant anyway. */
+static int build_dns_query_aaaa(const char *host, uint8_t *out){
+    int p=0;
+    out[p++]=0x12; out[p++]=0x34;             /* transaction ID */
+    out[p++]=0x01; out[p++]=0x00;             /* flags: RD=1 */
+    out[p++]=0x00; out[p++]=0x01;             /* QDCOUNT=1 */
+    out[p++]=0x00; out[p++]=0x00;             /* ANCOUNT=0 */
+    out[p++]=0x00; out[p++]=0x00;             /* NSCOUNT=0 */
+    out[p++]=0x00; out[p++]=0x00;             /* ARCOUNT=0 */
+    const char *s=host;
+    while(*s){
+        const char *dot=strchr(s,'.');
+        int len = dot ? (int)(dot-s) : (int)strlen(s);
+        if(len<1||len>63) len = len<1?0:63;
+        out[p++]=(uint8_t)len;
+        memcpy(out+p,s,len); p+=len;
+        s += len; if(*s=='.') s++;
+    }
+    out[p++]=0x00;             /* end of QNAME */
+    out[p++]=0x00; out[p++]=0x1c; /* QTYPE=AAAA (28) */
+    out[p++]=0x00; out[p++]=0x01; /* QCLASS=IN */
+    return p;
 }
 
 /* Build a DNS query packet (header + QNAME + QTYPE=A + QCLASS=IN) for
@@ -750,6 +805,80 @@ static void emit_helpers(void){
         x_patch_here(j_done2);
         x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
 
+        /* __ys_net_connect6(rdi=ipv6_16bytes_ptr, rsi=port) -> rax=fd or -1
+           Direct IPv6-literal counterpart to __ys_net_connect above.
+           No DNS involved at all here -- the 16 address bytes are
+           already sitting in rodata, parsed at compile time by the host
+           C library's own inet_pton (see parse_ipv6_literal), since an
+           IPv6 literal in y.net.connect's argument is just as much a
+           compile-time-only string as the IPv4 case always was. This
+           function only has to build a 28-byte sockaddr_in6 (family,
+           port, 4 bytes of flowinfo, the 16 address bytes, 4 bytes of
+           scope_id) and connect() with AF_INET6/SOCK_STREAM instead of
+           AF_INET.
+
+           Stack layout (all offsets from rbp):
+             -8  addr_ptr (16 raw IPv6 bytes, in rodata)
+             -16 port
+             -24 fd (once socket() succeeds)
+             -56..-29 struct sockaddr_in6 (28 bytes) */
+        sym_define("__ys_net_connect6",code_len);
+        x_push_rbp(); x_mov_rbp_rsp();
+        emit3(0x48,0x81,0xec); emit_i32(64); /* sub rsp,64 */
+
+        x_mov_rbpN_r64(-8,7);   /* addr_ptr = rdi */
+        x_mov_rbpN_r64(-16,6);  /* port = rsi */
+
+        x_lea_r64_rbpN(3,-56);              /* rbx = &sockaddr_in6 */
+        emit4(0x66,0xc7,0x03,0x0a); emit1(0x00); /* mov word[rbx],10 (AF_INET6) */
+        x_mov_r64_rbpN(0,-16);               /* rax = port */
+        emit2(0x86,0xc4);                    /* xchg al,ah (htons) */
+        emit4(0x66,0x89,0x43,0x02);          /* mov word[rbx+2],ax */
+        emit1(0xc7); emit1(0x43); emit1(0x04); emit_i32(0); /* mov dword[rbx+4],0 (flowinfo) */
+
+        x_mov_r64_rbpN(1,-8);                /* rcx = addr_ptr */
+        emit3(0x48,0x8b,0x01);               /* mov rax,[rcx] (address bytes 0-7) */
+        emit3(0x48,0x89,0x43); emit1(0x08);  /* mov [rbx+8],rax */
+        emit4(0x48,0x8b,0x41,0x08);          /* mov rax,[rcx+8] (address bytes 8-15) */
+        emit3(0x48,0x89,0x43); emit1(0x10);  /* mov [rbx+16],rax */
+        emit1(0xc7); emit1(0x43); emit1(0x18); emit_i32(0); /* mov dword[rbx+24],0 (scope_id) */
+
+        /* socket(AF_INET6=10, SOCK_STREAM=1, 0) */
+        x_mov_r64_imm32(7,10);
+        x_mov_r64_imm32(6,1);
+        x_mov_r64_imm32(2,0);
+        x_mov_r64_imm32(0,41); /* SYS_socket */
+        emit2(0x0f,0x05);
+        emit4(0x48,0x83,0xf8,0x00);
+        int j6_fail1=x_jl_rel32();
+        x_mov_rbpN_r64(-24,0); /* fd */
+
+        /* connect(fd, &sockaddr_in6, 28) */
+        x_mov_r64_rbpN(7,-24);
+        x_lea_r64_rbpN(6,-56);
+        x_mov_r64_imm32(2,28);
+        x_mov_r64_imm32(0,42); /* SYS_connect */
+        emit2(0x0f,0x05);
+        emit4(0x48,0x83,0xf8,0x00);
+        int j6_fail2=x_jl_rel32();
+
+        x_mov_r64_rbpN(0,-24); /* rax=fd (return value) */
+        int j6_done1=x_jmp_rel32();
+
+        x_patch_here(j6_fail2);
+        x_mov_r64_rbpN(7,-24);
+        x_mov_r64_imm32(0,3); /* SYS_close */
+        emit2(0x0f,0x05);
+        x_mov_r64_imm32(0,-1);
+        int j6_done2=x_jmp_rel32();
+
+        x_patch_here(j6_fail1);
+        x_mov_r64_imm32(0,-1);
+
+        x_patch_here(j6_done1);
+        x_patch_here(j6_done2);
+        x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+
         /* __ys_net_connect_host(rdi=dns_query_ptr, rsi=dns_query_len, rdx=port)
            -> rax=fd or -1
            Companion to __ys_net_connect above, for when y.net.connect's
@@ -1273,6 +1402,467 @@ static void emit_helpers(void){
             x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
         }
 
+        /* __ys_net_connect_host6(rdi=aaaa_query_ptr, rsi=aaaa_query_len, rdx=port)
+           -> rax=fd or -1
+           AAAA/IPv6 sibling of __ys_net_connect_host above. Structurally
+           identical (same resolv.conf lookup, same UDP query/response,
+           same answer-record walk with CNAME-skipping and multi-record
+           retry-with-timeout) -- the only real differences are matching
+           TYPE=28/RDLENGTH=16 instead of TYPE=1/RDLENGTH=4, copying 16
+           RDATA bytes instead of 4, and connecting via AF_INET6 with a
+           28-byte sockaddr_in6 instead of AF_INET/sockaddr_in (see
+           __ys_net_connect6 above for that same shape used in the
+           IPv6-literal case). Kept as a separate function rather than
+           threading a record-type/address-family flag through the A
+           version: that would touch nearly every offset and struct size
+           in the function anyway, so the duplication is more honest
+           about what's actually shared (the resolver-lookup and
+           packet-framing logic) versus what isn't (the RR match and
+           connect target shape).
+
+           NOTE: socket(AF_INET6,...) itself cannot be exercised in an
+           environment with IPv6 disabled at the kernel level (confirmed
+           via strace elsewhere in this codebase's history returning
+           EAFNOSUPPORT) -- the DNS query/response side of this function
+           (building the AAAA query, sending/receiving over UDP, walking
+           the answer section, extracting 16-byte RDATA) needs no IPv6
+           kernel support at all and was verified against real AAAA
+           responses; only the final connect() needs a real IPv6-capable
+           host to exercise end-to-end.
+
+           Stack layout differs from __ys_net_connect_host only in the
+           last two entries:
+             -8 through -176: identical in meaning to __ys_net_connect_host
+             -1024..-997  struct sockaddr_in6 for the TCP target (28 bytes)
+             -976..-961   found_ip6[16] (current answer record's address)
+             -944..-433, -432..-177: resp_buf[512] / resolv_buf[256], same
+                                       as __ys_net_connect_host (well below
+                                       the two new slots above, no overlap)
+           Frame is 1040 bytes (vs 960) to fit the two bigger structures. */
+        sym_define("__ys_net_connect_host6",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(1040); /* sub rsp,1040 */
+
+            x_mov_rbpN32_r64(-8,7);
+            x_mov_rbpN32_r64(-16,6);
+            x_mov_rbpN32_r64(-24,2);
+
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-32);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-31);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-30);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-29);
+
+            int resolv_path_off6 = data_add_str("/etc/resolv.conf");
+            x_lea_arg1_data(resolv_path_off6);
+            x_mov_r64_imm32(6,0);
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,2);
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j6_conf_open_fail = x_jl_rel32();
+            x_mov_rbpN32_r64(-48,0);
+
+            x_mov_r64_rbpN32(7,-48);
+            x_lea_r64_rbpN32(6,-432);
+            x_mov_r64_imm32(2,255);
+            x_mov_r64_imm32(0,0);
+            emit2(0x0f,0x05);
+            x_mov_rbpN32_r64(-56,0);
+
+            x_mov_r64_rbpN32(7,-48);
+            x_mov_r64_imm32(0,3);
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(0,-56);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j6_bytesread_le0 = x_jle_rel32();
+
+            x_mov_qword_rbpN32_imm32(-88,0);
+            int search_loop6 = code_len;
+            x_mov_r64_rbpN32(0,-88);
+            x_mov_r64_rbpN32(1,-56);
+            emit4(0x48,0x83,0xe9,0x0b);
+            emit3(0x48,0x39,0xc8);
+            int j6_search_end = x_jge_rel32();
+
+            x_lea_r64_rbpN32(3,-432);
+            x_mov_r64_rbpN32(0,-88);
+            emit3(0x48,0x01,0xc3);
+
+            int needle_off6 = data_add_str("nameserver ");
+            emit3(0x48,0x8d,0x35);
+            add_reloc(RELOC_DATA,code_len,needle_off6); emit_i32(0);
+
+            x_mov_r64_imm32(1,0);
+            int cmp_loop6 = code_len;
+            emit4(0x48,0x83,0xf9,0x0b);
+            int j6_cmp_done = x_jge_rel32();
+            x_mov_al_rbx_idx(1);
+            emit3(0x8a,0x14,0x0e);
+            emit2(0x38,0xd0);
+            int j6_byte_ne = x_jnz_rel32();
+            emit3(0x48,0xff,0xc1);
+            int j6_cmp_back = x_jmp_rel32();
+            patch_i32(j6_cmp_back,(int32_t)(cmp_loop6-(j6_cmp_back+4)));
+
+            x_patch_here(j6_byte_ne);
+            x_mov_r64_rbpN32(0,-88);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-88,0);
+            int j6_search_back = x_jmp_rel32();
+            patch_i32(j6_search_back,(int32_t)(search_loop6-(j6_search_back+4)));
+
+            x_patch_here(j6_cmp_done);
+            emit3(0x48,0x8d,0x4b); emit1(0x0b);
+
+            x_mov_qword_rbpN32_imm32(-72,0);
+            x_mov_qword_rbpN32_imm32(-80,0);
+
+            int parse_ip_loop6 = code_len;
+            x_lea_r64_rbpN32(2,-432);
+            x_mov_r64_rbpN32(0,-56);
+            emit3(0x48,0x01,0xc2);
+            emit3(0x48,0x39,0xd1);
+            int j6_parse_ip_ge = x_jge_rel32();
+            emit3(0x0f,0xb6,0x01);
+            emit2(0x3c,0x2e);
+            int j6_not_dot = x_jnz_rel32();
+
+            x_mov_r64_rbpN32(0,-80);
+            x_lea_r64_rbpN32(3,-32);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_rbx_idx_dl(0);
+            x_mov_r64_rbpN32(0,-80);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-80,0);
+            x_mov_qword_rbpN32_imm32(-72,0);
+            int j6_to_next1 = x_jmp_rel32();
+
+            x_patch_here(j6_not_dot);
+            emit2(0x3c,0x30);
+            int j6_lt0 = x_jl_rel32();
+            emit2(0x3c,0x39);
+            int j6_gt9 = x_jg_rel32();
+            emit2(0x2c,0x30);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN32(2,-72);
+            emit4(0x48,0x6b,0xd2,0x0a);
+            emit3(0x48,0x01,0xc2);
+            x_mov_rbpN32_r64(-72,2);
+
+            x_patch_here(j6_to_next1);
+            emit3(0x48,0xff,0xc1);
+            int j6_parse_back = x_jmp_rel32();
+            patch_i32(j6_parse_back,(int32_t)(parse_ip_loop6-(j6_parse_back+4)));
+
+            x_patch_here(j6_parse_ip_ge);
+            x_patch_here(j6_lt0);
+            x_patch_here(j6_gt9);
+
+            x_mov_r64_rbpN32(0,-80);
+            emit4(0x48,0x83,0xf8,0x03);
+            int j6_bad_octetcount = x_jnz_rel32();
+            x_lea_r64_rbpN32(3,-32);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_rbx_idx_dl(0);
+            x_patch_here(j6_bad_octetcount);
+
+            x_patch_here(j6_conf_open_fail);
+            x_patch_here(j6_bytesread_le0);
+            x_patch_here(j6_search_end);
+
+            /* ---- UDP socket (still plain IPv4 to the resolver -- DNS
+               transport is unrelated to which record TYPE is being asked
+               for, and resolv.conf entries here are always IPv4) ---- */
+            x_mov_r64_imm32(7,2);
+            x_mov_r64_imm32(6,2);
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41);
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j6_udp_fail = x_jl_rel32();
+            x_mov_rbpN32_r64(-40,0);
+
+            x_mov_qword_rbpN32_imm32(-128,3);
+            x_mov_qword_rbpN32_imm32(-120,0);
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_imm32(6,1);
+            x_mov_r64_imm32(2,20);
+            x_lea_r10_rbpN32(-128);
+            x_mov_r8d_imm32(16);
+            x_mov_r64_imm32(0,54);
+            emit2(0x0f,0x05);
+
+            x_lea_r64_rbpN32(3,-144);
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00);
+            x_mov_r64_imm32(0,53);
+            emit2(0x86,0xc4);
+            emit4(0x66,0x89,0x43,0x02);
+            x_mov_r64_rbpN32(0,-32);
+            emit3(0x89,0x43,0x04);
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
+
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_rbpN32(6,-8);
+            x_mov_r64_rbpN32(2,-16);
+            x_mov_r10d_imm32(0);
+            x_lea_r8_rbpN32(-144);
+            x_mov_r9d_imm32(16);
+            x_mov_r64_imm32(0,44);
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(7,-40);
+            x_lea_r64_rbpN32(6,-944);
+            x_mov_r64_imm32(2,512);
+            x_mov_r10d_imm32(0);
+            x_mov_r8d_imm32(0);
+            x_mov_r9d_imm32(0);
+            x_mov_r64_imm32(0,45);
+            emit2(0x0f,0x05);
+            x_mov_rbpN32_r64(-64,0);
+
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_imm32(0,3);
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(0,-64);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j6_recv_fail = x_jle_rel32();
+
+            x_mov_qword_rbpN32_imm32(-72,12);
+            int qname_loop6 = code_len;
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_r64_rbpN32(1,-64);
+            emit3(0x48,0x39,0xc8);
+            int j6_qname_oob = x_jge_rel32();
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_al_rbx_idx(0);
+            emit2(0x84,0xc0);
+            int j6_qname_end = x_jz_rel32();
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xff,0xc0);
+            x_mov_r64_rbpN32(1,-72);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-72,0);
+            int j6_qname_back = x_jmp_rel32();
+            patch_i32(j6_qname_back,(int32_t)(qname_loop6-(j6_qname_back+4)));
+
+            x_patch_here(j6_qname_oob);
+            x_patch_here(j6_qname_end);
+            x_mov_r64_rbpN32(0,-72);
+            emit4(0x48,0x83,0xc0,0x05);
+            x_mov_rbpN32_r64(-72,0);
+
+            x_lea_r64_rbpN32(3,-944);
+            emit3(0x0f,0xb6,0x43); emit1(0x06);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-80,0);
+            emit3(0x0f,0xb6,0x43); emit1(0x07);
+            x_mov_r64_rbpN32(1,-80);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-80,0);
+
+            x_mov_qword_rbpN32_imm32(-88,0);
+
+            int rr_loop6 = code_len;
+            x_mov_r64_rbpN32(0,-88);
+            x_mov_r64_rbpN32(1,-80);
+            emit3(0x48,0x39,0xc8);
+            int j6_rr_done1 = x_jge_rel32();
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_r64_rbpN32(1,-64);
+            emit3(0x48,0x39,0xc8);
+            int j6_rr_done2 = x_jge_rel32();
+
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_al_rbx_idx(2);
+            emit2(0x24,0xc0);
+            emit2(0x3c,0xc0);
+            int j6_not_ptr = x_jnz_rel32();
+            x_mov_r64_rbpN32(0,-72);
+            emit4(0x48,0x83,0xc0,0x02);
+            x_mov_rbpN32_r64(-72,0);
+            int j6_name_done = x_jmp_rel32();
+
+            x_patch_here(j6_not_ptr);
+            int name_walk_loop6 = code_len;
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_al_rbx_idx(2);
+            emit2(0x84,0xc0);
+            int j6_name_walk_zero = x_jz_rel32();
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xff,0xc0);
+            x_mov_r64_rbpN32(1,-72);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-72,0);
+            int j6_name_walk_back = x_jmp_rel32();
+            patch_i32(j6_name_walk_back,(int32_t)(name_walk_loop6-(j6_name_walk_back+4)));
+            x_patch_here(j6_name_walk_zero);
+            x_mov_r64_rbpN32(0,-72);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-72,0);
+            x_patch_here(j6_name_done);
+
+            x_mov_r64_rbpN32(0,-72);
+            x_lea_r64_rbpN32(3,-944);
+            emit3(0x48,0x89,0xda);
+            emit3(0x48,0x01,0xc2);
+
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-168,0);
+            emit3(0x48,0xff,0xc2);
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN32(1,-168);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-168,0);
+            emit3(0x48,0xff,0xc2);
+
+            emit4(0x48,0x83,0xc2,0x06);
+
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-176,0);
+            emit3(0x48,0xff,0xc2);
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN32(1,-176);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-176,0);
+            emit3(0x48,0xff,0xc2);
+
+            emit3(0x48,0x89,0xd0);
+            emit3(0x48,0x29,0xd8);
+            x_mov_rbpN32_r64(-72,0);
+
+            x_mov_r64_rbpN32(0,-168);
+            emit4(0x48,0x83,0xf8,0x1c);       /* cmp rr_type,28 (AAAA) */
+            int j6_type_no = x_jnz_rel32();
+            x_mov_r64_rbpN32(0,-176);
+            emit4(0x48,0x83,0xf8,0x10);       /* cmp rr_rdlen,16 */
+            int j6_rdlen_no = x_jnz_rel32();
+
+            /* MATCH: an AAAA record -- copy all 16 RDATA bytes (two 8-byte
+               chunks) into found_ip6, build a 28-byte sockaddr_in6, and
+               try connecting immediately, same retry-with-timeout shape
+               as the A-record version. rdx still points at RDATA here,
+               same as in __ys_net_connect_host at the equivalent point. */
+            x_lea_r64_rbpN32(1,-976);         /* rcx = &found_ip6 */
+            emit3(0x48,0x8b,0x02);            /* rax = [rdx] (bytes 0-7) */
+            emit3(0x48,0x89,0x01);            /* [rcx] = rax */
+            emit4(0x48,0x8b,0x42,0x08);       /* rax = [rdx+8] (bytes 8-15) */
+            emit3(0x48,0x89,0x41); emit1(0x08); /* [rcx+8] = rax */
+
+            x_lea_r64_rbpN32(3,-1024);        /* sockaddr_in6 */
+            emit4(0x66,0xc7,0x03,0x0a); emit1(0x00); /* family = AF_INET6 */
+            x_mov_r64_rbpN32(0,-24);          /* port */
+            emit2(0x86,0xc4);
+            emit4(0x66,0x89,0x43,0x02);
+            emit1(0xc7); emit1(0x43); emit1(0x04); emit_i32(0); /* flowinfo = 0 */
+            x_lea_r64_rbpN32(1,-976);         /* rcx = &found_ip6 (again, rbx got overwritten above) */
+            emit3(0x48,0x8b,0x01);            /* rax = found_ip6[0..7] */
+            emit3(0x48,0x89,0x43); emit1(0x08); /* sockaddr+8 = rax */
+            emit4(0x48,0x8b,0x41,0x08);       /* rax = found_ip6[8..15] */
+            emit3(0x48,0x89,0x43); emit1(0x10); /* sockaddr+16 = rax */
+            emit1(0xc7); emit1(0x43); emit1(0x18); emit_i32(0); /* scope_id = 0 */
+
+            /* non-blocking connect + poll(3s) + SO_ERROR, identical
+               shape to the A-record version, just AF_INET6/28 bytes */
+            x_mov_r64_imm32(7,10);            /* AF_INET6 */
+            x_mov_r64_imm32(6,1|0x800);       /* SOCK_STREAM|SOCK_NONBLOCK */
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41);
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j6_this_socket_fail = x_jl_rel32();
+            x_mov_rbpN32_r64(-112,0);
+
+            x_mov_r64_rbpN32(7,-112);
+            x_lea_r64_rbpN32(6,-1024);
+            x_mov_r64_imm32(2,28);            /* sizeof(sockaddr_in6) */
+            x_mov_r64_imm32(0,42);
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j6_connect_immediate_ok = x_jge_rel32();
+
+            x_mov_r64_rbpN32(0,-112);
+            emit1(0x89); emit1(0x85); emit_i32(-168);
+            emit1(0x66); emit1(0xc7); emit1(0x85); emit_i32(-164); emit1(0x04); emit1(0x00);
+            emit1(0x66); emit1(0xc7); emit1(0x85); emit_i32(-162); emit1(0x00); emit1(0x00);
+            x_lea_r64_rbpN32(7,-168);
+            x_mov_r64_imm32(6,1);
+            x_mov_r64_imm32(2,3000);
+            x_mov_r64_imm32(0,7);
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x01);
+            int j6_poll_fail = x_jnz_rel32();
+
+            emit1(0x0f); emit1(0xb7); emit1(0x85); emit_i32(-162);
+            emit1(0xa9); emit_i32(4);
+            int j6_no_pollout = x_jz_rel32();
+
+            x_mov_r64_rbpN32(7,-112);
+            x_mov_r64_imm32(6,1);
+            x_mov_r64_imm32(2,4);
+            x_lea_r10_rbpN32(-176);
+            emit1(0xc7); emit1(0x85); emit_i32(-172); emit_i32(4);
+            x_lea_r8_rbpN32(-172);
+            x_mov_r64_imm32(0,55);
+            emit2(0x0f,0x05);
+            emit1(0x8b); emit1(0x85); emit_i32(-176);
+            emit2(0x85,0xc0);
+            int j6_so_error = x_jnz_rel32();
+
+            x_patch_here(j6_connect_immediate_ok);
+            x_mov_r64_rbpN32(7,-112);
+            x_mov_r64_imm32(6,4);
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,72);
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(0,-112);
+            int j6_final_ok = x_jmp_rel32();
+
+            x_patch_here(j6_poll_fail);
+            x_patch_here(j6_no_pollout);
+            x_patch_here(j6_so_error);
+            x_mov_r64_rbpN32(7,-112);
+            x_mov_r64_imm32(0,3);
+            emit2(0x0f,0x05);
+            int j6_after_close = x_jmp_rel32();
+
+            x_patch_here(j6_type_no);
+            x_patch_here(j6_rdlen_no);
+            x_patch_here(j6_this_socket_fail);
+            x_patch_here(j6_after_close);
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_r64_rbpN32(1,-176);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-72,0);
+
+            x_mov_r64_rbpN32(0,-88);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-88,0);
+            int j6_rr_back = x_jmp_rel32();
+            patch_i32(j6_rr_back,(int32_t)(rr_loop6-(j6_rr_back+4)));
+
+            x_patch_here(j6_udp_fail);
+            x_patch_here(j6_recv_fail);
+            x_patch_here(j6_rr_done1);
+            x_patch_here(j6_rr_done2);
+            x_mov_r64_imm32(0,-1);
+
+            x_patch_here(j6_final_ok);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
         /* __ys_net_send(rdi=buf, rsi=len, rdx=fd) -> rax=bytes written or -1
            Argument order is (buf,len,fd) rather than the more natural
            (fd,buf,len) specifically so the call site can stage the
@@ -1626,27 +2216,84 @@ static void compile_expr(Node *n){
            leaves earlier registers untouched — robust regardless of
            what compile_expr does internally.
 
-           Dotted-decimal literals ("93.184.216.34") take the original
-           fast path straight to __ys_net_connect. Anything else with a
-           letter in it is treated as a hostname: the DNS query packet
-           for it is built here at compile time (build_dns_query — valid
-           since the literal is fixed at compile time either way) and
-           handed to __ys_net_connect_host, which resolves it over UDP
-           at runtime before connecting. Linux only, matching every
-           other y.net.* native symbol (see the TARGET_LINUX guard these
-           are defined under above) — macOS/Windows have no native y.net.*
-           support at all yet for either shape of address. */
+           Three address shapes, checked in this order:
+             1. IPv6 literal ("::1", "2001:db8::1") -- parsed via the
+                host's inet_pton at compile time (parse_ipv6_literal) and
+                handed straight to __ys_net_connect6 as 16 raw bytes; no
+                DNS involved. If it looks IPv6-shaped (has a ':') but
+                doesn't actually parse, falls through to case 3 below
+                instead of a special error path -- building a query
+                containing colons that will just cleanly fail to resolve
+                at runtime, same philosophy as the final fallback.
+             2. Dotted-decimal IPv4 literal ("93.184.216.34") -- the
+                original fast path straight to __ys_net_connect, no DNS.
+             3. Anything else with a letter in it is a hostname: the DNS
+                query packet for it is built here at compile time
+                (build_dns_query — valid since the literal is fixed at
+                compile time either way) and handed to
+                __ys_net_connect_host, which resolves it over UDP at
+                runtime before connecting.
+           Linux only, matching every other y.net.* native symbol (see
+           the TARGET_LINUX guard these are defined under above) —
+           macOS/Windows have no native y.net.* support at all yet for
+           any shape of address. */
         if(is_y_net && strcmp(fn,"connect")==0){
             int base=n->left?1:0;
             Node *ip_arg=(n->argc>base)?n->args[base]:NULL;
             Node *port_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+
+            uint8_t ip6buf[16];
+            int is_ipv6 = ip_arg && ip_arg->kind==ND_STR &&
+                          is_ipv6_literal(ip_arg->sval) &&
+                          parse_ipv6_literal(ip_arg->sval, ip6buf);
+            if(is_ipv6){
+                int off = data_add_bytes(ip6buf, 16);
+                if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(0);
+                emit1(0x50); /* push rax (port) */
+                emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off); emit_i32(0); /* lea rdi,[rip+off] */
+                emit1(0x5e); /* pop rsi (port) -- connect6 is (rdi=addr_ptr, rsi=port), no length arg needed */
+                int p=x_call_unresolved(); add_call_patch(p,"__ys_net_connect6");
+                break;
+            }
+
             int is_hostname = ip_arg && ip_arg->kind==ND_STR && !is_ipv4_literal(ip_arg->sval);
-            int off, len;
             if(is_hostname){
-                uint8_t qbuf[512];
+                uint8_t qbuf[512], qbuf6[512];
                 int qlen = build_dns_query(ip_arg->sval, qbuf);
-                off = data_add_bytes(qbuf, qlen); len = qlen;
-            } else if(ip_arg && ip_arg->kind==ND_STR){
+                int qlen6 = build_dns_query_aaaa(ip_arg->sval, qbuf6);
+                int off = data_add_bytes(qbuf, qlen);
+                int off6 = data_add_bytes(qbuf6, qlen6);
+
+                if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(0);
+                emit1(0x50); /* push rax (port) — kept on the stack across
+                                 both attempts below rather than consumed
+                                 immediately, since it's needed twice if
+                                 the A lookup comes back empty */
+
+                /* try A (IPv4) first */
+                emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off); emit_i32(0); /* rdi = &a_query */
+                x_mov_rax_imm32(qlen); emit3(0x48,0x89,0xc6); /* rsi = qlen */
+                emit4(0x48,0x8b,0x14,0x24); /* mov rdx,[rsp] (peek port, stack untouched) */
+                int pA=x_call_unresolved(); add_call_patch(pA,"__ys_net_connect_host");
+                emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+                int j_a_ok = x_jge_rel32(); /* rax>=0 -> got a fd, skip AAAA entirely */
+
+                /* no usable A record (-1) -> fall back to AAAA (IPv6) */
+                emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off6); emit_i32(0); /* rdi = &aaaa_query */
+                x_mov_rax_imm32(qlen6); emit3(0x48,0x89,0xc6); /* rsi = qlen6 */
+                emit4(0x48,0x8b,0x14,0x24); /* mov rdx,[rsp] (peek port again) */
+                int p6=x_call_unresolved(); add_call_patch(p6,"__ys_net_connect_host6");
+                /* falls straight into j_a_ok's target with rax = the
+                   AAAA attempt's result; the A-succeeded path jumps to
+                   the exact same point with rax = its own fd, so either
+                   way rax is correct by the time rsp gets cleaned up */
+
+                x_patch_here(j_a_ok);
+                emit4(0x48,0x83,0xc4,0x08); /* add rsp,8 (discard the pushed port) */
+                break;
+            }
+            int off, len;
+            if(ip_arg && ip_arg->kind==ND_STR){
                 off=data_add_str(ip_arg->sval); len=ystrlen(ip_arg->sval);
             } else { off=data_add_str(""); len=0; } /* unsupported shape: fails to connect cleanly rather than miscompiling */
             if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(0);
@@ -1655,7 +2302,7 @@ static void compile_expr(Node *n){
             x_mov_rax_imm32(len); emit3(0x48,0x89,0xc6); /* mov rsi,rax (len) */
             emit1(0x5a); /* pop rdx (port) */
             int p=x_call_unresolved();
-            add_call_patch(p, is_hostname ? "__ys_net_connect_host" : "__ys_net_connect");
+            add_call_patch(p,"__ys_net_connect");
             break;
         }
         /* y.net.send(sock, data) -> bytes written or -1. data MUST be a
