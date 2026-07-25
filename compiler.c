@@ -408,6 +408,9 @@ static void x_mov_r10d_imm32(int32_t imm){
 static void x_lea_r8_rbpN32(int32_t disp){
     emit3(0x4c,0x8d,0x85); emit_i32(disp); /* lea r8,[rbp+disp32] */
 }
+static void x_lea_r9_rbpN32(int32_t disp){
+    emit3(0x4c,0x8d,0x8d); emit_i32(disp); /* lea r9,[rbp+disp32] */
+}
 static void x_lea_r10_rbpN32(int32_t disp){
     emit3(0x4c,0x8d,0x95); emit_i32(disp); /* lea r10,[rbp+disp32] */
 }
@@ -2027,6 +2030,317 @@ static void emit_helpers(void){
             x_patch_here(j_ok);
             x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
         }
+
+        /* __ys_net_udp_socket() -> rax=fd or -1
+           An unbound UDP socket (OS assigns a local port on first
+           send), for a "client" that only sends and receives replies.
+           Mirrors ys_udp_socket in net_runtime.c (the interpreter/VM
+           version) — see udp_bind below for the "server" counterpart
+           that needs a known port. */
+        sym_define("__ys_net_udp_socket",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            x_mov_r64_imm32(7,2); x_mov_r64_imm32(6,2); x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41); /* SYS_socket(AF_INET,SOCK_DGRAM,0) */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_ok=x_jge_rel32();
+            x_mov_r64_imm32(0,-1);
+            x_patch_here(j_ok);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
+        /* __ys_net_udp_bind(rdi=port) -> rax=fd or -1
+           socket + SO_REUSEADDR + bind(INADDR_ANY:port). No listen() —
+           UDP has no connection to listen for; whatever arrives at this
+           port is available via recvfrom immediately. Identical
+           setsockopt/bind sequence to __ys_net_listen above, just
+           SOCK_DGRAM instead of SOCK_STREAM and no listen() call. */
+        sym_define("__ys_net_udp_bind",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(64); /* sub rsp,64 */
+            x_mov_rbpN_r64(-8,7); /* [rbp-8]=port */
+
+            x_mov_r64_imm32(7,2); x_mov_r64_imm32(6,2); x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41); /* SYS_socket(AF_INET,SOCK_DGRAM,0) */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_fail1=x_jl_rel32();
+            x_mov_rbpN_r64(-16,0); /* [rbp-16]=fd */
+
+            x_mov_qword_rbpN_imm32(-24,1); /* optval=1 */
+            x_mov_r64_rbpN(7,-16);
+            x_mov_r64_imm32(6,1);  /* SOL_SOCKET */
+            x_mov_r64_imm32(2,2);  /* SO_REUSEADDR */
+            x_lea_r10_rbpN(-24);
+            x_mov_r8d_imm32(4);
+            x_mov_r64_imm32(0,54); /* SYS_setsockopt */
+            emit2(0x0f,0x05);
+
+            x_lea_r64_rbpN(3,-48); /* sockaddr_in: AF_INET, htons(port), INADDR_ANY, zero */
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00);
+            x_mov_r64_rbpN(0,-8);
+            emit2(0x86,0xc4);
+            emit4(0x66,0x89,0x43,0x02);
+            emit3(0x48,0xc7,0x43); emit1(0x04); emit_i32(0);
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
+
+            x_mov_r64_rbpN(7,-16);
+            x_lea_r64_rbpN(6,-48);
+            x_mov_r64_imm32(2,16);
+            x_mov_r64_imm32(0,49); /* SYS_bind */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_fail2=x_jl_rel32();
+
+            x_mov_r64_rbpN(0,-16);
+            int j_done1=x_jmp_rel32();
+
+            x_patch_here(j_fail2);
+            x_mov_r64_rbpN(7,-16);
+            x_mov_r64_imm32(0,3);
+            emit2(0x0f,0x05);
+            x_mov_r64_imm32(0,-1);
+            int j_done2=x_jmp_rel32();
+
+            x_patch_here(j_fail1);
+            x_mov_r64_imm32(0,-1);
+
+            x_patch_here(j_done1);
+            x_patch_here(j_done2);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
+        /* __ys_net_udp_send(rdi=sock, rsi=host_ptr, rdx=host_len,
+                              rcx=port, r8=data_ptr, r9=data_len)
+           -> rax=bytes sent or -1
+           host is IPv4-dotted-decimal ONLY for this first native UDP
+           batch, not a hostname — the octet-parsing loop here is a
+           straight copy of __ys_net_connect's (parses ptr/len args at
+           runtime rather than a compile-time literal, since host_ptr
+           here is a real argument register, not something baked into
+           rodata the way the TCP path's DNS query bytes are). Teaching
+           udp_send to also accept hostnames would mean either resolving
+           at runtime here too, or restricting host to a compile-time
+           literal and building the resolved address at compile time
+           like TCP now does — either is a reasonable follow-up, just
+           kept out of this batch to bound its size. UDP sends are one
+           full datagram in one syscall, so unlike __ys_net_send there's
+           no short-write retry loop needed. */
+        sym_define("__ys_net_udp_send",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(96); /* sub rsp,96 */
+
+            x_mov_rbpN_r64(-8,7);   /* sock */
+            x_mov_rbpN_r64(-16,6);  /* host cur-ptr (mutated during parse) */
+            x_mov_r64_rbpN(0,-16);
+            emit3(0x48,0x01,0xd0);  /* rax += rdx (host_len) */
+            x_mov_rbpN_r64(-24,0);  /* host end ptr */
+            x_mov_rbpN_r64(-32,1);  /* port */
+            emit3(0x4c,0x89,0xc0);  /* mov rax,r8 */
+            x_mov_rbpN_r64(-40,0);  /* data_ptr */
+            emit3(0x4c,0x89,0xc8);  /* mov rax,r9 */
+            x_mov_rbpN_r64(-48,0);  /* data_len */
+
+            x_mov_qword_rbpN_imm32(-56,0); /* octet accumulator */
+            x_mov_qword_rbpN_imm32(-64,0); /* octet_idx */
+
+            int uloop_start=code_len;
+            x_mov_r64_rbpN(0,-16);
+            x_mov_r64_rbpN(1,-24);
+            emit3(0x48,0x39,0xc8);
+            int ju_loop_end=x_jge_rel32();
+
+            x_mov_r64_rbpN(2,-16);
+            emit3(0x0f,0xb6,0x02);  /* movzx eax,byte[rdx] */
+            emit2(0x3c,0x2e);
+            int ju_digit=x_jnz_rel32();
+
+            x_mov_r64_rbpN(1,-64);
+            x_mov_r64_rbpN(2,-56);
+            x_lea_r64_rbpN(3,-72);  /* &ipbuf */
+            emit3(0x88,0x14,0x0b);
+            emit3(0x48,0xff,0x45); emit1((uint8_t)-64);
+            x_mov_qword_rbpN_imm32(-56,0);
+            int ju_next1=x_jmp_rel32();
+
+            x_patch_here(ju_digit);
+            emit2(0x2c,0x30);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN(2,-56);
+            emit4(0x48,0x6b,0xd2,0x0a);
+            emit3(0x48,0x01,0xc2);
+            x_mov_rbpN_r64(-56,2);
+
+            x_patch_here(ju_next1);
+            emit3(0x48,0xff,0x45); emit1((uint8_t)-16);
+            int ju_back=x_jmp_rel32();
+            patch_i32(ju_back,(int32_t)(uloop_start-(ju_back+4)));
+
+            x_patch_here(ju_loop_end);
+            x_mov_r64_rbpN(1,-64);
+            x_mov_r64_rbpN(2,-56);
+            x_lea_r64_rbpN(3,-72);
+            emit3(0x88,0x14,0x0b);
+
+            x_lea_r64_rbpN(3,-88); /* sockaddr_in */
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00);
+            x_mov_r64_rbpN(0,-32); /* port */
+            emit2(0x86,0xc4);
+            emit4(0x66,0x89,0x43,0x02);
+            x_lea_r64_rbpN(1,-72);
+            emit2(0x8b,0x01);
+            emit3(0x89,0x43,0x04);
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
+
+            /* sendto(sock, data_ptr, data_len, 0, &sockaddr, 16) */
+            x_mov_r64_rbpN(7,-8);
+            x_mov_r64_rbpN(6,-40);
+            x_mov_r64_rbpN(2,-48);
+            x_mov_r10d_imm32(0);
+            x_lea_r8_rbpN32(-88);
+            x_mov_r9d_imm32(16);
+            x_mov_r64_imm32(0,44); /* SYS_sendto */
+            emit2(0x0f,0x05);
+            /* rax already holds bytes sent (or -1) — correct return value */
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
+        /* __ys_net_udp_recv_print(rdi=sock, rsi=maxlen) -> rax=bytes
+           received or -1. Same "no runtime string type, so print
+           instead of returning a value" reasoning as __ys_net_recv_print
+           — the difference from that one is recvfrom() instead of
+           read(), since UDP has no fixed peer the way a connected TCP
+           socket does; the sender's address recvfrom fills in here is
+           simply discarded (see __ys_net_udp_recv_reply_print below for
+           the variant that keeps and uses it). */
+        sym_define("__ys_net_udp_recv_print",code_len);
+        {
+            int urecvbuf_off=data_len;
+            static const int URECVBUF_CAP=4096;
+            for(int i=0;i<URECVBUF_CAP;i++) data_buf[data_len++]=0;
+
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(64); /* sub rsp,64 */
+            x_mov_rbpN_r64(-8,7);  /* sock */
+            emit3(0x48,0x81,0xfe); emit_i32(URECVBUF_CAP);
+            int ju_ok=x_jl_rel32();
+            x_mov_r64_imm32(6,URECVBUF_CAP);
+            x_patch_here(ju_ok);
+            x_mov_rbpN_r64(-16,6); /* maxlen (clamped) */
+
+            x_mov_qword_rbpN_imm32(-24,16); /* fromlen = sizeof(sockaddr_in) */
+
+            x_mov_r64_rbpN(7,-8);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,urecvbuf_off); emit_i32(0); /* rsi=&buf */
+            x_mov_r64_rbpN(2,-16);
+            x_mov_r10d_imm32(0);
+            x_lea_r8_rbpN32(-48);  /* r8=&fromaddr (throwaway, 16 bytes at -48..-33) */
+            x_lea_r9_rbpN32(-24);  /* r9=&fromlen */
+            x_mov_r64_imm32(0,45); /* SYS_recvfrom */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int ju_norecv=x_jle_rel32();
+            x_mov_rbpN_r64(-16,0); /* n */
+
+            x_mov_r64_imm32(7,1);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,urecvbuf_off); emit_i32(0);
+            x_mov_r64_rbpN(2,-16);
+            x_mov_r64_imm32(0,1); /* SYS_write */
+            emit2(0x0f,0x05);
+            x_mov_r64_rbpN(0,-16); /* return n, not write()'s retval */
+            int ju_done=x_jmp_rel32();
+
+            x_patch_here(ju_norecv);
+            x_mov_r64_imm32(0,-1);
+
+            x_patch_here(ju_done);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
+        /* __ys_net_udp_recv_reply_print(rdi=sock, rsi=maxlen,
+                                          rdx=reply_ptr, rcx=reply_len)
+           -> rax=bytes received or -1
+           Reads one datagram (printing its payload, same as
+           udp_recv_print above), then sends reply_ptr/reply_len back to
+           whichever address it just arrived from — captured internally
+           in this function's own stack memory and never exposed to the
+           Yolish program as a value. This is the native workaround for
+           the fact that udp_recv normally returns {data, host, port} as
+           a y.map (see ys_udp_recv in net_runtime.c) so a program can
+           reply to a specific sender: the native backend has no map or
+           runtime-string type to hand that address back through, but
+           "receive, then reply to that same sender" is by far the most
+           common reason a program needs the sender's address in the
+           first place (an echo/reply server), so it's worth a dedicated
+           primitive rather than not supporting that pattern at all. If
+           the reply send fails, the received byte count is still
+           returned — the recv already happened and its payload was
+           already printed, so that half of the call did succeed. */
+        sym_define("__ys_net_udp_recv_reply_print",code_len);
+        {
+            int urrecvbuf_off=data_len;
+            static const int URRECVBUF_CAP=4096;
+            for(int i=0;i<URRECVBUF_CAP;i++) data_buf[data_len++]=0;
+
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(96); /* sub rsp,96 */
+            x_mov_rbpN_r64(-8,7);  /* sock */
+            emit3(0x48,0x81,0xfe); emit_i32(URRECVBUF_CAP);
+            int jur_ok=x_jl_rel32();
+            x_mov_r64_imm32(6,URRECVBUF_CAP);
+            x_patch_here(jur_ok);
+            x_mov_rbpN_r64(-16,6); /* maxlen (clamped) */
+            x_mov_rbpN_r64(-24,2); /* reply_ptr */
+            x_mov_rbpN_r64(-32,1); /* reply_len */
+
+            x_mov_qword_rbpN_imm32(-40,16); /* fromlen = sizeof(sockaddr_in) */
+
+            /* recvfrom(sock, buf, maxlen, 0, &fromaddr[-96..-81], &fromlen) —
+               fromaddr is KEPT this time (not throwaway), reused directly
+               as the destination for the reply's sendto below */
+            x_mov_r64_rbpN(7,-8);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,urrecvbuf_off); emit_i32(0);
+            x_mov_r64_rbpN(2,-16);
+            x_mov_r10d_imm32(0);
+            x_lea_r8_rbpN32(-96);  /* r8=&fromaddr (16 bytes at -96..-81) */
+            x_lea_r9_rbpN32(-40);  /* r9=&fromlen */
+            x_mov_r64_imm32(0,45); /* SYS_recvfrom */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int jur_norecv=x_jle_rel32();
+            x_mov_rbpN_r64(-16,0); /* n */
+
+            x_mov_r64_imm32(7,1);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,urrecvbuf_off); emit_i32(0);
+            x_mov_r64_rbpN(2,-16);
+            x_mov_r64_imm32(0,1); /* SYS_write */
+            emit2(0x0f,0x05);
+
+            /* sendto(sock, reply_ptr, reply_len, 0, &fromaddr, 16) —
+               replying to the address recvfrom just captured */
+            x_mov_r64_rbpN(7,-8);
+            x_mov_r64_rbpN(6,-24); /* reply_ptr */
+            x_mov_r64_rbpN(2,-32); /* reply_len */
+            x_mov_r10d_imm32(0);
+            x_lea_r8_rbpN32(-96);  /* same fromaddr recvfrom just filled in */
+            x_mov_r9d_imm32(16);
+            x_mov_r64_imm32(0,44); /* SYS_sendto */
+            emit2(0x0f,0x05);
+            /* ignore sendto's own result — n (the recv byte count) is
+               the return value regardless, per the doc comment above */
+
+            x_mov_r64_rbpN(0,-16); /* return n */
+            int jur_done=x_jmp_rel32();
+
+            x_patch_here(jur_norecv);
+            x_mov_r64_imm32(0,-1);
+
+            x_patch_here(jur_done);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
     }
     emit_float_helper();
 }
@@ -2364,6 +2678,115 @@ static void compile_expr(Node *n){
             Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
             if(sock_arg){ compile_expr(sock_arg); x_arg1_from_rax(); } else { x_mov_rax_imm32(-1); x_arg1_from_rax(); }
             int p=x_call_unresolved(); add_call_patch(p,"__ys_net_accept");
+            break;
+        }
+        /* y.net.udp_socket() -> fd or -1 */
+        if(is_y_net && strcmp(fn,"udp_socket")==0){
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_udp_socket");
+            break;
+        }
+        /* y.net.udp_bind(port) -> fd or -1 */
+        if(is_y_net && strcmp(fn,"udp_bind")==0){
+            int base=n->left?1:0;
+            Node *port_arg=(n->argc>base)?n->args[base]:NULL;
+            if(port_arg){ compile_expr(port_arg); x_arg1_from_rax(); } else { x_mov_rax_imm32(0); x_arg1_from_rax(); }
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_udp_bind");
+            break;
+        }
+        /* y.net.udp_send(sock, host, port, data) -> bytes sent or -1.
+           host and data MUST be string literals (host is IPv4-literal
+           only for now — see __ys_net_udp_send's doc comment). All six
+           values are staged onto the stack in the reverse of the order
+           they're needed, then popped straight into the target ABI
+           (rdi=sock, rsi=host_ptr, rdx=host_len, rcx=port, r8=data_ptr,
+           r9=data_len) — robust regardless of what compile_expr does
+           internally for sock/port, the only two pieces that aren't
+           already compile-time constants. */
+        if(is_y_net && strcmp(fn,"udp_send")==0){
+            int base=n->left?1:0;
+            Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *host_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            Node *port_arg=(n->argc>base+2)?n->args[base+2]:NULL;
+            Node *data_arg=(n->argc>base+3)?n->args[base+3]:NULL;
+
+            int hoff,hlen;
+            if(host_arg && host_arg->kind==ND_STR){ hoff=data_add_str(host_arg->sval); hlen=ystrlen(host_arg->sval); }
+            else { hoff=data_add_str(""); hlen=0; }
+            int doff,dlen;
+            if(data_arg && data_arg->kind==ND_STR){ doff=data_add_str(data_arg->sval); dlen=ystrlen(data_arg->sval); }
+            else { doff=data_add_str(""); dlen=0; }
+
+            x_mov_rax_imm32(dlen); emit1(0x50);                  /* push data_len */
+            emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,doff); emit_i32(0); emit1(0x50); /* push data_ptr */
+            if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(0);
+            emit1(0x50);                                          /* push port */
+            x_mov_rax_imm32(hlen); emit1(0x50);                   /* push host_len */
+            emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,hoff); emit_i32(0); emit1(0x50); /* push host_ptr */
+            if(sock_arg) compile_expr(sock_arg); else x_mov_rax_imm32(-1);
+            emit1(0x50);                                          /* push sock */
+
+            emit1(0x5f); /* pop rdi = sock */
+            emit1(0x5e); /* pop rsi = host_ptr */
+            emit1(0x5a); /* pop rdx = host_len */
+            emit1(0x59); /* pop rcx = port */
+            emit2(0x41,0x58); /* pop r8 = data_ptr */
+            emit2(0x41,0x59); /* pop r9 = data_len */
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_udp_send");
+            break;
+        }
+        /* y.net.udp_recv_print(sock, maxlen) -> bytes received or -1,
+           payload printed to stdout. Sender's address is read by
+           recvfrom internally but discarded — see udp_recv_reply_print
+           below for the variant that uses it. */
+        if(is_y_net && strcmp(fn,"udp_recv_print")==0){
+            int base=n->left?1:0;
+            Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *maxlen_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            if(maxlen_arg) compile_expr(maxlen_arg); else x_mov_rax_imm32(1024);
+            emit1(0x50); /* push maxlen */
+            if(sock_arg) compile_expr(sock_arg); else x_mov_rax_imm32(-1);
+            emit3(0x48,0x89,0xc7); /* mov rdi,rax (sock) */
+            emit1(0x5e); /* pop rsi (maxlen) */
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_udp_recv_print");
+            break;
+        }
+        /* y.net.udp_recv_reply_print(sock, maxlen, reply_data) -> bytes
+           received or -1. Reads one datagram (printing its payload,
+           same as udp_recv_print), then sends reply_data back to
+           whichever address it just arrived from. reply_data MUST be a
+           string literal, same reasoning as data in udp_send/send. */
+        if(is_y_net && strcmp(fn,"udp_recv_reply_print")==0){
+            int base=n->left?1:0;
+            Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *maxlen_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            Node *reply_arg=(n->argc>base+2)?n->args[base+2]:NULL;
+
+            int roff,rlen;
+            if(reply_arg && reply_arg->kind==ND_STR){ roff=data_add_str(reply_arg->sval); rlen=ystrlen(reply_arg->sval); }
+            else { roff=data_add_str(""); rlen=0; }
+
+            x_mov_rax_imm32(rlen); emit1(0x50);                  /* push reply_len */
+            emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,roff); emit_i32(0); emit1(0x50); /* push reply_ptr */
+            if(maxlen_arg) compile_expr(maxlen_arg); else x_mov_rax_imm32(1024);
+            emit1(0x50);                                          /* push maxlen */
+            if(sock_arg) compile_expr(sock_arg); else x_mov_rax_imm32(-1);
+            emit1(0x50);                                          /* push sock */
+
+            emit1(0x5f); /* pop rdi = sock */
+            emit1(0x5e); /* pop rsi = maxlen */
+            emit1(0x5a); /* pop rdx = reply_ptr */
+            emit1(0x59); /* pop rcx = reply_len */
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_udp_recv_reply_print");
+            break;
+        }
+        /* y.net.udp_close(sock) — close(fd) is generic regardless of
+           socket type, so this reuses __ys_net_close directly rather
+           than defining an identical duplicate under a different name. */
+        if(is_y_net && strcmp(fn,"udp_close")==0){
+            int base=n->left?1:0;
+            Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
+            if(sock_arg){ compile_expr(sock_arg); x_arg1_from_rax(); }
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close");
             break;
         }
         /* user function call — pass args in registers (SysV) */

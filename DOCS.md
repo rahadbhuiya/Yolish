@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.24  
+**Version:** v2.25  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2589,6 +2589,38 @@ y.net.listen(port)              -- binds 0.0.0.0:port (backlog 128),
 y.net.accept(server_sock)       -- blocks for a client, returns its
                                  -- socket, or -1
 y.net.close(sock)
+
+y.net.udp_socket()              -- an unbound UDP socket (OS assigns a
+                                 -- local port on first send) for a
+                                 -- client, or -1
+y.net.udp_bind(port)            -- a UDP socket bound to 0.0.0.0:port
+                                 -- for a server, or -1
+y.net.udp_send(sock, host, port, data)
+                                 -- host and data MUST be string
+                                 -- literals. host is an IPv4 dotted-
+                                 -- decimal literal only for now, not a
+                                 -- hostname. Returns bytes sent, or -1.
+y.net.udp_recv_print(sock, maxlen)
+                                 -- reads one datagram and prints its
+                                 -- payload to stdout. The sender's
+                                 -- address is discarded — see
+                                 -- udp_recv_reply_print below if you
+                                 -- need to react to it.
+y.net.udp_recv_reply_print(sock, maxlen, reply_data)
+                                 -- reads one datagram, prints its
+                                 -- payload, then sends reply_data back
+                                 -- to whichever address it arrived
+                                 -- from. reply_data MUST be a string
+                                 -- literal. This is the native
+                                 -- workaround for udp_recv normally
+                                 -- returning the sender's address as
+                                 -- part of a y.map (see "Native UDP"
+                                 -- below) — replying to the sender is
+                                 -- by far the most common reason a
+                                 -- program needs that address at all.
+y.net.udp_close(sock)           -- same as y.net.close; provided under
+                                 -- both names for symmetry with the
+                                 -- udp_* family.
 ```
 
 ```yolish
@@ -2672,6 +2704,26 @@ and connecting over `AF_INET6`/`sockaddr_in6` instead. IPv4 is always
 tried first — an A success skips the AAAA attempt entirely. IPv6
 literals ("::1", "2001:db8::1") skip DNS the same way IPv4 literals do:
 parsed straight to 16 bytes at compile time and connected directly.
+
+**Native UDP (`ys -c`, Linux):** `udp_socket`/`udp_bind`/`udp_send`/
+`udp_close` map directly onto the interpreter/VM versions with no
+capability loss. `udp_recv` is where the native backend's limits show
+up: the interpreter returns `{data, host, port}` as a `y.map`, since a
+UDP socket (unlike a connected TCP one) can receive from anyone, so the
+sender's address matters as much as the payload — but there's no map
+type and no runtime string type here to construct that value with. Two
+narrower primitives cover it instead. `udp_recv_print` reads a datagram
+and prints the payload, the same "print instead of return" trade the
+TCP side already makes with `recv_print` — the sender's address is
+simply dropped. `udp_recv_reply_print` additionally sends a reply back
+to that sender: the address recvfrom fills in is kept in the runtime
+function's own stack memory and fed straight into the reply's sendto,
+without ever becoming a value the Yolish program itself can see or
+store. That covers the case that actually needs the sender's address
+most of the time (an echo/reply server) without needing a map or
+string type to do it — a program that needs the raw address for
+something else (logging it, filtering by it, etc.) doesn't have a
+native path yet.
 
 
 Not implemented for native compilation on **macOS** — macOS syscall

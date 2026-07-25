@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.24-00e5ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.25-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
@@ -21,7 +21,7 @@
 | | |
 |--|--|
 | **Author** | .Bhuiya |
-| **Version** | v2.24 |
+| **Version** | v2.25 |
 | **Extension** | `.y` |
 | **Compiler/Interpreter** | `ys` / `ys.exe` |
 | **Targets** | Linux ELF64 · Windows PE32+ · macOS Mach-O |
@@ -350,6 +350,7 @@ fn fetch_and_save(url, path) { ... }
 | **v2.22** | **Native DNS hostname resolution — `y.net.connect("example.com", port)` now works in native-compiled (`ys -c --target linux`) binaries, not just dotted-decimal IPs. Hand-written UDP DNS client (no libc): reads `/etc/resolv.conf`, falls back to 8.8.8.8, resolves the A record, connects. Verified against real public DNS and a deliberately unresolvable hostname** |
 | **v2.23** | **DNS resolver follow-up: CNAME chains (github.com/microsoft.com-style, no special handling needed — non-A records are just skipped) and real multi-A-record fallback (reddit.com's 4 records; every one tried in turn, not just the first), each bounded to a 3s non-blocking connect+poll timeout instead of a plain blocking connect. Found and fixed two real bugs via gdb/strace along the way: resolv.conf was silently never actually used due to a register clobber in the octet parser, and the retry loop was polling on the wrong value entirely (connect()'s return code instead of the fd)** |
 | **v2.24** | **IPv6 support for `y.net.connect`: IPv6 literals ("::1", "2001:db8::1", parsed via the host compiler's own `inet_pton` at compile time) connect directly through a new `__ys_net_connect6`/`sockaddr_in6` path, and hostname resolution now falls back to an AAAA lookup (`__ys_net_connect_host6`) when no A record is found or connectable, reusing the same CNAME-skip and multi-record-with-timeout logic as the A path. IPv4 stays preferred by default (an A success skips AAAA entirely). The AAAA query/response side (building the query, sending/receiving over UDP, walking the answer section, extracting the 16-byte address) is fully verified against a local fake DNS server; the final `connect()` itself could only be confirmed via `strace` showing the correctly-parsed address and the right `socket(AF_INET6, ...)` call, since this development environment has IPv6 disabled at the kernel level — real end-to-end IPv6 connectivity needs verification on a host that actually has it** |
+| **v2.25** | **Native UDP sockets — `y.net.udp_socket/udp_bind/udp_send/udp_recv_print/udp_recv_reply_print/udp_close` now compile under `ys -c --target linux` (previously interpreter/VM only). `udp_recv` normally returns `{data, host, port}` as a `y.map`, which the native backend has no type for, so it splits into two primitives instead: `udp_recv_print` (reads and prints the payload, sender discarded, same reasoning as TCP's `recv_print`) and `udp_recv_reply_print` (reads, prints, and sends a reply back to the captured sender — entirely inside the runtime function's own stack memory, never exposed to the Yolish program as a value), covering the most common reason a program needs the sender's address at all: replying to it. `udp_send`'s host argument is IPv4-literal only for this batch, not a hostname. Verified with a real two-process client/server exchange (client sends, server receives + replies to the captured sender, client receives the reply) and a refused-port send correctly succeeding at the UDP layer (fire-and-forget semantics — the datagram sends fine even with nobody listening)** |
 
 ### Upcoming
 
