@@ -16,11 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <arpa/inet.h>  /* inet_pton — compile-time only, for parsing IPv6
-                           literals into 16 raw bytes. This is the ys
-                           compiler's own host code, which links against
-                           libc normally; only the machine code it *emits*
-                           for the target program is freestanding. */
 
 /*  output buffer  */
 #define CODE_MAX  (1 << 20)   /* 1 MB code */
@@ -95,19 +90,100 @@ static int is_ipv4_literal(const char *s){
    the one character that never appears in a hostname, IPv4 literal, or
    port number but always appears in an IPv6 address (at minimum "::")
    is ':', so that alone is a safe, sufficient shape test here. Actual
-   validation happens in parse_ipv6_literal via inet_pton. */
+   validation happens in parse_ipv6_literal. */
 static int is_ipv6_literal(const char *s){
     return strchr(s,':') != NULL;
 }
 
-/* Parse an IPv6 literal into 16 raw bytes via the host's own inet_pton
-   (this runs at compile time, in the ys compiler's own process, which
-   is normal libc-linked code — nothing to do with the freestanding
-   machine code it emits). Returns 1 on success, 0 if s isn't a valid
-   IPv6 address (caller falls back to the unresolved-symbol safety net,
-   same as any other unsupported y.net.connect argument shape). */
+/* Parse a single run of ':'-separated IPv6 groups containing no "::"
+   (parse_ipv6_literal splits on "::" itself and calls this once per
+   side). Up to 8 16-bit groups go into out, returned as the group
+   count, or -1 on anything malformed. An empty run (s=="", the case
+   where "::" sits at the very start or end of the whole address)
+   yields 0 groups. If the last field contains a '.', it's treated as
+   a trailing embedded IPv4 address (the "192.168.1.1" in
+   "::ffff:192.168.1.1") and expands to exactly 2 groups instead of 1. */
+static int parse_ipv6_group_run(const char *s, uint16_t *out){
+    if(*s=='\0') return 0;
+    int n=0;
+    const char *p=s;
+    while(*p){
+        const char *colon=strchr(p,':');
+        int is_last_field = (colon==NULL);
+        if(is_last_field && strchr(p,'.')){
+            unsigned a,b,c,d; char extra;
+            if(sscanf(p,"%u.%u.%u.%u%c",&a,&b,&c,&d,&extra)!=4) return -1;
+            if(a>255||b>255||c>255||d>255) return -1;
+            if(n+2>8) return -1;
+            out[n++]=(uint16_t)((a<<8)|b);
+            out[n++]=(uint16_t)((c<<8)|d);
+            return n;
+        }
+        const char *field_end = colon ? colon : p+strlen(p);
+        int flen = (int)(field_end-p);
+        if(flen<1||flen>4) return -1;
+        unsigned val=0;
+        for(int i=0;i<flen;i++){
+            char c=p[i]; int digit;
+            if(c>='0'&&c<='9') digit=c-'0';
+            else if(c>='a'&&c<='f') digit=c-'a'+10;
+            else if(c>='A'&&c<='F') digit=c-'A'+10;
+            else return -1;
+            val = val*16 + (unsigned)digit;
+        }
+        if(n+1>8) return -1;
+        out[n++]=(uint16_t)val;
+        if(!colon) break;
+        p = colon+1;
+        if(*p=='\0') return -1; /* trailing ':' not part of "::" */
+    }
+    return n;
+}
+
+/* Parse an IPv6 literal into 16 raw bytes, entirely portable (no
+   platform networking headers) since this file is cross-compiled for
+   Windows/mingw and macOS as well as Linux, and inet_pton lives in a
+   different, not-always-present header on each (this broke the
+   Windows build the first time around: arpa/inet.h doesn't exist
+   under mingw). Handles "::" zero-compression (at most one, per RFC)
+   and a trailing embedded IPv4 tail. Returns 1 on success, 0 if s
+   isn't a valid IPv6 address (caller falls back to the
+   unresolved-symbol safety net, same as any other unsupported
+   y.net.connect argument shape). */
 static int parse_ipv6_literal(const char *s, uint8_t out[16]){
-    return inet_pton(AF_INET6, s, out) == 1;
+    const char *dc = strstr(s,"::");
+    uint16_t groups[8];
+    int ngroups;
+    if(dc){
+        if(strstr(dc+2,"::")) return 0; /* at most one "::" is legal */
+        char left[64], right[64];
+        int llen=(int)(dc-s);
+        if(llen<0||llen>=(int)sizeof(left)) return 0;
+        memcpy(left,s,(size_t)llen); left[llen]=0;
+        const char *rstart=dc+2;
+        size_t rlen=strlen(rstart);
+        if(rlen>=sizeof(right)) return 0;
+        memcpy(right,rstart,rlen); right[rlen]=0;
+
+        uint16_t lg[8], rg[8];
+        int lc = parse_ipv6_group_run(left, lg);
+        int rc = parse_ipv6_group_run(right, rg);
+        if(lc<0||rc<0) return 0;
+        int missing = 8-lc-rc;
+        if(missing<0) return 0;
+        ngroups=0;
+        for(int i=0;i<lc;i++) groups[ngroups++]=lg[i];
+        for(int i=0;i<missing;i++) groups[ngroups++]=0;
+        for(int i=0;i<rc;i++) groups[ngroups++]=rg[i];
+    } else {
+        ngroups = parse_ipv6_group_run(s, groups);
+    }
+    if(ngroups!=8) return 0;
+    for(int i=0;i<8;i++){
+        out[i*2]   = (uint8_t)(groups[i]>>8);
+        out[i*2+1] = (uint8_t)(groups[i]&0xFF);
+    }
+    return 1;
 }
 
 /* Build a DNS query packet (header + QNAME + QTYPE=AAAA + QCLASS=IN)
@@ -811,14 +887,14 @@ static void emit_helpers(void){
         /* __ys_net_connect6(rdi=ipv6_16bytes_ptr, rsi=port) -> rax=fd or -1
            Direct IPv6-literal counterpart to __ys_net_connect above.
            No DNS involved at all here -- the 16 address bytes are
-           already sitting in rodata, parsed at compile time by the host
-           C library's own inet_pton (see parse_ipv6_literal), since an
-           IPv6 literal in y.net.connect's argument is just as much a
-           compile-time-only string as the IPv4 case always was. This
-           function only has to build a 28-byte sockaddr_in6 (family,
-           port, 4 bytes of flowinfo, the 16 address bytes, 4 bytes of
-           scope_id) and connect() with AF_INET6/SOCK_STREAM instead of
-           AF_INET.
+           already sitting in rodata, parsed at compile time by this
+           compiler's own portable parser (see parse_ipv6_literal),
+           since an IPv6 literal in y.net.connect's argument is just as
+           much a compile-time-only string as the IPv4 case always was.
+           This function only has to build a 28-byte sockaddr_in6
+           (family, port, 4 bytes of flowinfo, the 16 address bytes, 4
+           bytes of scope_id) and connect() with AF_INET6/SOCK_STREAM
+           instead of AF_INET.
 
            Stack layout (all offsets from rbp):
              -8  addr_ptr (16 raw IPv6 bytes, in rodata)
@@ -2531,11 +2607,12 @@ static void compile_expr(Node *n){
            what compile_expr does internally.
 
            Three address shapes, checked in this order:
-             1. IPv6 literal ("::1", "2001:db8::1") -- parsed via the
-                host's inet_pton at compile time (parse_ipv6_literal) and
-                handed straight to __ys_net_connect6 as 16 raw bytes; no
-                DNS involved. If it looks IPv6-shaped (has a ':') but
-                doesn't actually parse, falls through to case 3 below
+             1. IPv6 literal ("::1", "2001:db8::1") -- parsed by this
+                compiler's own portable parser at compile time
+                (parse_ipv6_literal) and handed straight to
+                __ys_net_connect6 as 16 raw bytes; no DNS involved. If
+                it looks IPv6-shaped (has a ':') but doesn't actually
+                parse, falls through to case 3 below
                 instead of a special error path -- building a query
                 containing colons that will just cleanly fail to resolve
                 at runtime, same philosophy as the final fallback.
