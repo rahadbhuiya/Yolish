@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.25  
+**Version:** v2.27  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2621,6 +2621,15 @@ y.net.udp_recv_reply_print(sock, maxlen, reply_data)
 y.net.udp_close(sock)           -- same as y.net.close; provided under
                                  -- both names for symmetry with the
                                  -- udp_* family.
+
+y.net.dynlink_test()            -- proof-of-concept call into real
+                                 -- libc.so.6 functions (puts, exit)
+                                 -- through a genuinely dynamically-
+                                 -- linked ELF, rather than the fully
+                                 -- static output every other native
+                                 -- program produces. Not a general
+                                 -- FFI — see "Native dynamic linking"
+                                 -- below.
 ```
 
 ```yolish
@@ -2724,6 +2733,24 @@ most of the time (an echo/reply server) without needing a map or
 string type to do it — a program that needs the raw address for
 something else (logging it, filtering by it, etc.) doesn't have a
 native path yet.
+
+**Native dynamic linking (`ys -c`, Linux):** everything described so
+far in this section is fully static — no libc, no dynamic linking at
+all, every syscall hand-assembled directly. `y.net.dynlink_test()` is
+a deliberate, narrow exception: it calls two real functions
+(`puts` then `exit`) from the system's actual `libc.so.6`, proving out
+the `PT_INTERP`/`PT_DYNAMIC` machinery needed to eventually link
+against a real TLS library, rather than hand-rolling cryptography in
+raw machine code (a serious, unreviewable security risk). A program
+that calls it produces a genuinely dynamically-linked ELF executable
+(`file` reports "dynamically linked, interpreter
+/lib64/ld-linux-x86-64.so.2") instead of the usual fully static one —
+every other native program is completely unaffected and stays static.
+This is not a general foreign-function interface: there's no
+mechanism yet for importing an arbitrary function with an arbitrary
+signature from Yolish source, just this one hardcoded proof that the
+underlying ELF dynamic-linking machinery works correctly end to end.
+
 
 
 Not implemented for native compilation on **macOS** — macOS syscall

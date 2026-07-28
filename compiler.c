@@ -217,6 +217,46 @@ static int build_dns_query_aaaa(const char *host, uint8_t *out){
     return p;
 }
 
+/* ---- ELF dynamic linking (PT_INTERP/PT_DYNAMIC) ----
+   The native backend is fully static/freestanding by design (no
+   libc, no dynamic linking at all) everywhere else in this file. This
+   is a deliberate, narrow exception for importing a handful of real
+   functions from an actual shared library — the motivating goal is a
+   real TLS library eventually, rather than hand-rolling cryptography
+   in raw machine code, which would be a serious security risk with
+   no review process behind it. TARGET_LINUX/x86-64 only for now.
+
+   This mechanism (and elf_write_dynamic in elf_out.c, which does the
+   actual ELF-structure work) was validated against a standalone
+   hand-built prototype before being ported here — see
+   elf_write_dynamic's comments for the two real bugs that caught. */
+static int g_dyn_enabled = 0;
+#define MAX_DYN_IMPORTS 32
+typedef struct { char name[64]; int got_off; } DynImport;
+static DynImport g_dyn_imports[MAX_DYN_IMPORTS];
+static int g_dyn_nimports = 0;
+
+/* Reserves (or reuses, if already imported) an 8-byte zeroed GOT slot
+   in data_buf for symname, and returns its offset. Once ld.so
+   processes this import's R_X86_64_GLOB_DAT relocation at load time
+   (see elf_write_dynamic), that slot holds symname's resolved
+   address — codegen calls it with `lea r11,[rip+got_off]` (the usual
+   RELOC_DATA pattern) `; mov reg,[r11] ; call reg`. No PLT trampoline
+   needed since this is eager (load-time), not lazy, resolution. */
+static int dynlink_import(const char *symname){
+    g_dyn_enabled = 1;
+    for(int i=0;i<g_dyn_nimports;i++)
+        if(strcmp(g_dyn_imports[i].name,symname)==0) return g_dyn_imports[i].got_off;
+    static const uint8_t zero8[8] = {0,0,0,0,0,0,0,0};
+    int off = data_add_bytes(zero8, 8);
+    if(g_dyn_nimports<MAX_DYN_IMPORTS){
+        snprintf(g_dyn_imports[g_dyn_nimports].name,64,"%s",symname);
+        g_dyn_imports[g_dyn_nimports].got_off = off;
+        g_dyn_nimports++;
+    }
+    return off;
+}
+
 /* Build a DNS query packet (header + QNAME + QTYPE=A + QCLASS=IN) for
    a hostname literal, entirely at compile time — safe because the
    hostname is already required to be a compile-time string literal,
@@ -2866,6 +2906,39 @@ static void compile_expr(Node *n){
             int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close");
             break;
         }
+        /* y.net.dynlink_test() — proof-of-concept native call into a
+           real shared-library function (libc.so.6's puts, followed by
+           its exit), exercising the PT_INTERP/PT_DYNAMIC machinery
+           end to end through the real compiler rather than just the
+           standalone prototype it was validated against. Narrow and
+           specific on purpose: marshaling arbitrary arguments/return
+           types for arbitrary imported functions is a separate,
+           much bigger design problem (a general FFI) than what this
+           establishes, which is that the ELF-writing side works.
+           Calls exit() (imported) rather than __ys_exit's raw exit
+           syscall deliberately — puts() buffers its output, and a raw
+           syscall skips glibc's own stdio-flush machinery, so the
+           message would never actually appear even though nothing
+           would crash (this exact mistake happened in the standalone
+           prototype and is why the message wasn't showing up there
+           at first). */
+        if(is_y_net && strcmp(fn,"dynlink_test")==0){
+            int puts_got = dynlink_import("puts");
+            int exit_got = dynlink_import("exit");
+            int msg_off = data_add_str("hello from dynamically-linked Yolish!");
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,msg_off); emit_i32(0); /* rdi=&msg */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,puts_got); emit_i32(0); /* r11=&puts_got */
+            emit3(0x49,0x8b,0x03); /* rax=[r11] */
+            emit2(0xff,0xd0);      /* call rax (puts) */
+
+            x_mov_rax_imm32(0);
+            emit3(0x48,0x89,0xc7); /* rdi=0 */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,exit_got); emit_i32(0); /* r11=&exit_got */
+            emit3(0x49,0x8b,0x03);
+            emit2(0xff,0xd0);      /* call rax (exit(0) — never returns) */
+            break;
+        }
         /* user function call — pass args in registers (SysV) */
         /* translate "main" to "__ys_main" for call */
         char fn_call_name[68];
@@ -3106,6 +3179,14 @@ extern int elf_write(const char *path,
     int *reloc_code, int *reloc_data, int nrelocs,
     int entry_off);
 
+extern int elf_write_dynamic(const char *path,
+    uint8_t *code, int code_len,
+    uint8_t *data, int data_len,
+    int *reloc_code, int *reloc_data, int nrelocs,
+    int entry_off,
+    const char *needed_lib,
+    const char **import_names, int *import_got_offs, int nimports);
+
 extern int macho_write(const char *path,
     uint8_t *code, int code_len,
     uint8_t *data, int data_len,
@@ -3259,6 +3340,7 @@ int ys_compile(Node *prog, Target target, const char *outfile){
     g_target=target;
 
     code_len=0; data_len=0; nrelocs=0;
+    g_dyn_enabled=0; g_dyn_nimports=0;
     nlocals=0; stack_size=0;
     nsyms=0; ncall_patches=0;
 
@@ -3346,7 +3428,15 @@ int ys_compile(Node *prog, Target target, const char *outfile){
     int ret=0;
     switch(target){
     case TARGET_LINUX:
-        ret=elf_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off);
+        if(g_dyn_enabled){
+            static const char *inames[MAX_DYN_IMPORTS];
+            static int igots[MAX_DYN_IMPORTS];
+            for(int i=0;i<g_dyn_nimports;i++){ inames[i]=g_dyn_imports[i].name; igots[i]=g_dyn_imports[i].got_off; }
+            ret=elf_write_dynamic(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off,
+                                   "libc.so.6",inames,igots,g_dyn_nimports);
+        } else {
+            ret=elf_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off);
+        }
         break;
     case TARGET_MACOS:
         ret=macho_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off);
