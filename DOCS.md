@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.27  
+**Version:** v2.28  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -568,7 +568,7 @@ y.pop(arr)         -- remove and return last element
 ### Slice
 
 ```yolish
-y.slice(arr, 1, 3)    -- elements at index 1 and 2
+y.array.slice(arr, 1, 3)    -- elements at index 1 and 2
 ```
 
 ### Notes
@@ -1012,7 +1012,33 @@ fn copy_file(src, dst) {
 ```yolish
 @cap(net.read, fs.write)
 fn fetch_and_save(url, path) {
-    -- only runs if caller has net.read + fs.write capabilities
+    -- only runs if the current program holds BOTH capabilities;
+    -- otherwise this throws before the body runs at all (catchable
+    -- with try/catch — see below)
+}
+```
+
+### Granting capabilities
+
+On Exploidus OS, the kernel grants (and can revoke) capabilities — see
+"Why this matters" below. Outside that kernel, on an ordinary
+development machine, something has to grant a capability before any
+`@cap`-gated function can use it:
+
+```yolish
+y.grant("fs.write")     -- now fs.write is available for the rest of
+                         -- this program's run
+```
+
+Nothing is granted by default — a `@cap`-gated function called with no
+matching grant throws:
+
+```yolish
+try {
+    fetch_and_save("http://example.com", "out.txt")
+} catch(e) {
+    y.println(e)   -- "capability denied: fn 'fetch_and_save' requires
+                    --  'net.read,fs.write' (not granted)"
 }
 ```
 
@@ -1642,7 +1668,7 @@ fn make_adder(n) { return fn(x) { return x + n } }
 let arr = [1, 2, 3]
 arr[0]                y.len(arr)
 y.push(arr, 4)        y.pop(arr)
-y.slice(arr, 1, 3)
+y.array.slice(arr, 1, 3)
 
 -- structs
 struct Point { x, y }

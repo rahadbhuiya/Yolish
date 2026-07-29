@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 #ifndef _WIN32
 #  include <sys/stat.h>
 #  include <dirent.h>
@@ -473,6 +474,34 @@ int g_returning=0;
 static Val g_return_val;
 static int g_cur_line=0;  /* last known source line */
 static int g_ann_depth=0; /* annotation fire depth — suppress nested calls */
+
+/* ---- @cap capability enforcement ----
+   Deny by default: nothing is granted unless y.grant(name) was called.
+   DOCS.md documents @cap(net.read, fs.write) as gating a function to
+   only run if the caller holds those capabilities, plus
+   y.capabilities()/y.has_cap() for inspecting the current set — but
+   until now none of it was wired up: @cap wasn't even parseable (its
+   dotted-identifier argument matched neither @intent/@audit's
+   quoted-string case nor the immediate-)  case, so parsing silently
+   broke and left tokens behind to be mis-parsed as later statements),
+   y.capabilities()/y.has_cap() didn't exist as builtins at all, and
+   nothing checked @cap's declared names against anything before
+   running the function body regardless.
+   y.grant(name) itself isn't part of the documented API — the docs
+   only describe "the kernel validates the capability" on Exploidus
+   OS itself, with no grant mechanism for testing on an ordinary
+   system in the meantime. Added as the minimal thing that lets
+   @cap-gated code run at all outside that kernel. */
+#define MAX_GRANTED_CAPS 64
+static char g_granted_caps[MAX_GRANTED_CAPS][64];
+static int g_granted_count=0;
+
+static int cap_is_granted(const char *name){
+    for(int i=0;i<g_granted_count;i++)
+        if(strcmp_u(g_granted_caps[i],name)==0) return 1;
+    return 0;
+}
+
 int g_throwing=0;     /* throw signal */
 char g_throw_msg[512]; /* thrown message */
 static Val g_throw_val;       /* thrown value — use g_throw_msg for str content */
@@ -685,6 +714,32 @@ static Val call_module_fn(Val *fv2, Node *n, Env *env){
     g_returning=0;
     return _mod_result;
 }
+/* Builds a fully-qualified dotted name like "y.math.pi" from a chain
+   of ND_DOT nodes (left_chain) plus a final segment (tail_name) —
+   used by ND_DOT below for namespaced constant reads (y.math.pi, no
+   call involved). ND_CALL has its own inline copy of this same
+   chain-walk for qualified calls (y.math.sqrt(x)); this isn't wired
+   into that path too, just added alongside it for the read-only case,
+   to avoid touching already-working call-dispatch code. */
+static char *build_qualified_name(Node *left_chain, const char *tail_name, char *out, int outsz){
+    Node *chain[8]; int depth=0;
+    Node *cur2=left_chain;
+    while(cur2&&depth<8){
+        chain[depth++]=cur2;
+        if(cur2->kind==ND_DOT) cur2=cur2->left;
+        else break;
+    }
+    int qi=0;
+    for(int ci=depth-1;ci>=0;ci--){
+        const char *seg=chain[ci]->name;
+        int si=0; while(seg[si]&&qi<outsz-2){out[qi++]=seg[si++];}
+        out[qi++]='.';
+    }
+    int mi=0; while(tail_name[mi]&&qi<outsz-1){out[qi++]=tail_name[mi++];}
+    out[qi]=0;
+    return out;
+}
+
 __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     if(!n) return make_nil();
     switch(n->kind){
@@ -753,8 +808,40 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
 
     case ND_ASSIGN:{
         Val v=eval_node(n->right,env);
-        if(n->left&&n->left->kind==ND_IDENT)
+        if(n->left&&n->left->kind==ND_IDENT){
             env_set(env,n->left->name,v);
+        } else if(n->left&&n->left->kind==ND_INDEX){
+            /* arr[i] = v (also covers arr[i][j] = v, obj.field[i] = v,
+               etc., since n->left->left is itself evaluated generically
+               — whatever expression it is, it just needs to evaluate to
+               an array). arr_data is a shared/GC pointer, so mutating it
+               through this locally-evaluated copy is visible through
+               every other Val that shares the same array. */
+            Val arr=eval_node(n->left->left,env);
+            Val idx=eval_node(n->left->right,env);
+            int i=(int)val_int(idx);
+            if(arr.type==YS_ARR&&arr.arr_data&&i>=0&&i<arr.arr_len)
+                arr.arr_data[i]=v;
+            if(n->left->left->kind==ND_IDENT)
+                env_set(env,n->left->left->name,arr);
+        } else if(n->left&&n->left->kind==ND_DOT){
+            /* obj.field = v (also covers arr[i].field = v, obj.a.b = v,
+               etc., for the same reason as above). field_vals is a
+               shared/GC pointer (see ND_DOT's read side and
+               bcompiler.c's OP_SET_FIELD comment), so this mutation is
+               visible through every other Val copy of this struct. */
+            Val obj=eval_node(n->left->left,env);
+            if(obj.type==YS_STRUCT){
+                for(int i=0;i<obj.field_count;i++){
+                    if(strcmp_u(obj.field_names[i],n->left->name)==0){
+                        obj.field_vals[i]=v;
+                        break;
+                    }
+                }
+                if(n->left->left->kind==ND_IDENT)
+                    env_set(env,n->left->left->name,obj);
+            }
+        }
         return v;
     }
 
@@ -777,6 +864,16 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     /*  Array index read  */
     /* struct field access: point.x */
     case ND_DOT:{
+        /* namespaced constants (y.math.pi, no call involved — contrast
+           with y.math.sqrt(x), a real call handled entirely separately
+           under ND_CALL) are checked first, before evaluating n->left
+           as an object: "y"/"math" aren't real variables, so evaluating
+           that chain the normal way would just return nil anyway. */
+        {
+            char qname[128];
+            build_qualified_name(n->left,n->name,qname,sizeof(qname));
+            if(strcmp_u(qname,"y.math.pi")==0) return make_float(3.14159265358979323846);
+        }
         Val obj=eval_node(n->left,env);
         if(obj.type==YS_STRUCT){
             for(int i=0;i<obj.field_count;i++){
@@ -956,10 +1053,18 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
             if(L.type==YS_STR&&R.type==YS_STR)
                 return make_bool(strcmp_u(L.sval,R.sval)!=0);
             return make_bool(val_int(L)!=val_int(R));
-        case TK_LT:   return make_bool(use_f?val_float(L)<val_float(R):val_int(L)<val_int(R));
-        case TK_GT:   return make_bool(use_f?val_float(L)>val_float(R):val_int(L)>val_int(R));
-        case TK_LTE:  return make_bool(use_f?val_float(L)<=val_float(R):val_int(L)<=val_int(R));
-        case TK_GTE:  return make_bool(use_f?val_float(L)>=val_float(R):val_int(L)>=val_int(R));
+        case TK_LT:
+            if(L.type==YS_STR&&R.type==YS_STR) return make_bool(strcmp_u(L.sval,R.sval)<0);
+            return make_bool(use_f?val_float(L)<val_float(R):val_int(L)<val_int(R));
+        case TK_GT:
+            if(L.type==YS_STR&&R.type==YS_STR) return make_bool(strcmp_u(L.sval,R.sval)>0);
+            return make_bool(use_f?val_float(L)>val_float(R):val_int(L)>val_int(R));
+        case TK_LTE:
+            if(L.type==YS_STR&&R.type==YS_STR) return make_bool(strcmp_u(L.sval,R.sval)<=0);
+            return make_bool(use_f?val_float(L)<=val_float(R):val_int(L)<=val_int(R));
+        case TK_GTE:
+            if(L.type==YS_STR&&R.type==YS_STR) return make_bool(strcmp_u(L.sval,R.sval)>=0);
+            return make_bool(use_f?val_float(L)>=val_float(R):val_int(L)>=val_int(R));
         case TK_AND:  return make_bool(val_bool(L)&&val_bool(R));
         case TK_OR:   return make_bool(val_bool(L)||val_bool(R));
         case TK_AMP:   return make_int(val_int(L) &  val_int(R));
@@ -1336,8 +1441,34 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
                         fputs(ac,stderr); fputs("\n",stderr);
                         fflush(stderr);
                     }
+                    /*  @cap → enforce, don't just log  */
+                    else if(ann_t[0]=='c'&&ann_t[1]=='a'){
+                        char missing[64]; missing[0]=0;
+                        char buf[64]; int bl=0;
+                        for(int ci=0;;ci++){
+                            char c=ann_a[ci];
+                            if(c==';'||c==0){
+                                buf[bl]=0;
+                                if(bl>0 && !cap_is_granted(buf)){
+                                    if(missing[0]) { size_t ml=strlen(missing); if(ml<62) missing[ml]=',',missing[ml+1]=0; }
+                                    size_t ml2=strlen(missing);
+                                    int bi=0; while(buf[bi]&&ml2<62){ missing[ml2++]=buf[bi++]; }
+                                    missing[ml2]=0;
+                                }
+                                bl=0;
+                                if(c==0) break;
+                            } else if(bl<62){ buf[bl++]=c; }
+                        }
+                        if(missing[0]){
+                            g_throwing=1;
+                            snprintf(g_throw_msg,sizeof(g_throw_msg),
+                                "capability denied: fn '%.40s' requires '%.60s' (not granted)",
+                                n->name, missing);
+                        }
+                    }
                 }
             }
+            if(g_throwing) return make_nil(); /* @cap denial set this above — don't run the body */
 
             Env *fe=env_new(closure_env);
             for(int i=0;i<fn_def->argc&&i<n->argc;i++){
@@ -2116,7 +2247,55 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     if(strcmp_u(name,"y.is_array")==0){ int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==YS_ARR); }
     if(strcmp_u(name,"y.is_fn")==0)   { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==YS_FN); }
     if(strcmp_u(name,"y.is_nil")==0)  { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==YS_NIL); }
-    if(strcmp_u(name,"y.is_err")==0)  { int s0=(argc>1)?1:0; return make_bool(eval_node(args[s0],env).type==YS_ERR); }
+    if(strcmp_u(name,"y.is_err")==0)  {
+        int s0=(argc>1)?1:0;
+        Val v=eval_node(args[s0],env);
+        /* y.error() builds a struct named "Error" (see below), not a
+           YS_ERR value — YS_ERR is a separate internal representation
+           used when something is thrown with no explicit value (see
+           make_err/g_throw_val). Recognize both as "an error". */
+        int is_err = (v.type==YS_ERR) ||
+                     (v.type==YS_STRUCT && strcmp_u(v.struct_name,"Error")==0);
+        return make_bool(is_err);
+    }
+
+    /* y.grant(name) → adds name ("fs.write" etc.) to the current
+       program's granted-capability set, checked by @cap-annotated
+       functions and returned by y.capabilities(). Not part of the
+       documented API — see the comment on g_granted_caps above for
+       why it exists anyway (there's no OS to grant capabilities on
+       this interpreter the way Exploidus OS eventually would). */
+    if(strcmp_u(name,"y.grant")==0){
+        int s0=(argc>1)?1:0;
+        Val nv=eval_node(args[s0],env);
+        if(nv.type==YS_STR && g_granted_count<MAX_GRANTED_CAPS && !cap_is_granted(nv.sval)){
+            int gi=g_granted_count++;
+            int i=0; while(nv.sval[i]&&i<63){g_granted_caps[gi][i]=nv.sval[i];i++;}
+            g_granted_caps[gi][i]=0;
+        }
+        return make_nil();
+    }
+    /* y.capabilities() → array of currently-granted capability names */
+    if(strcmp_u(name,"y.capabilities")==0){
+        Val result=make_nil(); result.type=YS_ARR;
+        result.arr_data=alloc_arr(g_granted_count>0?g_granted_count:1);
+        result.arr_len=g_granted_count;
+        for(int i=0;i<g_granted_count;i++) result.arr_data[i]=make_str(g_granted_caps[i]);
+        return result;
+    }
+    /* y.has_cap(caps, name) → true if name is present in the caps
+       array (normally the result of y.capabilities(), but works on
+       any array of strings) */
+    if(strcmp_u(name,"y.has_cap")==0){
+        int s0=(argc>2)?1:0;
+        Val caps=eval_node(args[s0],env);
+        Val nv=eval_node(args[s0+1],env);
+        if(caps.type!=YS_ARR||nv.type!=YS_STR) return make_bool(0);
+        for(int i=0;i<caps.arr_len;i++)
+            if(caps.arr_data[i].type==YS_STR && strcmp_u(caps.arr_data[i].sval,nv.sval)==0)
+                return make_bool(1);
+        return make_bool(0);
+    }
 
     /* y.error(message, code) → Error struct */
     if(strcmp_u(name,"y.error")==0||strcmp_u(name,"error")==0){
@@ -2150,6 +2329,22 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         for(int _i=0;_i<60&&(x-y2)>0.000001;_i++){x=(x+y2)/2.0;y2=d/x;}
         if(v.type!=YS_FLOAT){int64_t ir=(int64_t)(x+0.5);return make_int(ir);}
         return make_float(x);
+    }
+    /* documented in README/DOCS.md alongside sqrt/pow/etc, but never
+       actually implemented until now */
+    if(strcmp_u(name,"y.math.sin")==0){
+        int s0=(argc>1)?1:0; return make_float(sin(val_float(eval_node(args[s0],env))));
+    }
+    if(strcmp_u(name,"y.math.cos")==0){
+        int s0=(argc>1)?1:0; return make_float(cos(val_float(eval_node(args[s0],env))));
+    }
+    if(strcmp_u(name,"y.math.tan")==0){
+        int s0=(argc>1)?1:0; return make_float(tan(val_float(eval_node(args[s0],env))));
+    }
+    if(strcmp_u(name,"y.math.log")==0){
+        int s0=(argc>1)?1:0; double d=val_float(eval_node(args[s0],env));
+        if(d<=0.0){ys_error(0,0,"log of non-positive number");return make_nil();}
+        return make_float(log(d));
     }
     if(strcmp_u(name,"y.math.pow")==0){
         int s0=(argc>1)?1:0;

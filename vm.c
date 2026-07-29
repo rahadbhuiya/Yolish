@@ -167,10 +167,22 @@ static void vm_binop(OpCode op){
             return;
         case OP_EQ:  vm_push(make_bool(vals_equal(a,b))); return;
         case OP_NEQ: vm_push(make_bool(!vals_equal(a,b))); return;
-        case OP_LT:  vm_push(make_bool(use_float?val_float(a)<val_float(b):val_int(a)<val_int(b))); return;
-        case OP_GT:  vm_push(make_bool(use_float?val_float(a)>val_float(b):val_int(a)>val_int(b))); return;
-        case OP_LE:  vm_push(make_bool(use_float?val_float(a)<=val_float(b):val_int(a)<=val_int(b))); return;
-        case OP_GE:  vm_push(make_bool(use_float?val_float(a)>=val_float(b):val_int(a)>=val_int(b))); return;
+        case OP_LT:
+            if(a.type==YS_STR&&b.type==YS_STR) vm_push(make_bool(strcmp_u(a.sval,b.sval)<0));
+            else vm_push(make_bool(use_float?val_float(a)<val_float(b):val_int(a)<val_int(b)));
+            return;
+        case OP_GT:
+            if(a.type==YS_STR&&b.type==YS_STR) vm_push(make_bool(strcmp_u(a.sval,b.sval)>0));
+            else vm_push(make_bool(use_float?val_float(a)>val_float(b):val_int(a)>val_int(b)));
+            return;
+        case OP_LE:
+            if(a.type==YS_STR&&b.type==YS_STR) vm_push(make_bool(strcmp_u(a.sval,b.sval)<=0));
+            else vm_push(make_bool(use_float?val_float(a)<=val_float(b):val_int(a)<=val_int(b)));
+            return;
+        case OP_GE:
+            if(a.type==YS_STR&&b.type==YS_STR) vm_push(make_bool(strcmp_u(a.sval,b.sval)>=0));
+            else vm_push(make_bool(use_float?val_float(a)>=val_float(b):val_int(a)>=val_int(b)));
+            return;
         case OP_AND: vm_push(make_bool(is_truthy(a)&&is_truthy(b))); return;
         case OP_OR:  vm_push(make_bool(is_truthy(a)||is_truthy(b))); return;
         case OP_BAND: vm_push(make_int(val_int(a) &  val_int(b))); return;

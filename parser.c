@@ -188,10 +188,11 @@ static Node *parse_primary(Lexer *l){
             }
             if(check(l,TK_RPAREN)) eat(l);
             call->args=call->arg_data; call->argc=argc;
-            return call;
+            n=call; /* fall through to the postfix loop below, so
+                        foo().field / foo()[i] chain correctly too */
         }
         /* struct literal: Point { x: 10, y: 20 } — only uppercase names */
-        if(check(l,TK_LBRACE) && n->name[0]>='A' && n->name[0]<='Z'){
+        else if(check(l,TK_LBRACE) && n->name[0]>='A' && n->name[0]<='Z'){
             /* uppercase ident followed by { = struct literal */
             eat(l);
             Node *sl=alloc_node(ND_STRUCT_LIT);
@@ -211,53 +212,64 @@ static Node *parse_primary(Lexer *l){
             }
             if(check(l,TK_RBRACE)) eat(l);
             sl->args=sl->arg_data; sl->argc=fc;
-            return sl;
+            n=sl; /* fall through to the postfix loop below */
         }
-        /* index access: arr[i] */
-        if(check(l,TK_LBRACKET)){
-            eat(l);
-            Node *idx=alloc_node(ND_INDEX);
-            idx->left=n;
-            idx->right=parse_expr(l);
-            if(check(l,TK_RBRACKET)) eat(l);
-            if(check(l,TK_EQ)){
+        /* index/dot postfix chain: arr[i], obj.field, and any mix of
+           the two in any order/repetition — arr[i].field, obj.field[i],
+           arr[i][j], obj.a.b[i].c, etc. This used to be two separate
+           blocks (one for [ that returned immediately, one for . that
+           only looped over further dots) which meant anything mixing
+           the two silently parsed wrong instead of erroring — e.g.
+           arr[0].x parsed as just arr[0] with the trailing .x quietly
+           dropped, so `y.println(arr[0].x)` printed the whole struct
+           at arr[0] instead of its x field. One shared loop here
+           handles both postfix kinds uniformly, however they're mixed
+           or repeated. */
+        for(;;){
+            if(check(l,TK_LBRACKET)){
                 eat(l);
-                Node *asgn=alloc_node(ND_INDEX_SET);
-                asgn->left=idx; asgn->right=parse_expr(l);
-                return asgn;
+                Node *idx=alloc_node(ND_INDEX);
+                idx->left=n;
+                idx->right=parse_expr(l);
+                if(check(l,TK_RBRACKET)) eat(l);
+                n=idx;
+                continue;
             }
-            return idx;
-        }
-        /* dot access — handles chained dots and method calls: a.b().c().d */
-        if(check(l,TK_DOT)){
-            Node *cur2=n;
-            while(check(l,TK_DOT)){
+            if(check(l,TK_DOT)){
                 eat(l);
                 Token m=expect(l,TK_IDENT);
                 Node *dot=alloc_node(ND_DOT);
-                dot->left=cur2;
+                dot->left=n;
                 int ml=m.len<63?m.len:63;
                 for(int i=0;i<ml;i++) { dot->name[i]=m.start[i]; }
                 dot->name[ml]=0;
-                /* method call */
+                /* method call: obj.method(...) */
                 if(check(l,TK_LPAREN)){
                     eat(l); dot->kind=ND_CALL;
                     /* arg_data[0] reserved for obj in method calls */
-                    dot->arg_data[0]=cur2; int argc2=1;
+                    dot->arg_data[0]=n; int argc2=1;
                     while(!check(l,TK_RPAREN)&&!check(l,TK_EOF)&&argc2<8){
                         dot->arg_data[argc2++]=parse_expr(l);
                         if(!match_tk(l,TK_COMMA)) break;
                     }
                     if(check(l,TK_RPAREN)) eat(l);
                     dot->args=dot->arg_data; dot->argc=argc2;
-                    /* keep looping — next dot starts a new chained call */
-                    cur2=dot;
-                    continue;
                 }
-                cur2=dot;
+                n=dot;
+                continue;
             }
-            return cur2;
+            break;
         }
+        /* trailing assignment (arr[i] = v, obj.field = v, arr[i].field = v,
+           ...) is intentionally NOT handled here anymore — it falls
+           through to parse_expr's generic ND_ASSIGN wrapping, which
+           checks n->left->kind (ND_IDENT/ND_INDEX/ND_DOT) at eval time
+           instead of the parser needing a separate dedicated node per
+           target shape. This is also what makes chained-then-assigned
+           targets (arr[i].field = v) work at all: a dedicated
+           early-return node per postfix kind can't compose the way a
+           shared loop plus a single generic assignment wrapper can. */
+        return n;
         return n;
     }
     if(t.kind==TK_LPAREN){
@@ -575,15 +587,43 @@ static Node *parse_stmt(Lexer *l){
         /* annotation name into a temp buffer */
         char ann_name[32]; int al=ann.len<31?ann.len:31;
         for(int i=0;i<al;i++) { ann_name[i]=ann.start[i]; } ann_name[al]=0;
-        /* parse optional ("arg") */
+        /* parse optional ("arg") or (name, name, ...) — the latter for
+           @cap(net.read, fs.write)-style dotted capability names, which
+           aren't quoted strings the way @intent/@audit's single arg is.
+           Multiple names get joined with ';' into the same ann_arg
+           buffer used for the single-string case, rather than adding a
+           whole new AST field just for this. Previously an identifier
+           argument here (like the bare `fs` in `fs.write`) matched
+           neither the TK_STR branch nor the immediate TK_RPAREN check,
+           so it was never consumed at all — leaving `fs.write)` sitting
+           on the token stream to be parsed as later garbage statements
+           instead of actually failing to parse the annotation. */
         char ann_arg[64]; ann_arg[0]=0;
         if(check(l,TK_LPAREN)){
             eat(l);
-            if(check(l,TK_STR)){
-                Token av=eat(l);
-                int vl=av.len<63?av.len:63;
-                for(int i=0;i<vl;i++) { ann_arg[i]=av.start[i]; } ann_arg[vl]=0;
+            int al2=0;
+            while(!check(l,TK_RPAREN)&&!check(l,TK_EOF)&&al2<62){
+                if(check(l,TK_STR)){
+                    Token av=eat(l);
+                    int vl=av.len<63?av.len:63;
+                    for(int i=0;i<vl&&al2<62;i++) ann_arg[al2++]=av.start[i];
+                } else if(check(l,TK_IDENT)){
+                    /* dotted capability name: ident(.ident)* */
+                    Token id0=eat(l);
+                    int il=id0.len<62-al2?id0.len:62-al2;
+                    for(int i=0;i<il;i++) ann_arg[al2++]=id0.start[i];
+                    while(check(l,TK_DOT)&&al2<62){
+                        eat(l);
+                        if(al2<62) ann_arg[al2++]='.';
+                        Token idn=expect(l,TK_IDENT);
+                        int iln=idn.len<62-al2?idn.len:62-al2;
+                        for(int i=0;i<iln;i++) ann_arg[al2++]=idn.start[i];
+                    }
+                } else { eat(l); /* skip anything unexpected rather than looping forever */ }
+                if(check(l,TK_COMMA)){ eat(l); if(al2<62) ann_arg[al2++]=';'; }
+                else break;
             }
+            ann_arg[al2]=0;
             if(check(l,TK_RPAREN)) eat(l);
         }
         while(check(l,TK_NL)) eat(l);
