@@ -235,6 +235,23 @@ static int g_dyn_enabled = 0;
 typedef struct { char name[64]; int got_off; } DynImport;
 static DynImport g_dyn_imports[MAX_DYN_IMPORTS];
 static int g_dyn_nimports = 0;
+#define MAX_DYN_NEEDED 8
+static char g_dyn_needed[MAX_DYN_NEEDED][64];
+static int g_dyn_nneeded = 0;
+
+/* Registers name ("libssl.so.3" etc.) as a DT_NEEDED library for this
+   binary, if not already registered. libc.so.6 is always included
+   (see ys_compile's dynlink finalization) since every import so far
+   has come from it or, transitively, from something libc itself
+   depends on; other libraries (a TLS library, eventually) call this
+   explicitly before importing any of their symbols. Multiple needed
+   libraries don't need any change to how imports themselves resolve
+   — see elf_write_dynamic's comment on why. */
+static void dynlink_need_library(const char *libname){
+    g_dyn_enabled = 1;
+    for(int i=0;i<g_dyn_nneeded;i++) if(strcmp(g_dyn_needed[i],libname)==0) return;
+    if(g_dyn_nneeded<MAX_DYN_NEEDED) snprintf(g_dyn_needed[g_dyn_nneeded++],64,"%s",libname);
+}
 
 /* Reserves (or reuses, if already imported) an 8-byte zeroed GOT slot
    in data_buf for symname, and returns its offset. Once ld.so
@@ -2939,6 +2956,265 @@ static void compile_expr(Node *n){
             emit2(0xff,0xd0);      /* call rax (exit(0) — never returns) */
             break;
         }
+        /* y.net.tls_handshake_test() — full handshake proof-of-concept:
+           TCP connect (reusing the exact same DNS-query-building and
+           __ys_net_connect_host call the real y.net.connect() call site
+           uses) to a hardcoded real HTTPS host, then
+           TLS_client_method -> SSL_CTX_new -> SSL_new -> SSL_set_fd ->
+           SSL_connect. Prints whether the handshake actually completed
+           (SSL_connect returns 1 on success). Hardcoded host/port and
+           no cleanup/send/recv yet, deliberately — this is validating
+           that the sequence of calls with each one's return value
+           feeding the next works at all, before building the general
+           tls_connect/tls_send/tls_recv_print/tls_close API on top. */
+        if(is_y_net && strcmp(fn,"tls_handshake_test")==0){
+            dynlink_need_library("libssl.so.3");
+            int init_got=dynlink_import("OPENSSL_init_ssl");
+            int method_got=dynlink_import("TLS_client_method");
+            int ctxnew_got=dynlink_import("SSL_CTX_new");
+            int sslnew_got=dynlink_import("SSL_new");
+            int setfd_got=dynlink_import("SSL_set_fd");
+            int sslconnect_got=dynlink_import("SSL_connect");
+            int puts_got=dynlink_import("puts");
+            int exit_got=dynlink_import("exit");
+
+            uint8_t qbuf[512];
+            int qlen=build_dns_query("example.com", qbuf);
+            int qoff=data_add_bytes(qbuf,qlen);
+            int ok_off=data_add_str("TLS handshake succeeded!");
+            int fail_off=data_add_str("TLS handshake failed");
+            int noconn_off=data_add_str("TCP connect failed");
+
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(32); /* -8 fd, -16 method, -24 ctx, -32 ssl */
+
+            /* OPENSSL_init_ssl(0,0) */
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc7);
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc6);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,init_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            /* TCP connect to example.com:443 (A record only, no AAAA
+               fallback here — this test is about the TLS chain, not
+               re-proving dual-stack DNS) */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,qoff); emit_i32(0); /* rdi=&query */
+            x_mov_rax_imm32(qlen); emit3(0x48,0x89,0xc6); /* rsi=qlen */
+            x_mov_rax_imm32(443); emit3(0x48,0x89,0xc2); /* rdx=443 */
+            int p=x_call_unresolved(); add_call_patch(p,"__ys_net_connect_host");
+            x_mov_rbpN_r64(-8,0);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_conn_ok=x_jge_rel32();
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,noconn_off); emit_i32(0);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,puts_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            int j_to_end=x_jmp_rel32();
+
+            x_patch_here(j_conn_ok);
+            /* TLS_client_method() */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,method_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            x_mov_rbpN_r64(-16,0);
+
+            /* SSL_CTX_new(method) */
+            x_mov_r64_rbpN(7,-16);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,ctxnew_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            x_mov_rbpN_r64(-24,0);
+
+            /* SSL_new(ctx) */
+            x_mov_r64_rbpN(7,-24);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,sslnew_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            x_mov_rbpN_r64(-32,0);
+
+            /* SSL_set_fd(ssl, fd) */
+            x_mov_r64_rbpN(7,-32);
+            x_mov_r64_rbpN(0,-8); emit3(0x48,0x89,0xc6);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,setfd_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            /* SSL_connect(ssl) */
+            x_mov_r64_rbpN(7,-32);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,sslconnect_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            emit4(0x48,0x83,0xf8,0x01);
+            int j_hs_ok=x_jz_rel32();
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,fail_off); emit_i32(0);
+            int j_to_print=x_jmp_rel32();
+            x_patch_here(j_hs_ok);
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,ok_off); emit_i32(0);
+            x_patch_here(j_to_print);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,puts_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            x_patch_here(j_to_end);
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc7);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,exit_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            break;
+        }
+        /* y.net.tls_get_test() — one step further than
+           tls_handshake_test: after the handshake succeeds, sends a
+           real HTTPS GET over SSL_write and prints whatever SSL_read
+           decrypts back, proving actual encrypted data transfer works
+           end to end, not just the handshake. Same hardcoded-host
+           scope as tls_handshake_test, same reasoning for staying
+           narrow before generalizing into a public tls_connect/
+           tls_send/tls_recv_print API. */
+        if(is_y_net && strcmp(fn,"tls_get_test")==0){
+            dynlink_need_library("libssl.so.3");
+            int init_got=dynlink_import("OPENSSL_init_ssl");
+            int method_got=dynlink_import("TLS_client_method");
+            int ctxnew_got=dynlink_import("SSL_CTX_new");
+            int sslnew_got=dynlink_import("SSL_new");
+            int setfd_got=dynlink_import("SSL_set_fd");
+            int sslconnect_got=dynlink_import("SSL_connect");
+            int sslwrite_got=dynlink_import("SSL_write");
+            int sslread_got=dynlink_import("SSL_read");
+            int puts_got=dynlink_import("puts");
+            int exit_got=dynlink_import("exit");
+
+            uint8_t qbuf[512];
+            int qlen=build_dns_query("example.com", qbuf);
+            int qoff=data_add_bytes(qbuf,qlen);
+            int fail_off=data_add_str("TLS handshake failed");
+            int noconn_off=data_add_str("TCP connect failed");
+            int req_off=data_add_str("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
+            int req_len=ystrlen("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
+            int rb_off=data_len; static const int RB_CAP=4096;
+            for(int i=0;i<RB_CAP;i++) data_buf[data_len++]=0;
+
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(32); /* -8 fd, -16 method, -24 ctx, -32 ssl */
+
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc7);
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc6);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,init_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,qoff); emit_i32(0);
+            x_mov_rax_imm32(qlen); emit3(0x48,0x89,0xc6);
+            x_mov_rax_imm32(443); emit3(0x48,0x89,0xc2);
+            int p2=x_call_unresolved(); add_call_patch(p2,"__ys_net_connect_host");
+            x_mov_rbpN_r64(-8,0);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j2_conn_ok=x_jge_rel32();
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,noconn_off); emit_i32(0);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,puts_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            int j2_to_end=x_jmp_rel32();
+
+            x_patch_here(j2_conn_ok);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,method_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            x_mov_rbpN_r64(-16,0);
+
+            x_mov_r64_rbpN(7,-16);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,ctxnew_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            x_mov_rbpN_r64(-24,0);
+
+            x_mov_r64_rbpN(7,-24);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,sslnew_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            x_mov_rbpN_r64(-32,0);
+
+            x_mov_r64_rbpN(7,-32);
+            x_mov_r64_rbpN(0,-8); emit3(0x48,0x89,0xc6);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,setfd_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            x_mov_r64_rbpN(7,-32);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,sslconnect_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            emit4(0x48,0x83,0xf8,0x01);
+            int j2_hs_ok=x_jz_rel32();
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,fail_off); emit_i32(0);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,puts_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            int j2_to_end2=x_jmp_rel32();
+
+            x_patch_here(j2_hs_ok);
+            /* SSL_write(ssl, req_ptr, req_len) */
+            x_mov_r64_rbpN(7,-32);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,req_off); emit_i32(0); /* rsi=&req */
+            x_mov_rax_imm32(req_len); emit3(0x48,0x89,0xc2); /* rdx=req_len */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,sslwrite_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            /* SSL_read(ssl, respbuf, RB_CAP-1) */
+            x_mov_r64_rbpN(7,-32);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,rb_off); emit_i32(0); /* rsi=&respbuf */
+            x_mov_rax_imm32(RB_CAP-1); emit3(0x48,0x89,0xc2);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,sslread_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            /* NUL-terminate at [respbuf+n] so puts() stops at the real
+               end of what SSL_read actually decrypted, then print it */
+            emit3(0x48,0x8d,0x0d); add_reloc(RELOC_DATA,code_len,rb_off); emit_i32(0); /* rcx=&respbuf */
+            emit3(0x48,0x01,0xc8); /* rax += rcx (rax = &respbuf[n]) */
+            emit3(0xc6,0x00,0x00); /* mov byte[rax],0 */
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,rb_off); emit_i32(0); /* rdi=&respbuf */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,puts_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            x_patch_here(j2_to_end); x_patch_here(j2_to_end2);
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc7);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,exit_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            break;
+        }
+        /* y.net.tls_test() — narrower proof-of-concept than
+           tls_handshake_test above: just checks whether this backend's
+           simple unversioned R_X86_64_GLOB_DAT symbol resolution works
+           at all against libssl.so.3's versioned exports (OpenSSL 3.0
+           tags everything like OPENSSL_init_ssl@@OPENSSL_3.0.0), with
+           no socket/handshake involved yet — kept as the minimal
+           isolated check that caught the versioned-symbol question
+           before the full chain above was built on top of it. */
+        if(is_y_net && strcmp(fn,"tls_test")==0){
+            dynlink_need_library("libssl.so.3");
+            int init_got=dynlink_import("OPENSSL_init_ssl");
+            int method_got=dynlink_import("TLS_client_method");
+            int puts_got=dynlink_import("puts");
+            int exit_got=dynlink_import("exit");
+            int ok_off=data_add_str("libssl linked and callable");
+            int fail_off=data_add_str("libssl call returned null — versioned symbol resolution may have failed");
+
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(16); /* sub rsp,16 */
+
+            /* OPENSSL_init_ssl(0, NULL) */
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc7); /* rdi=0 */
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc6); /* rsi=0 */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,init_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            /* TLS_client_method() -> rax */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,method_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            x_mov_rbpN_r64(-8,0); /* save method ptr */
+
+            x_mov_r64_rbpN(0,-8);
+            emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+            int j_ok=x_jnz_rel32();
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,fail_off); emit_i32(0);
+            int j_after=x_jmp_rel32();
+            x_patch_here(j_ok);
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,ok_off); emit_i32(0);
+            x_patch_here(j_after);
+
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,puts_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+
+            x_mov_rax_imm32(0); emit3(0x48,0x89,0xc7);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,exit_got); emit_i32(0);
+            emit3(0x49,0x8b,0x03); emit2(0xff,0xd0);
+            break;
+        }
         /* user function call — pass args in registers (SysV) */
         /* translate "main" to "__ys_main" for call */
         char fn_call_name[68];
@@ -3184,7 +3460,7 @@ extern int elf_write_dynamic(const char *path,
     uint8_t *data, int data_len,
     int *reloc_code, int *reloc_data, int nrelocs,
     int entry_off,
-    const char *needed_lib,
+    const char **needed_libs, int nneeded,
     const char **import_names, int *import_got_offs, int nimports);
 
 extern int macho_write(const char *path,
@@ -3340,7 +3616,7 @@ int ys_compile(Node *prog, Target target, const char *outfile){
     g_target=target;
 
     code_len=0; data_len=0; nrelocs=0;
-    g_dyn_enabled=0; g_dyn_nimports=0;
+    g_dyn_enabled=0; g_dyn_nimports=0; g_dyn_nneeded=0;
     nlocals=0; stack_size=0;
     nsyms=0; ncall_patches=0;
 
@@ -3432,8 +3708,11 @@ int ys_compile(Node *prog, Target target, const char *outfile){
             static const char *inames[MAX_DYN_IMPORTS];
             static int igots[MAX_DYN_IMPORTS];
             for(int i=0;i<g_dyn_nimports;i++){ inames[i]=g_dyn_imports[i].name; igots[i]=g_dyn_imports[i].got_off; }
+            dynlink_need_library("libc.so.6"); /* always present: puts/exit for dynlink_test, and a safe default */
+            static const char *lnames[MAX_DYN_NEEDED];
+            for(int i=0;i<g_dyn_nneeded;i++) lnames[i]=g_dyn_needed[i];
             ret=elf_write_dynamic(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off,
-                                   "libc.so.6",inames,igots,g_dyn_nimports);
+                                   lnames,g_dyn_nneeded,inames,igots,g_dyn_nimports);
         } else {
             ret=elf_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off);
         }

@@ -206,17 +206,28 @@ int elf_write_dynamic(const char *path,
               uint8_t *data, int data_len,
               int *reloc_code_offs, int *reloc_data_offs, int nrelocs,
               int entry_off,
-              const char *needed_lib,
+              const char **needed_libs, int nneeded,
               const char **import_names, int *import_got_offs, int nimports)
 {
     const char interp[] = "/lib64/ld-linux-x86-64.so.2";
     int interp_len = (int)sizeof(interp); /* includes NUL */
 
-    /* .dynstr: \0 + needed_lib\0 + each import name\0 */
+    /* .dynstr: \0 + each needed lib\0 + each import name\0
+       Multiple DT_NEEDED entries just means "load all of these" — ld.so
+       still does one flat symbol search across everything loaded (this
+       library plus whatever ITS OWN DT_NEEDED pulls in transitively,
+       e.g. libssl.so.3 -> libcrypto.so.3), so which specific library an
+       import's symbol actually lives in was never something the
+       R_X86_64_GLOB_DAT relocation mechanism needed to know. */
     uint8_t dynstr[2048]; int dynstr_len=0;
     dynstr[dynstr_len++]=0;
-    int needed_str_off = dynstr_len;
-    { const char *p=needed_lib; while(*p) dynstr[dynstr_len++]=(uint8_t)*p++; dynstr[dynstr_len++]=0; }
+    int needed_str_off[16];
+    for(int i=0;i<nneeded;i++){
+        needed_str_off[i]=dynstr_len;
+        const char *p=needed_libs[i];
+        while(*p) dynstr[dynstr_len++]=(uint8_t)*p++;
+        dynstr[dynstr_len++]=0;
+    }
     int import_str_off[64];
     for(int i=0;i<nimports;i++){
         import_str_off[i]=dynstr_len;
@@ -311,19 +322,18 @@ int elf_write_dynamic(const char *path,
         rela_len+=24;
     }
 
-    uint64_t dyn_entries[] = {
-        DT_NEEDED, (uint64_t)needed_str_off,
-        DT_HASH, hash_va,
-        DT_STRTAB, dynstr_va,
-        DT_SYMTAB, dynsym_va,
-        DT_STRSZ, (uint64_t)dynstr_len,
-        DT_SYMENT, 24,
-        DT_RELA, rela_va,
-        DT_RELASZ, (uint64_t)rela_len,
-        DT_RELAENT, 24,
-        DT_NULL, 0,
-    };
-    int dyn_len = (int)sizeof(dyn_entries);
+    uint64_t dyn_entries[64]; int dyn_n=0;
+    for(int i=0;i<nneeded;i++){ dyn_entries[dyn_n++]=DT_NEEDED; dyn_entries[dyn_n++]=(uint64_t)needed_str_off[i]; }
+    dyn_entries[dyn_n++]=DT_HASH;    dyn_entries[dyn_n++]=hash_va;
+    dyn_entries[dyn_n++]=DT_STRTAB;  dyn_entries[dyn_n++]=dynstr_va;
+    dyn_entries[dyn_n++]=DT_SYMTAB;  dyn_entries[dyn_n++]=dynsym_va;
+    dyn_entries[dyn_n++]=DT_STRSZ;   dyn_entries[dyn_n++]=(uint64_t)dynstr_len;
+    dyn_entries[dyn_n++]=DT_SYMENT;  dyn_entries[dyn_n++]=24;
+    dyn_entries[dyn_n++]=DT_RELA;    dyn_entries[dyn_n++]=rela_va;
+    dyn_entries[dyn_n++]=DT_RELASZ;  dyn_entries[dyn_n++]=(uint64_t)rela_len;
+    dyn_entries[dyn_n++]=DT_RELAENT; dyn_entries[dyn_n++]=24;
+    dyn_entries[dyn_n++]=DT_NULL;    dyn_entries[dyn_n++]=0;
+    int dyn_len = dyn_n*(int)sizeof(uint64_t);
 
     uint64_t rw_filesz = (uint64_t)data_len + (uint64_t)hasht_len + (uint64_t)dynsym_len
                         + (uint64_t)dynstr_len + (uint64_t)rela_len

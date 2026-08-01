@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.28  
+**Version:** v2.29  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2776,6 +2776,23 @@ This is not a general foreign-function interface: there's no
 mechanism yet for importing an arbitrary function with an arbitrary
 signature from Yolish source, just this one hardcoded proof that the
 underlying ELF dynamic-linking machinery works correctly end to end.
+
+**Native TLS proof-of-concept (`ys -c`, Linux):** building on the
+above, `y.net.tls_test()`, `y.net.tls_handshake_test()`, and
+`y.net.tls_get_test()` link against the system's real `libssl.so.3`
+(OpenSSL) instead of `libc.so.6`. `tls_test` just checks that a
+versioned OpenSSL export resolves at all; `tls_handshake_test`
+performs a genuine TLS 1.3 handshake (`TLS_client_method` →
+`SSL_CTX_new` → `SSL_new` → `SSL_set_fd` → `SSL_connect`) against a
+hardcoded host over a real TCP connection; `tls_get_test` goes one
+step further and sends a real HTTPS GET via `SSL_write`, printing
+whatever `SSL_read` decrypts back. All three are hardcoded
+proof-of-concept functions, not a general API — no host/port
+argument, no cleanup (`SSL_free`/`SSL_CTX_free`/closing the socket),
+and calling any of them twice in one program isn't meaningful. A real
+`y.net.tls_connect(host, port)` / `tls_send` / `tls_recv_print` /
+`tls_close` API, mirroring the plain-TCP one's shape, is the natural
+next step but doesn't exist yet.
 
 
 
