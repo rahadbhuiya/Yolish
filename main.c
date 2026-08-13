@@ -25,7 +25,7 @@ int  ys_check(Node *prog, const char *filename);
 /*  REPL */
 
 static void run_repl(void){
-    fprintf(stdout,"  Yolish v2.29 (Exploidus Runtime)\n");
+    fprintf(stdout,"  Yolish v2.30 (Exploidus Runtime)\n");
     fprintf(stdout,"  Type \"help\" or \"exit\" to quit.\n\n");
 
     Env *env=env_new(NULL);
@@ -267,7 +267,14 @@ int main(int argc,char **argv){
     if(do_compile){
         char out_buf[512];
         if(!outfile){
-            strncpy(out_buf,infile,sizeof(out_buf)-10);
+            /* use the basename only -- we already chdir'd into infile's
+               directory above, so building the default name from the
+               full path here would double that directory and fopen()
+               inside ys_compile would fail looking for a nested
+               directory that doesn't exist. */
+            const char *base=infile;
+            for(int di=0;infile[di];di++) if(infile[di]=='/'||infile[di]=='\\') base=infile+di+1;
+            strncpy(out_buf,base,sizeof(out_buf)-10);
             int ol=(int)strlen(out_buf);
             if(ol>2&&out_buf[ol-2]=='.'&&out_buf[ol-1]=='y') out_buf[ol-2]=0;
             if(target==TARGET_WINDOWS) strcat(out_buf,".exe");

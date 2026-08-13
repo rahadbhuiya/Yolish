@@ -75,33 +75,38 @@ jobs:
 
       - name: Test — ys test command
         run: |
-          cat > /tmp/ci_test.y << 'YSEOF'
-fn add(a, b) { return a + b }
-test "add" {
-    assert_eq(add(2,3), 5)
-    assert(add(0,0) == 0)
-}
-test "strings" {
-    assert(y.len("hello") == 5)
-}
-YSEOF
+          # NOTE: this used to be a heredoc (cat > file << 'YSEOF' ... YSEOF)
+          # with the body starting at column 0. That's invalid YAML: a
+          # literal block scalar ("run: |" above) requires every line to
+          # be indented at least as much as its first content line, or
+          # the scalar ends early and the parser tries to read the next
+          # line as a new top-level YAML key -- confirmed against two
+          # independent parsers (PyYAML, js-yaml), both rejecting the
+          # original file with a parse error, and matching a real,
+          # publicly-documented GitHub Actions incident with this exact
+          # shape (a workflow GitHub outright refused to run). Indenting
+          # the heredoc body/delimiter to satisfy YAML doesn't work
+          # either -- bash's own `<<'EOF'` requires the closing delimiter
+          # alone on a line with no leading whitespace, so an indented
+          # "YSEOF" is never recognized and the heredoc just keeps
+          # consuming the rest of the step as content instead of ending.
+          # printf with explicit \n, kept on one logical line, sidesteps
+          # both problems at once.
+          printf 'fn add(a, b) { return a + b }\ntest "add" {\n    assert_eq(add(2,3), 5)\n    assert(add(0,0) == 0)\n}\ntest "strings" {\n    assert(y.len("hello") == 5)\n}\n' \
+            > /tmp/ci_test.y
           ./ys test /tmp/ci_test.y | grep -q "2 passed"
           echo "PASS: ys test"
 
       - name: Test — ys check command
         run: |
-          echo 'let x = 10
-y.println(x)' > /tmp/ci_clean.y
+          printf 'let x = 10\ny.println(x)\n' > /tmp/ci_clean.y
           ./ys check /tmp/ci_clean.y | grep -q "No issues"
           echo "PASS: ys check"
 
       - name: Test — assert builtins
         run: |
-          echo 'assert(1 == 1)
-assert_eq(2 + 2, 4)
-assert_true(true)
-assert_false(false)
-y.println("ok")' | ./ys /dev/stdin | grep -q "ok"
+          printf 'assert(1 == 1)\nassert_eq(2 + 2, 4)\nassert_true(true)\nassert_false(false)\ny.println("ok")\n' \
+            | ./ys /dev/stdin | grep -q "ok"
           echo "PASS: assert builtins"
 
       - name: Test — native compiler (Linux ELF)
@@ -112,20 +117,34 @@ y.println("ok")' | ./ys /dev/stdin | grep -q "ok"
           rm -f /tmp/nc_test.y /tmp/nc_test_bin
           echo "PASS: native compiler"
 
+      - name: Test — native TLS public API (v2.30, real network)
+        run: |
+          # example.com specifically: IANA-maintained, about as stable a
+          # real HTTPS target as exists, and (unlike some CDN frontends)
+          # requires correct SNI to hand back a sensible response at all
+          # -- see the v2.30 changelog entry for why that matters here.
+          # \\r\\n below (doubled backslashes) is deliberate: printf's own
+          # escape processing must turn each \\ into one literal backslash,
+          # producing the literal two-character sequence \r in the
+          # generated .y source, so Yolish's own string-literal lexer is
+          # the thing that turns it into an actual CR byte at compile
+          # time -- not printf doing that a layer too early.
+          printf 'let h = y.net.tls_connect("example.com", 443)\ny.println(h)\nif h >= 0 {\n    y.net.tls_send(h, "GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n")\n    y.net.tls_recv_print(h, 300)\n    y.net.tls_close(h)\n}\n-- invalid handle must fail cleanly, not crash, on all three ops\ny.println(y.net.tls_send(99, "x"))\ny.println(y.net.tls_recv_print(99, 10))\ny.net.tls_close(99)\ny.println("done")\n' \
+            > /tmp/tls_ci.y
+          ./ys -c /tmp/tls_ci.y --target linux -o /tmp/tls_ci_bin
+          out=$(timeout 20 /tmp/tls_ci_bin)
+          echo "$out"
+          echo "$out" | grep -q "^0$"              # tls_connect returned a valid handle
+          echo "$out" | grep -qi "Example Domain"  # real decrypted response content
+          echo "$out" | grep -q "^-1$"             # invalid-handle send/recv_print
+          echo "$out" | grep -q "^done$"           # reached the end, no crash
+          rm -f /tmp/tls_ci.y /tmp/tls_ci_bin
+          echo "PASS: native TLS public API"
+
       - name: Test — bytecode VM (v2.0, experimental)
         run: |
-          cat > /tmp/vm_test.y << 'YSEOF'
-fn fib(n) {
-    if n <= 1 { return n }
-    return fib(n-1) + fib(n-2)
-}
-y.println(fib(10))
-let arr = [1, 2, 3]
-y.println(arr[1])
-var i = 0
-while i < 3 { i = i + 1 }
-y.println(i)
-YSEOF
+          printf 'fn fib(n) {\n    if n <= 1 { return n }\n    return fib(n-1) + fib(n-2)\n}\ny.println(fib(10))\nlet arr = [1, 2, 3]\ny.println(arr[1])\nvar i = 0\nwhile i < 3 { i = i + 1 }\ny.println(i)\n' \
+            > /tmp/vm_test.y
           ./ys vm /tmp/vm_test.y < /dev/null | grep -q "55"
           echo "PASS: bytecode VM"
 
@@ -142,3 +161,18 @@ YSEOF
           for f in examples/*.y; do
             timeout 30 ./ys "$f" < /dev/null > /dev/null 2>&1 && echo "PASS: $f" || echo "FAIL: $f (non-zero exit)"
           done
+
+      - name: Windows cross-compile sanity check
+        run: |
+          # Not a behavior test (nothing here can run a PE32+ binary on a
+          # Linux runner) -- just confirms `make windows` still produces a
+          # valid Windows executable. v2.26's whole changelog entry is a
+          # build fix for exactly this silently breaking (a Linux-only
+          # header pulled in by code that gets compiled for every target
+          # regardless of what it emits) -- same risk any new native
+          # builtin, TLS included, reintroduces if it isn't checked here.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mingw-w64
+          make windows
+          file ys.exe | grep -q "PE32+"
+          echo "PASS: windows cross-compile"

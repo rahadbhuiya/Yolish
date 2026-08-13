@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.29  
+**Version:** v2.30  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2580,9 +2580,11 @@ certificate (`SSL_set1_host`), not just chain-of-trust validity.
   detect for you.
 - `y.net.listen`/`y.net.accept` have no TLS equivalent yet — this
   batch covers the client side only.
-- Not implemented for native compilation, and not implemented for
-  Windows even in the interpreter/VM build (the OpenSSL dependency
-  isn't wired up for MinGW builds yet).
+- Not implemented for Windows even in the interpreter/VM build (the
+  OpenSSL dependency isn't wired up for MinGW builds yet). Native
+  compilation has its own, separate, narrower TLS API — see "Native
+  TLS public API" further down in this section — which is Linux-only
+  too.
 
 ### Native compilation, Linux only (`ys -c file.y --target linux`)
 
@@ -2789,10 +2791,56 @@ step further and sends a real HTTPS GET via `SSL_write`, printing
 whatever `SSL_read` decrypts back. All three are hardcoded
 proof-of-concept functions, not a general API — no host/port
 argument, no cleanup (`SSL_free`/`SSL_CTX_free`/closing the socket),
-and calling any of them twice in one program isn't meaningful. A real
-`y.net.tls_connect(host, port)` / `tls_send` / `tls_recv_print` /
-`tls_close` API, mirroring the plain-TCP one's shape, is the natural
-next step but doesn't exist yet.
+and calling any of them twice in one program isn't meaningful.
+
+**Native TLS public API (`ys -c`, Linux only — v2.30):**
+
+```yolish
+y.net.tls_connect(host, port)  -- host MUST be a string literal, same
+                                -- three shapes as y.net.connect
+                                -- (IPv4/IPv6 literal or hostname).
+                                -- Returns a handle (0..3) or -1.
+y.net.tls_send(handle, data)   -- data MUST be a string literal.
+                                -- Returns bytes written, or -1.
+y.net.tls_recv_print(handle, maxlen) -- reads up to maxlen bytes
+                                -- (clamped to 4095) and writes them
+                                -- straight to stdout, same "print
+                                -- instead of return" reasoning as the
+                                -- plain-TCP recv_print (no runtime
+                                -- string type to hand a decrypted
+                                -- buffer back as a value). Returns
+                                -- bytes received, or -1.
+y.net.tls_close(handle)        -- frees the TLS session and closes
+                                -- the socket. Always returns 0, even
+                                -- for an invalid handle (no-op).
+```
+
+```yolish
+let sock = y.net.tls_connect("example.com", 443)
+if sock >= 0 {
+    y.net.tls_send(sock, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+    y.net.tls_recv_print(sock, 4000)
+    y.net.tls_close(sock)
+}
+```
+
+Backed by a small fixed-size, round-robin connection-handle table (4
+slots) rather than a real allocator — this backend has no struct/map
+type to hand back a `{fd, ctx, ssl}` bundle directly, and no dynamic
+memory allocation to give each connection its own heap-allocated
+slot. **At most 4 TLS connections can be open at once**; opening a
+5th silently reuses (and overwrites) the oldest still-open slot rather
+than erroring — close connections you're done with, and don't rely on
+more than 4 being live simultaneously. SNI is sent
+(`SSL_set_tlsext_host_name`) for the hostname branch — not sent for an
+IPv4/IPv6-literal `host`, since an IP address isn't valid SNI content.
+Certificate verification is **not** enabled (unlike the interpreter/VM
+`make tls` build described earlier in this section, which does verify
+via `SSL_set1_host`) — this native path trusts whatever certificate
+the server presents. All four functions no-op/return `-1` if compiled
+for a non-Linux `--target`, since they depend on the same ELF-only
+dynlink machinery as `tls_test`/`tls_handshake_test`/`tls_get_test`
+above.
 
 
 
