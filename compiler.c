@@ -373,6 +373,10 @@ static int g_tls_rbuf_off  = -1; /* YS_TLS_RBUF_CAP-byte scratch buffer for tls_
 static int g_tls_argbuf_off = -1; /* 4*8-byte scratch used only to ferry argument
                                       values across the tls_*'s own nested-frame
                                       switch below -- see x_store_rip_slot's comment */
+#define YS_TLSSRV_MAX 2
+#define YS_TLSSRV_SLOT_SIZE 16 /* per-slot layout: [listen_fd:8][ctx:8] */
+static int g_tlssrv_table_off = -1; /* YS_TLSSRV_MAX * YS_TLSSRV_SLOT_SIZE bytes, zeroed */
+static int g_tlssrv_next_off  = -1; /* 8-byte round-robin server-handle counter */
 
 /* Lazily reserves the rodata backing the table/counter/buffer above, the
    first time any tls_connect/tls_send/tls_recv_print/tls_close call is
@@ -387,6 +391,9 @@ static void tls_state_ensure(void){
     g_tls_rbuf_off = data_add_bytes(zero_rbuf, YS_TLS_RBUF_CAP);
     static const uint8_t zero32[32] = {0};
     g_tls_argbuf_off = data_add_bytes(zero32, 32);
+    static const uint8_t zero_srv[YS_TLSSRV_MAX*YS_TLSSRV_SLOT_SIZE] = {0};
+    g_tlssrv_table_off = data_add_bytes(zero_srv, sizeof(zero_srv));
+    g_tlssrv_next_off = data_add_bytes(zero8, 8);
 }
 
 /* mov [rip+off],rax / mov rax,[rip+off] — a plain rip-relative scratch
@@ -2579,6 +2586,260 @@ static void emit_helpers(void){
 /*  string length  */
 static int ystrlen(const char *s){ int n=0; while(s[n])n++; return n; }
 
+/* Parses a compile-time URL literal into scheme/host/port/path. Returns
+   1 on success (a recognized http:// or https:// scheme with a
+   non-empty host), 0 otherwise. Used by y.http.get_print/post_print
+   below — url is required to be a string literal (same constraint as
+   every other host/data argument in this file), so this all happens
+   in C, at compile time, never emitted as runtime code. */
+static int parse_http_url(const char *url, int *use_tls, char *host, int hostcap, int *port, char *path, int pathcap){
+    const char *p;
+    if(strncmp(url,"https://",8)==0){ *use_tls=1; *port=443; p=url+8; }
+    else if(strncmp(url,"http://",7)==0){ *use_tls=0; *port=80; p=url+7; }
+    else return 0;
+    const char *slash=strchr(p,'/');
+    const char *hostend = slash ? slash : p+ystrlen(p);
+    const char *colon=NULL;
+    for(const char *q=p; q<hostend; q++) if(*q==':'){ colon=q; break; }
+    int hlen = (int)((colon?colon:hostend)-p);
+    if(hlen<=0 || hlen>=hostcap) return 0;
+    memcpy(host,p,hlen); host[hlen]=0;
+    if(colon){ int pv=0; for(const char *q=colon+1;q<hostend && *q>='0'&&*q<='9';q++) pv=pv*10+(*q-'0'); if(pv>0) *port=pv; }
+    if(slash){
+        int plen=ystrlen(slash);
+        if(plen>=pathcap) return 0;
+        memcpy(path,slash,plen+1);
+    } else {
+        path[0]='/'; path[1]=0;
+    }
+    return 1;
+}
+
+/* Connects to host:port (TLS if use_tls, plain TCP otherwise), sends
+   the pre-built request at data offset req_off/req_len, reads and
+   prints whatever comes back, then closes -- one shot, no stored
+   handle, since y.http.get_print/post_print don't need one (url, and
+   therefore host/port, are compile-time constants here, unlike
+   tls_connect's runtime host/port, so none of that function's
+   argument-staging machinery is needed: nothing here is ever compiled
+   from a Node*, so there's no frame-switch-ordering bug to avoid in
+   the first place). Leaves rax = bytes received or -1. Shared between
+   get_print and post_print so the connect/handshake logic — the part
+   that's actually easy to get subtly wrong — exists in exactly one
+   place. */
+static void emit_http_request(const char *host, int port, int use_tls, int req_off, int req_len){
+    if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); return; }
+    tls_state_ensure();
+
+    uint8_t ip6buf[16];
+    int is_ipv6 = is_ipv6_literal(host) && parse_ipv6_literal(host,ip6buf);
+    int is_ipv4 = is_ipv4_literal(host);
+
+    x_push_rbp(); x_mov_rbp_rsp();
+    emit3(0x48,0x81,0xec); emit_i32(64); /* -8 fd -16 method -24 ctx -32 ssl -40 total -48 n */
+
+    int fail_patches[8]; int nfail=0;
+
+    if(is_ipv6){
+        int off=data_add_bytes(ip6buf,16);
+        emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off); emit_i32(0);
+        x_mov_r64_imm32(6,port);
+        int p=x_call_unresolved(); add_call_patch(p,"__ys_net_connect6");
+    } else if(is_ipv4){
+        int off=data_add_str(host);
+        emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off); emit_i32(0);
+        x_mov_r64_imm32(6,ystrlen(host));
+        x_mov_r64_imm32(2,port);
+        int p=x_call_unresolved(); add_call_patch(p,"__ys_net_connect");
+    } else {
+        uint8_t qbuf[512]; int qlen=build_dns_query(host,qbuf);
+        int qoff=data_add_bytes(qbuf,qlen);
+        emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,qoff); emit_i32(0);
+        x_mov_r64_imm32(6,qlen);
+        x_mov_r64_imm32(2,port);
+        int p=x_call_unresolved(); add_call_patch(p,"__ys_net_connect_host");
+    }
+    x_mov_rbpN_r64(-8,0);
+    emit4(0x48,0x83,0xf8,0x00);
+    int j_conn_ok=x_jge_rel32();
+    x_mov_rax_imm32(-1); x_mov_rbpN_r64(-40,0); fail_patches[nfail++]=x_jmp_rel32();
+    x_patch_here(j_conn_ok);
+
+    if(!use_tls){
+        /* plain HTTP: __ys_net_send to write the request (reusing the
+           exact subroutine y.net.send calls), then a hand-rolled
+           read/write loop for the response instead of a single
+           __ys_net_recv_print call.
+
+           This loop exists because of a real bug this rebuild's testing
+           caught: a single read() isn't guaranteed to capture a whole
+           HTTP response. A real local test server sent headers and body
+           as two separate writes, which arrived as two separate TCP
+           segments -- one read() call only ever saw the headers, and
+           the body was silently missing from the output (no crash, no
+           error, just an incomplete response — exactly the kind of bug
+           that's easy to miss without actually running it against a
+           real server). __ys_net_recv_print/y.net.tls_recv_print keep
+           their existing, documented single-read behavior unchanged —
+           that's an established contract other code may depend on —
+           this loop is local to the HTTP client only. */
+        emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,req_off); emit_i32(0); /* rdi=&req */
+        x_mov_r64_imm32(6,req_len); /* rsi=len */
+        x_mov_r64_rbpN(2,-8);       /* rdx=fd */
+        { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_send"); }
+
+        x_mov_qword_rbpN_imm32(-40,0); /* total=0 */
+
+        int loop_top1=code_len;
+        x_mov_r64_rbpN(7,-8); /* rdi=fd */
+        emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0); /* rsi=&rbuf */
+        x_mov_r64_imm32(2,YS_TLS_RBUF_CAP-1); /* rdx=maxlen */
+        x_mov_r64_imm32(0,0); /* SYS_read */
+        emit2(0x0f,0x05);
+        emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+        int j_have_chunk1=x_jg_rel32();
+        int j_loop_end1=x_jmp_rel32();
+        x_patch_here(j_have_chunk1);
+        x_mov_rbpN_r64(-48,0); /* n */
+
+        x_mov_r64_imm32(7,1); /* rdi=1 (stdout) */
+        emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0); /* rsi=&rbuf */
+        x_mov_r64_rbpN(2,-48); /* rdx=n */
+        x_mov_r64_imm32(0,1); /* SYS_write */
+        emit2(0x0f,0x05);
+
+        x_mov_r64_rbpN(0,-40); x_mov_r64_rbpN(1,-48);
+        emit3(0x48,0x01,0xc8); /* add rax,rcx (total += n) */
+        x_mov_rbpN_r64(-40,0);
+
+        int jback1=x_jmp_rel32();
+        patch_i32(jback1,(int32_t)(loop_top1-(jback1+4)));
+        x_patch_here(j_loop_end1);
+
+        x_mov_r64_rbpN(7,-8);
+        { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+        x_mov_r64_rbpN(0,-40);
+
+        for(int i=0;i<nfail;i++) x_patch_here(fail_patches[i]);
+        x_mov_rsp_rbp(); x_pop_rbp();
+        return;
+    }
+
+    /* HTTPS: same handshake shape as y.net.tls_connect, minus all the
+       handle/table bookkeeping (nothing here is stored past this one
+       request) and minus the argument-staging machinery (host/port are
+       C constants here, not a Node* — nothing to stage across a frame
+       switch that hasn't already happened by the time this runs). */
+    dynlink_need_library("libssl.so.3");
+    int init_got=dynlink_import("OPENSSL_init_ssl");
+    int method_got=dynlink_import("TLS_client_method");
+    int ctxnew_got=dynlink_import("SSL_CTX_new");
+    int sslnew_got=dynlink_import("SSL_new");
+    int setfd_got=dynlink_import("SSL_set_fd");
+    int sslconnect_got=dynlink_import("SSL_connect");
+    int sslctrl_got=dynlink_import("SSL_ctrl");
+    int sslwrite_got=dynlink_import("SSL_write");
+    int sslread_got=dynlink_import("SSL_read");
+    int ctxfree_got=dynlink_import("SSL_CTX_free");
+    int sslfree_got=dynlink_import("SSL_free");
+
+    x_mov_r64_imm32(7,0); x_mov_r64_imm32(6,0);
+    x_call_got(init_got);
+
+    x_call_got(method_got);
+    emit3(0x48,0x89,0xc7);
+    x_call_got(ctxnew_got);
+    x_mov_rbpN_r64(-24,0);
+    x_test_rax_rax();
+    int j_ctx_ok=x_jnz_rel32();
+    x_mov_r64_rbpN(7,-8); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+    x_mov_rax_imm32(-1); x_mov_rbpN_r64(-40,0); fail_patches[nfail++]=x_jmp_rel32();
+    x_patch_here(j_ctx_ok);
+
+    x_mov_r64_rbpN(7,-24);
+    x_call_got(sslnew_got);
+    x_mov_rbpN_r64(-32,0);
+    x_test_rax_rax();
+    int j_ssl_ok=x_jnz_rel32();
+    x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
+    x_mov_r64_rbpN(7,-8); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+    x_mov_rax_imm32(-1); x_mov_rbpN_r64(-40,0); fail_patches[nfail++]=x_jmp_rel32();
+    x_patch_here(j_ssl_ok);
+
+    if(!is_ipv6 && !is_ipv4){
+        int host_off=data_add_str(host);
+        x_mov_r64_rbpN(7,-32);
+        x_mov_r64_imm32(6,55);
+        x_mov_r64_imm32(2,0);
+        emit3(0x48,0x8d,0x0d); add_reloc(RELOC_DATA,code_len,host_off); emit_i32(0);
+        x_call_got(sslctrl_got);
+    }
+
+    x_mov_r64_rbpN(7,-32);
+    x_mov_r64_rbpN(6,-8);
+    x_call_got(setfd_got);
+    emit4(0x48,0x83,0xf8,0x01);
+    int j_setfd_ok=x_jz_rel32();
+    x_mov_r64_rbpN(7,-32); x_call_got(sslfree_got);
+    x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
+    x_mov_r64_rbpN(7,-8); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+    x_mov_rax_imm32(-1); x_mov_rbpN_r64(-40,0); fail_patches[nfail++]=x_jmp_rel32();
+    x_patch_here(j_setfd_ok);
+
+    x_mov_r64_rbpN(7,-32);
+    x_call_got(sslconnect_got);
+    emit4(0x48,0x83,0xf8,0x01);
+    int j_hs_ok=x_jz_rel32();
+    x_mov_r64_rbpN(7,-32); x_call_got(sslfree_got);
+    x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
+    x_mov_r64_rbpN(7,-8); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+    x_mov_rax_imm32(-1); x_mov_rbpN_r64(-40,0); fail_patches[nfail++]=x_jmp_rel32();
+    x_patch_here(j_hs_ok);
+
+    x_mov_r64_rbpN(7,-32);
+    emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,req_off); emit_i32(0);
+    x_mov_r64_imm32(2,req_len);
+    x_call_got(sslwrite_got);
+
+    /* read/print loop -- see the plain-HTTP branch's comment above for
+       why this loops instead of a single SSL_read/print (same bug,
+       same fix, TLS side). */
+    x_mov_qword_rbpN_imm32(-40,0); /* total=0 */
+
+    int loop_top2=code_len;
+    x_mov_r64_rbpN(7,-32);
+    emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0);
+    x_mov_r64_imm32(2,YS_TLS_RBUF_CAP-1);
+    x_call_got(sslread_got);
+    emit4(0x48,0x83,0xf8,0x00);
+    int j_have_chunk2=x_jg_rel32();
+    int j_loop_end2=x_jmp_rel32();
+    x_patch_here(j_have_chunk2);
+    x_mov_rbpN_r64(-16,0); /* n */
+
+    x_mov_r64_imm32(7,1);
+    emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0);
+    x_mov_r64_rbpN(2,-16);
+    x_mov_r64_imm32(0,1);
+    emit2(0x0f,0x05);
+
+    x_mov_r64_rbpN(0,-40); x_mov_r64_rbpN(1,-16);
+    emit3(0x48,0x01,0xc8); /* total += n */
+    x_mov_rbpN_r64(-40,0);
+
+    int jback2=x_jmp_rel32();
+    patch_i32(jback2,(int32_t)(loop_top2-(jback2+4)));
+    x_patch_here(j_loop_end2);
+
+    x_mov_r64_rbpN(7,-32); x_call_got(sslfree_got);
+    x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
+    x_mov_r64_rbpN(7,-8); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+
+    for(int i=0;i<nfail;i++) x_patch_here(fail_patches[i]);
+    x_mov_r64_rbpN(0,-40);
+    x_mov_rsp_rbp(); x_pop_rbp();
+}
+
 /*  loop/branch label stack  */
 #define LABEL_MAX 64
 static int break_stack[LABEL_MAX];   /* patch offsets for break */
@@ -2697,6 +2958,10 @@ static void compile_expr(Node *n){
            hijacked. */
         int is_y_net = n->left && n->left->kind==ND_DOT
             && strcmp(n->left->name,"net")==0
+            && n->left->left && n->left->left->kind==ND_IDENT
+            && strcmp(n->left->left->name,"y")==0;
+        int is_y_http = n->left && n->left->kind==ND_DOT
+            && strcmp(n->left->name,"http")==0
             && n->left->left && n->left->left->kind==ND_IDENT
             && strcmp(n->left->left->name,"y")==0;
         /* y.println(val) */
@@ -3730,8 +3995,282 @@ static void compile_expr(Node *n){
             x_mov_rsp_rbp(); x_pop_rbp();
             break;
         }
-        /* user function call — pass args in registers (SysV) */
-        /* translate "main" to "__ys_main" for call */
+        /* y.net.tls_listen(port, certfile, keyfile) -> server handle
+           (0..YS_TLSSRV_MAX-1) or -1. certfile/keyfile MUST be string
+           literals (PEM paths, loaded from disk at runtime) — same
+           literal-argument constraint as host/data elsewhere in this
+           file. Backed by its own small round-robin table
+           (g_tlssrv_table_off, {listen_fd, ctx} per slot) — a genuinely
+           separate handle space from the client-connection table above,
+           since a listening socket + its SSL_CTX are long-lived and
+           reused across many accepted connections, unlike a client
+           connection's one-shot {fd, ctx, ssl}. */
+        if(is_y_net && strcmp(fn,"tls_listen")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); break; }
+            tls_state_ensure();
+            dynlink_need_library("libssl.so.3");
+            int method_got=dynlink_import("TLS_server_method");
+            int ctxnew_got=dynlink_import("SSL_CTX_new");
+            int usecert_got=dynlink_import("SSL_CTX_use_certificate_file");
+            int usekey_got=dynlink_import("SSL_CTX_use_PrivateKey_file");
+            int ctxfree_got=dynlink_import("SSL_CTX_free");
+
+            int cbase=n->left?1:0;
+            Node *port_arg=(n->argc>cbase)?n->args[cbase]:NULL;
+            Node *cert_arg=(n->argc>cbase+1)?n->args[cbase+1]:NULL;
+            Node *key_arg=(n->argc>cbase+2)?n->args[cbase+2]:NULL;
+            int cert_off = (cert_arg && cert_arg->kind==ND_STR) ? data_add_str(cert_arg->sval) : data_add_str("");
+            int key_off  = (key_arg && key_arg->kind==ND_STR)  ? data_add_str(key_arg->sval)  : data_add_str("");
+
+            if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(0);
+            x_store_rip_slot(g_tls_argbuf_off+0);
+
+            int fail_patches[6]; int nfail=0;
+
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(48); /* -8 port -16 ctx -24 listen_fd -32 handle */
+
+            x_load_rip_slot(g_tls_argbuf_off+0);
+            x_mov_rbpN_r64(-8,0);
+
+            /* TLS_server_method() + SSL_CTX_new(method) */
+            x_call_got(method_got);
+            emit3(0x48,0x89,0xc7); /* rdi=method (mov rdi,rax) */
+            x_call_got(ctxnew_got);
+            x_mov_rbpN_r64(-16,0);
+            x_test_rax_rax();
+            int j_ctx_ok=x_jnz_rel32();
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_ctx_ok);
+
+            /* SSL_CTX_use_certificate_file(ctx, certfile, SSL_FILETYPE_PEM=1) */
+            x_mov_r64_rbpN(7,-16);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,cert_off); emit_i32(0); /* rsi=&certfile */
+            x_mov_r64_imm32(2,1); /* rdx=SSL_FILETYPE_PEM */
+            x_call_got(usecert_got);
+            emit4(0x48,0x83,0xf8,0x01); /* cmp rax,1 */
+            int j_cert_ok=x_jz_rel32();
+            x_mov_r64_rbpN(7,-16); x_call_got(ctxfree_got);
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_cert_ok);
+
+            /* SSL_CTX_use_PrivateKey_file(ctx, keyfile, SSL_FILETYPE_PEM=1) */
+            x_mov_r64_rbpN(7,-16);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,key_off); emit_i32(0); /* rsi=&keyfile */
+            x_mov_r64_imm32(2,1);
+            x_call_got(usekey_got);
+            emit4(0x48,0x83,0xf8,0x01);
+            int j_key_ok=x_jz_rel32();
+            x_mov_r64_rbpN(7,-16); x_call_got(ctxfree_got);
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_key_ok);
+
+            /* __ys_net_listen(port) -- the exact same socket/bind/listen
+               subroutine y.net.listen() itself calls; reused rather than
+               re-implemented here. */
+            x_mov_r64_rbpN(7,-8);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_listen"); }
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_listen_ok=x_jge_rel32();
+            x_mov_r64_rbpN(7,-16); x_call_got(ctxfree_got);
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_listen_ok);
+            x_mov_rbpN_r64(-24,0); /* listen_fd */
+
+            /* allocate a server handle (round-robin, YS_TLSSRV_MAX is a
+               power of 2) and store {listen_fd, ctx} into that slot. */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,g_tlssrv_next_off); emit_i32(0); /* r11=&next */
+            emit3(0x49,0x8b,0x03); /* rax=[r11] (handle to use) */
+            x_mov_rbpN_r64(-32,0);
+            emit3(0x48,0x89,0xc1); /* mov rcx,rax */
+            emit3(0x48,0xff,0xc1); /* inc rcx */
+            emit4(0x48,0x83,0xe1,(YS_TLSSRV_MAX-1)); /* and rcx,1 */
+            emit3(0x49,0x89,0x0b); /* mov [r11],rcx */
+
+            x_mov_r64_rbpN(0,-32); /* rax=handle */
+            emit3(0x48,0x69,0xc0); emit_i32(YS_TLSSRV_SLOT_SIZE); /* imul rax,rax,16 */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,g_tlssrv_table_off); emit_i32(0); /* lea r11,[rip+srv table] */
+            emit3(0x4c,0x01,0xd8); /* add rax,r11 -- rax=&srvtable[handle] */
+            x_mov_r64_rbpN(1,-24); x_mov_rax8_r64(0,1); /* [rax+0]=listen_fd */
+            x_mov_r64_rbpN(1,-16); x_mov_rax8_r64(8,1); /* [rax+8]=ctx */
+
+            x_mov_r64_rbpN(0,-32); /* rax=handle (final return value) */
+
+            for(int i=0;i<nfail;i++) x_patch_here(fail_patches[i]);
+            x_mov_rsp_rbp(); x_pop_rbp();
+            break;
+        }
+        /* y.net.tls_accept(server_handle) -> connection handle
+           (0..YS_TLS_MAX_CONN-1) or -1. Blocks for one client, completes
+           a server-side handshake, and stores the resulting connection
+           into the SAME client-connection table tls_connect uses --
+           tls_send/tls_recv_print/tls_close work on an accepted
+           connection exactly the way they work on one tls_connect
+           opened, with one deliberate difference: the ctx field is
+           stored as 0 (not the server's real, shared SSL_CTX), so that
+           tls_close's unconditional SSL_CTX_free(ctx) call is a no-op
+           for an accepted connection instead of freeing the listening
+           socket's shared context out from under future tls_accept
+           calls (SSL_CTX_free(NULL) is a documented no-op, the same
+           property tls_close already relies on for SSL_free). */
+        if(is_y_net && strcmp(fn,"tls_accept")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); break; }
+            tls_state_ensure();
+            dynlink_need_library("libssl.so.3");
+            int sslnew_got=dynlink_import("SSL_new");
+            int setfd_got=dynlink_import("SSL_set_fd");
+            int sslaccept_got=dynlink_import("SSL_accept");
+            int sslfree_got=dynlink_import("SSL_free");
+
+            int cbase=n->left?1:0;
+            Node *srv_arg=(n->argc>cbase)?n->args[cbase]:NULL;
+
+            if(srv_arg) compile_expr(srv_arg); else x_mov_rax_imm32(-1);
+            x_store_rip_slot(g_tls_argbuf_off+0);
+
+            int fail_patches[6]; int nfail=0;
+
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(64); /* -8 srv_h -16 srv_slot -24 client_fd -32 ctx -40 ssl -48 conn_h */
+
+            x_load_rip_slot(g_tls_argbuf_off+0);
+            x_mov_rbpN_r64(-8,0);
+
+            emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+            int j_ge0=x_jge_rel32();
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_ge0);
+            emit4(0x48,0x83,0xf8,YS_TLSSRV_MAX); /* cmp rax,2 */
+            int j_lt=x_jl_rel32();
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_lt);
+
+            /* server slot address: table_base + handle*16 */
+            x_mov_r64_rbpN(0,-8);
+            emit3(0x48,0x69,0xc0); emit_i32(YS_TLSSRV_SLOT_SIZE);
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,g_tlssrv_table_off); emit_i32(0);
+            emit3(0x4c,0x01,0xd8);
+            x_mov_rbpN_r64(-16,0);
+
+            /* __ys_net_accept(listen_fd) — blocks for one client */
+            x_mov_r64_rbpN(0,-16); x_mov_r64_rax8(7,0); /* rdi=[srv_slot+0]=listen_fd */
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_accept"); }
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_acc_ok=x_jge_rel32();
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_acc_ok);
+            x_mov_rbpN_r64(-24,0); /* client_fd */
+
+            /* SSL_new(ctx) — ctx belongs to the listening socket, reload
+               fresh from the server slot (never trust a register across
+               the __ys_net_accept call above). */
+            x_mov_r64_rbpN(0,-16); x_mov_r64_rax8(1,8); /* rcx=[srv_slot+8]=ctx */
+            x_mov_rbpN_r64(-32,1);
+            emit3(0x48,0x89,0xcf); /* rdi=ctx (mov rdi,rcx) */
+            x_call_got(sslnew_got);
+            x_mov_rbpN_r64(-40,0);
+            x_test_rax_rax();
+            int j_ssl_ok=x_jnz_rel32();
+            x_mov_r64_rbpN(7,-24); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_ssl_ok);
+
+            /* SSL_set_fd(ssl, client_fd) */
+            x_mov_r64_rbpN(7,-40);
+            x_mov_r64_rbpN(6,-24);
+            x_call_got(setfd_got);
+            emit4(0x48,0x83,0xf8,0x01);
+            int j_setfd_ok=x_jz_rel32();
+            x_mov_r64_rbpN(7,-40); x_call_got(sslfree_got);
+            x_mov_r64_rbpN(7,-24); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_setfd_ok);
+
+            /* SSL_accept(ssl) — server-side handshake */
+            x_mov_r64_rbpN(7,-40);
+            x_call_got(sslaccept_got);
+            emit4(0x48,0x83,0xf8,0x01);
+            int j_hs_ok=x_jz_rel32();
+            x_mov_r64_rbpN(7,-40); x_call_got(sslfree_got);
+            x_mov_r64_rbpN(7,-24); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_hs_ok);
+
+            /* handshake succeeded — allocate a CLIENT-table connection
+               handle (same table, same counter, same slot layout
+               tls_connect uses) and store {client_fd, 0, ssl} — ctx=0
+               deliberately, see the comment above this whole block. */
+            emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,g_tls_next_off); emit_i32(0);
+            emit3(0x49,0x8b,0x03);
+            x_mov_rbpN_r64(-48,0);
+            emit3(0x48,0x89,0xc1);
+            emit3(0x48,0xff,0xc1);
+            emit4(0x48,0x83,0xe1,(YS_TLS_MAX_CONN-1));
+            emit3(0x49,0x89,0x0b);
+
+            x_mov_r64_rbpN(0,-48);
+            x_tls_slot_addr();
+            x_mov_r64_rbpN(1,-24); x_mov_rax8_r64(0,1);  /* [rax+0]=client_fd */
+            x_mov_r64_imm32(1,0);  x_mov_rax8_r64(8,1);  /* [rax+8]=0 (no per-connection ctx) */
+            x_mov_r64_rbpN(1,-40); x_mov_rax8_r64(16,1); /* [rax+16]=ssl */
+
+            x_mov_r64_rbpN(0,-48); /* rax=connection handle (final return value) */
+
+            for(int i=0;i<nfail;i++) x_patch_here(fail_patches[i]);
+            x_mov_rsp_rbp(); x_pop_rbp();
+            break;
+        }
+        /* y.http.get_print(url) -> bytes received or -1, response
+           printed to stdout. url MUST be a string literal (scheme,
+           host, optional :port, optional path all parsed at compile
+           time by parse_http_url — never at runtime, so there's no
+           argument-staging/frame-switch concern here at all: nothing
+           in emit_http_request is ever compiled from a Node*). Chooses
+           TLS or plain TCP automatically from the URL's scheme. */
+        if(is_y_http && strcmp(fn,"get_print")==0){
+            int cbase=n->left?1:0;
+            Node *url_arg=(n->argc>cbase)?n->args[cbase]:NULL;
+            char host[256]; char path[256]; int port=0, use_tls=0;
+            if(!url_arg || url_arg->kind!=ND_STR ||
+               !parse_http_url(url_arg->sval,&use_tls,host,sizeof(host),&port,path,sizeof(path))){
+                x_mov_rax_imm32(-1); break;
+            }
+            char req[560];
+            int reqlen=snprintf(req,sizeof(req),
+                "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",path,host);
+            if(reqlen<0||reqlen>=(int)sizeof(req)){ x_mov_rax_imm32(-1); break; }
+            int req_off=data_add_bytes((const uint8_t*)req,reqlen);
+            emit_http_request(host,port,use_tls,req_off,reqlen);
+            break;
+        }
+        /* y.http.post_print(url, body, content_type) -> bytes received
+           or -1, response printed to stdout. url/body/content_type
+           MUST all be string literals, same reasoning as get_print
+           above (and the same reasoning tls_send's data argument
+           already has one function up). content_type defaults to
+           "text/plain" if omitted. */
+        if(is_y_http && strcmp(fn,"post_print")==0){
+            int cbase=n->left?1:0;
+            Node *url_arg=(n->argc>cbase)?n->args[cbase]:NULL;
+            Node *body_arg=(n->argc>cbase+1)?n->args[cbase+1]:NULL;
+            Node *ctype_arg=(n->argc>cbase+2)?n->args[cbase+2]:NULL;
+            char host[256]; char path[256]; int port=0, use_tls=0;
+            if(!url_arg || url_arg->kind!=ND_STR ||
+               !parse_http_url(url_arg->sval,&use_tls,host,sizeof(host),&port,path,sizeof(path))){
+                x_mov_rax_imm32(-1); break;
+            }
+            const char *body = (body_arg && body_arg->kind==ND_STR) ? body_arg->sval : "";
+            const char *ctype = (ctype_arg && ctype_arg->kind==ND_STR) ? ctype_arg->sval : "text/plain";
+            int bodylen=ystrlen(body);
+            char req[1600];
+            int reqlen=snprintf(req,sizeof(req),
+                "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+                path,host,ctype,bodylen,body);
+            if(reqlen<0||reqlen>=(int)sizeof(req)){ x_mov_rax_imm32(-1); break; }
+            int req_off=data_add_bytes((const uint8_t*)req,reqlen);
+            emit_http_request(host,port,use_tls,req_off,reqlen);
+            break;
+        }
         char fn_call_name[68];
         if(strcmp(fn,"main")==0){ snprintf(fn_call_name,68,"__ys_main"); fn=fn_call_name; }
         /* save caller-saved registers we care about: none needed now */

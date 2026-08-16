@@ -129,7 +129,17 @@ jobs:
           # generated .y source, so Yolish's own string-literal lexer is
           # the thing that turns it into an actual CR byte at compile
           # time -- not printf doing that a layer too early.
-          printf 'let h = y.net.tls_connect("example.com", 443)\ny.println(h)\nif h >= 0 {\n    y.net.tls_send(h, "GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n")\n    y.net.tls_recv_print(h, 300)\n    y.net.tls_close(h)\n}\n-- invalid handle must fail cleanly, not crash, on all three ops\ny.println(y.net.tls_send(99, "x"))\ny.println(y.net.tls_recv_print(99, 10))\ny.net.tls_close(99)\ny.println("done")\n' \
+          # maxlen=4000 (not the original 300): tls_recv_print is a
+          # single read, by design (see the v2.31 changelog entry on why
+          # the HTTP client needed its own read loop instead of reusing
+          # this). A real run against example.com showed why 300 wasn't
+          # enough: Cloudflare's header set plus chunked-transfer-encoding's
+          # leading chunk-size line alone came close to that, cutting the
+          # single read off before the actual "Example Domain" body ever
+          # arrived -- a passing connect/handshake with a failing content
+          # check, not a crash. 4000 leaves comfortable headroom under the
+          # 4095-byte buffer cap.
+          printf 'let h = y.net.tls_connect("example.com", 443)\ny.println(h)\nif h >= 0 {\n    y.net.tls_send(h, "GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n")\n    y.net.tls_recv_print(h, 4000)\n    y.net.tls_close(h)\n}\n-- invalid handle must fail cleanly, not crash, on all three ops\ny.println(y.net.tls_send(99, "x"))\ny.println(y.net.tls_recv_print(99, 10))\ny.net.tls_close(99)\ny.println("done")\n' \
             > /tmp/tls_ci.y
           ./ys -c /tmp/tls_ci.y --target linux -o /tmp/tls_ci_bin
           out=$(timeout 20 /tmp/tls_ci_bin)

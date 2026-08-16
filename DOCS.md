@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.30  
+**Version:** v2.31  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2515,8 +2515,9 @@ times out rather than blocking).
 `y.net.udp_close` is literally `y.net.close` under the hood — closing
 a UDP socket is identical to closing a TCP one at the OS level.
 
-Not implemented for native compilation, same tier as `y.net.tls_*`/
-`y.http.*`.
+Implemented for native compilation too — see `y.net.udp_socket`/
+`udp_bind`/`udp_send`/`udp_recv_print`/`udp_recv_reply_print`/
+`udp_close` in the "Native compilation" section further down.
 
 ### TLS / HTTPS: y.net.tls_*
 
@@ -2842,13 +2843,108 @@ for a non-Linux `--target`, since they depend on the same ELF-only
 dynlink machinery as `tls_test`/`tls_handshake_test`/`tls_get_test`
 above.
 
+**Native TLS server (`ys -c`, Linux only — v2.31):**
 
+```yolish
+y.net.tls_listen(port, certfile, keyfile) -- certfile/keyfile MUST be
+                                           -- string literals (PEM
+                                           -- paths, loaded from disk
+                                           -- at runtime). Returns a
+                                           -- server handle (0 or 1)
+                                           -- or -1.
+y.net.tls_accept(server_handle)           -- blocks for one client,
+                                           -- completes a server-side
+                                           -- handshake. Returns a
+                                           -- connection handle in the
+                                           -- SAME id space as
+                                           -- tls_connect's — use
+                                           -- tls_send/tls_recv_print/
+                                           -- tls_close on it exactly
+                                           -- as you would a client
+                                           -- connection.
+```
+
+```yolish
+let srv = y.net.tls_listen(9443, "cert.pem", "key.pem")
+let conn = y.net.tls_accept(srv)
+if conn >= 0 {
+    y.net.tls_recv_print(conn, 500)
+    y.net.tls_send(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+    y.net.tls_close(conn)
+}
+```
+
+Backed by its own small round-robin table (2 slots, `{listen_fd,
+ctx}` each) — a separate handle space from the client-connection
+table, since a listening socket's `SSL_CTX` is long-lived and shared
+across every connection `tls_accept` produces from it, unlike a
+client connection's one-shot `{fd, ctx, ssl}`. Accepted connections
+are stored into the regular client-connection table with `ctx` set to
+0 (not the listening socket's real, shared context) specifically so
+that `tls_close` on an accepted connection doesn't free the shared
+context out from under future `tls_accept` calls — `SSL_CTX_free(0)`
+is a documented no-op, the same property `tls_close` already relies
+on for `SSL_free`. **At most 2 listening sockets** can be open at
+once, same reuse-oldest-slot behavior as the connection table above.
+Verified with a real self-signed cert against a real client
+(`y.net.tls_connect`) in the same process pair, sending in both
+directions.
 
 Not implemented for native compilation on **macOS** — macOS syscall
 numbers and calling convention differ substantially from Linux's, and
 this hasn't been ported yet (also tracked in ROADMAP.md). Calling
 `y.net.*` while compiling for macOS or Windows hits the "unresolved
 symbol" safety net (a clean compile failure, not a broken binary).
+
+**Native HTTP client (`ys -c`, Linux only — v2.31):**
+
+```yolish
+y.http.get_print(url)                      -- url MUST be a string
+                                            -- literal. Returns bytes
+                                            -- received or -1,
+                                            -- response printed to
+                                            -- stdout.
+y.http.post_print(url, body, content_type) -- body/content_type MUST
+                                            -- also be string
+                                            -- literals. content_type
+                                            -- defaults to
+                                            -- "text/plain" if
+                                            -- omitted.
+```
+
+```yolish
+y.http.get_print("https://example.com/")
+y.http.post_print("http://127.0.0.1:8080/submit",
+                   "name=yolish&x=1", "application/x-www-form-urlencoded")
+```
+
+`http://` vs `https://` in the URL picks plain TCP or TLS
+automatically — scheme, host, optional `:port`, and optional path are
+all parsed out of the URL literal at *compile time* (never at
+runtime), so there's no map/struct return type needed here either:
+just a request built once, at compile time, and a
+connect-send-read/print-close sequence, reusing the exact same
+`__ys_net_connect*`/`y.net.tls_connect` machinery described above —
+this is a thin composition layer, not a separate networking
+implementation.
+
+Reads the response in a loop until the connection closes, not a
+single read — a real bug this rebuild's testing caught: a real local
+test server sent HTTP headers and body as two separate writes, which
+arrived as two separate TCP segments, and a single read (the same
+one-shot approach `y.net.recv_print`/`y.net.tls_recv_print` use, by
+design, elsewhere in this file) only ever captured the headers,
+silently dropping the body with no error. `y.net.recv_print`/
+`tls_recv_print` themselves are unchanged — this loop is local to the
+HTTP client, layered on top of the same underlying connect/send
+primitives, not a change to their documented one-shot behavior.
+
+No redirects, no cookies, no chunked-transfer-encoding decoding (a
+chunked response's `\r\n`-prefixed chunk-size lines print as literal
+text, same as the interpreter/VM version's caveat above) — this is a
+genuinely minimal client, thinner even than the interpreter/VM one
+described in section 44a: no status/header/body parsing at all, just
+the connection sequence and a raw print of whatever comes back.
 
 ---
 
@@ -2927,7 +3023,14 @@ with a clear error rather than silently trying plaintext or crashing.
 - This is a basic client for straightforward request/response use, not
   a full-featured one.
 
-Not implemented for native compilation, same tier as `y.net.tls_*`.
+Implemented for native compilation too (v2.31) — see "Native HTTP
+client" further down in the "Native compilation" section. It's a
+narrower, print-based counterpart (`y.http.get_print`/`post_print`,
+no returned map, same "print instead of return" reasoning as
+`y.net.recv_print`/`tls_recv_print`), built directly on
+`y.net.connect`/`y.net.tls_connect` under the hood — not the same
+implementation as this interpreter/VM version, which does return a
+map and does follow redirects.
 
 ---
 
