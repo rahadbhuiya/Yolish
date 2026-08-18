@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.31  
+**Version:** v2.32  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2626,9 +2626,12 @@ y.net.udp_bind(port)            -- a UDP socket bound to 0.0.0.0:port
                                  -- for a server, or -1
 y.net.udp_send(sock, host, port, data)
                                  -- host and data MUST be string
-                                 -- literals. host is an IPv4 dotted-
-                                 -- decimal literal only for now, not a
-                                 -- hostname. Returns bytes sent, or -1.
+                                 -- literals. host may be an IPv4
+                                 -- dotted-decimal literal or a hostname
+                                 -- literal (resolved via DNS at
+                                 -- runtime, same as y.net.connect's
+                                 -- hostname branch). Returns bytes
+                                 -- sent, or -1.
 y.net.udp_recv_print(sock, maxlen)
                                  -- reads one datagram and prints its
                                  -- payload to stdout. The sender's
@@ -2743,6 +2746,19 @@ tried first — an A success skips the AAAA attempt entirely. IPv6
 literals ("::1", "2001:db8::1") skip DNS the same way IPv4 literals do:
 parsed straight to 16 bytes at compile time and connected directly.
 
+**`/etc/hosts` is never consulted, only real DNS.** glibc's
+`getaddrinfo` normally checks `/etc/hosts` before ever sending a DNS
+query — this hand-written resolver has no such step, since it isn't
+going through libc at all. The practical surprise this causes: `"localhost"`
+is a bad hostname to test either `y.net.connect` or `y.net.udp_send`
+with. It conventionally resolves via `/etc/hosts`, not DNS, so asking
+a real resolver about it over the wire typically comes back
+NXDOMAIN/no-answer rather than `127.0.0.1` — a `-1` for `"localhost"`
+specifically isn't a bug, it's this resolver's known scope. `"127.0.0.1"`
+(an IPv4 literal) works fine for loopback testing, since that skips
+DNS entirely; testing hostname resolution itself needs a real,
+publicly-DNS-resolvable name (`"example.com"`, `"dns.google"`, etc.).
+
 **Native UDP (`ys -c`, Linux):** `udp_socket`/`udp_bind`/`udp_send`/
 `udp_close` map directly onto the interpreter/VM versions with no
 capability loss. `udp_recv` is where the native backend's limits show
@@ -2762,6 +2778,19 @@ most of the time (an echo/reply server) without needing a map or
 string type to do it — a program that needs the raw address for
 something else (logging it, filtering by it, etc.) doesn't have a
 native path yet.
+
+`udp_send`'s `host` accepts a hostname literal as well as an IPv4
+literal (v2.32) — resolved via the same DNS-query-at-compile-time,
+resolve-at-runtime approach `y.net.connect`'s hostname branch uses,
+through a dedicated `__ys_net_udp_send_host` runtime routine rather
+than a change to `y.net.connect`'s own proven resolver code
+(`__ys_net_connect_host`, left untouched — see that function's own
+comment, and `__ys_net_udp_send_host`'s, for why duplication was the
+deliberate, lower-risk choice over refactoring shared code out of an
+already-working path). Unlike the TCP side, there's no multi-record
+retry here: UDP's `sendto` either succeeds against the first A record
+found or it doesn't, so this stops at the first one rather than trying
+several the way `y.net.connect`'s hostname resolution does for TCP.
 
 **Native dynamic linking (`ys -c`, Linux):** everything described so
 far in this section is fully static — no libc, no dynamic linking at

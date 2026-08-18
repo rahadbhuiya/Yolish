@@ -2446,6 +2446,438 @@ static void emit_helpers(void){
             x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
         }
 
+        /* __ys_net_udp_send_host(rdi=dns_query_ptr, rsi=dns_query_len,
+             rdx=port, rcx=sock, r8=data_ptr, r9=data_len) -> rax=bytes
+             sent or -1
+
+           Companion to __ys_net_udp_send above, for when y.net.udp_send's
+           host argument is a hostname literal rather than a dotted-
+           decimal IP — closing the gap that function's own doc comment
+           called out as a reasonable follow-up.
+
+           The resolver-discovery, DNS-query send/receive, and QNAME-skip
+           blocks below (down to the "ancount" comment) are a deliberate
+           byte-for-byte reuse of __ys_net_connect_host's own logic above
+           — not a re-transcription. __ys_net_connect_host itself is left
+           completely untouched: it's proven, real-world-tested code (see
+           its own comments — verified live against several CNAME-chained
+           hosts), and refactoring it to share this logic risked
+           introducing a regression into that already-working TCP path
+           for the sake of this narrower UDP one. Duplication was the
+           lower-risk choice here.
+
+           The answer-record loop past that point is genuinely simpler
+           than __ys_net_connect_host's, not just copied: TCP's version
+           tries actually connecting to each A record in turn (since some
+           may be unreachable) and only gives up after all of them fail.
+           UDP has no such notion — sendto() on a resolved IP either
+           succeeds or it doesn't, there's nothing to "try connecting" to
+           first — so this loop simply takes the *first* A record it
+           finds and stops, with none of the non-blocking-connect/poll/
+           SO_ERROR machinery that exists solely to bound each TCP
+           connection attempt.
+
+           Stack layout (frame = 976 bytes; offsets -8 through -176 and
+           the resolv_buf/resp_buf regions below match
+           __ys_net_connect_host's exactly, since that portion of the
+           code is a direct copy and reusing the same offsets keeps it
+           that way byte-for-byte):
+             -8    dns_query_ptr (arg)
+             -16   dns_query_len (arg)
+             -24   port (arg)
+             -32   resolver_ip[4]
+             -40   udp_fd (the resolver-query socket, not the caller's)
+             -48   resolv.conf fd
+             -56   resolv.conf bytes_read
+             -64   DNS response recv_len
+             -72   pos / octet accumulator (reused, same as __ys_net_connect_host)
+             -80   ancount / octet_idx (reused, same as __ys_net_connect_host)
+             -88   loop_i
+             -104  found_ip[4]
+             -168  rr_type (scratch)
+             -176  rr_rdlen (scratch)
+             -432  resolv_buf[256]
+             -944  resp_buf[512]
+             -952  sock (arg — the caller's UDP socket, unrelated to udp_fd above)
+             -960  data_ptr (arg)
+             -968  data_len (arg) */
+        sym_define("__ys_net_udp_send_host",code_len);
+        {
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit3(0x48,0x81,0xec); emit_i32(976); /* sub rsp,976 */
+
+            x_mov_rbpN32_r64(-8,7);   /* query ptr */
+            x_mov_rbpN32_r64(-16,6);  /* query len */
+            x_mov_rbpN32_r64(-24,2);  /* port */
+            x_mov_rbpN32_r64(-952,1); /* sock */
+            /* r8/r9 aren't in the plain 0..7 register-encoding set
+               x_mov_rbpN32_r64 uses (it's rax..rdi only), so move them
+               through rax first rather than trying to pass 8/9 as a
+               "reg" argument. */
+            emit3(0x4c,0x89,0xc0);   /* mov rax,r8 */
+            x_mov_rbpN32_r64(-960,0); /* data_ptr */
+            emit3(0x4c,0x89,0xc8);   /* mov rax,r9 */
+            x_mov_rbpN32_r64(-968,0); /* data_len */
+
+            /* resolver_ip defaults to 8.8.8.8 */
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-32);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-31);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-30);
+            x_mov_r64_imm32(0,8); x_mov_byte_rbpN32_al(-29);
+
+            /* ---- try /etc/resolv.conf for a better resolver ---- */
+            int resolv_path_off = data_add_str("/etc/resolv.conf");
+            x_lea_arg1_data(resolv_path_off);
+            x_mov_r64_imm32(6,0);
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,2); /* SYS_open */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_conf_open_fail = x_jl_rel32();
+            x_mov_rbpN32_r64(-48,0);
+
+            x_mov_r64_rbpN32(7,-48);
+            x_lea_r64_rbpN32(6,-432);
+            x_mov_r64_imm32(2,255);
+            x_mov_r64_imm32(0,0); /* SYS_read */
+            emit2(0x0f,0x05);
+            x_mov_rbpN32_r64(-56,0);
+
+            x_mov_r64_rbpN32(7,-48);
+            x_mov_r64_imm32(0,3); /* SYS_close */
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(0,-56);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_bytesread_le0 = x_jle_rel32();
+
+            x_mov_qword_rbpN32_imm32(-88,0);
+            int search_loop = code_len;
+            x_mov_r64_rbpN32(0,-88);
+            x_mov_r64_rbpN32(1,-56);
+            emit4(0x48,0x83,0xe9,0x0b);
+            emit3(0x48,0x39,0xc8);
+            int j_search_end = x_jge_rel32();
+
+            x_lea_r64_rbpN32(3,-432);
+            x_mov_r64_rbpN32(0,-88);
+            emit3(0x48,0x01,0xc3);
+
+            int needle_off = data_add_str("nameserver ");
+            emit3(0x48,0x8d,0x35);
+            add_reloc(RELOC_DATA,code_len,needle_off); emit_i32(0);
+
+            x_mov_r64_imm32(1,0);
+            int cmp_loop = code_len;
+            emit4(0x48,0x83,0xf9,0x0b);
+            int j_cmp_done = x_jge_rel32();
+            x_mov_al_rbx_idx(1);
+            emit3(0x8a,0x14,0x0e);
+            emit2(0x38,0xd0);
+            int j_byte_ne = x_jnz_rel32();
+            emit3(0x48,0xff,0xc1);
+            int j_cmp_back = x_jmp_rel32();
+            patch_i32(j_cmp_back,(int32_t)(cmp_loop-(j_cmp_back+4)));
+
+            x_patch_here(j_byte_ne);
+            x_mov_r64_rbpN32(0,-88);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-88,0);
+            int j_search_back = x_jmp_rel32();
+            patch_i32(j_search_back,(int32_t)(search_loop-(j_search_back+4)));
+
+            x_patch_here(j_cmp_done);
+            emit3(0x48,0x8d,0x4b); emit1(0x0b);
+
+            x_mov_qword_rbpN32_imm32(-72,0);
+            x_mov_qword_rbpN32_imm32(-80,0);
+
+            int parse_ip_loop = code_len;
+            x_lea_r64_rbpN32(2,-432);
+            x_mov_r64_rbpN32(0,-56);
+            emit3(0x48,0x01,0xc2);
+            emit3(0x48,0x39,0xd1);
+            int j_parse_ip_ge = x_jge_rel32();
+            emit3(0x0f,0xb6,0x01);
+            emit2(0x3c,0x2e);
+            int j_not_dot = x_jnz_rel32();
+
+            x_mov_r64_rbpN32(0,-80);
+            x_lea_r64_rbpN32(3,-32);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_rbx_idx_dl(0);
+            x_mov_r64_rbpN32(0,-80);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-80,0);
+            x_mov_qword_rbpN32_imm32(-72,0);
+            int j_to_next1 = x_jmp_rel32();
+
+            x_patch_here(j_not_dot);
+            emit2(0x3c,0x30);
+            int j_lt0 = x_jl_rel32();
+            emit2(0x3c,0x39);
+            int j_gt9 = x_jg_rel32();
+            emit2(0x2c,0x30);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN32(2,-72);
+            emit4(0x48,0x6b,0xd2,0x0a);
+            emit3(0x48,0x01,0xc2);
+            x_mov_rbpN32_r64(-72,2);
+
+            x_patch_here(j_to_next1);
+            emit3(0x48,0xff,0xc1);
+            int j_parse_back = x_jmp_rel32();
+            patch_i32(j_parse_back,(int32_t)(parse_ip_loop-(j_parse_back+4)));
+
+            x_patch_here(j_parse_ip_ge);
+            x_patch_here(j_lt0);
+            x_patch_here(j_gt9);
+
+            x_mov_r64_rbpN32(0,-80);
+            emit4(0x48,0x83,0xf8,0x03);
+            int j_bad_octetcount = x_jnz_rel32();
+            x_lea_r64_rbpN32(3,-32);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_rbx_idx_dl(0);
+            x_patch_here(j_bad_octetcount);
+
+            x_patch_here(j_conf_open_fail);
+            x_patch_here(j_bytesread_le0);
+            x_patch_here(j_search_end);
+
+            /* ---- UDP socket (to the resolver, not the caller's) ---- */
+            x_mov_r64_imm32(7,2);
+            x_mov_r64_imm32(6,2);
+            x_mov_r64_imm32(2,0);
+            x_mov_r64_imm32(0,41); /* SYS_socket */
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_udp_fail = x_jl_rel32();
+            x_mov_rbpN32_r64(-40,0);
+
+            x_mov_qword_rbpN32_imm32(-128,3);
+            x_mov_qword_rbpN32_imm32(-120,0);
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_imm32(6,1);
+            x_mov_r64_imm32(2,20);
+            x_lea_r10_rbpN32(-128);
+            x_mov_r8d_imm32(16);
+            x_mov_r64_imm32(0,54); /* SYS_setsockopt */
+            emit2(0x0f,0x05);
+
+            x_lea_r64_rbpN32(3,-144);
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00);
+            x_mov_r64_imm32(0,53);
+            emit2(0x86,0xc4);
+            emit4(0x66,0x89,0x43,0x02);
+            x_mov_r64_rbpN32(0,-32);
+            emit3(0x89,0x43,0x04);
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
+
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_rbpN32(6,-8);
+            x_mov_r64_rbpN32(2,-16);
+            x_mov_r10d_imm32(0);
+            x_lea_r8_rbpN32(-144);
+            x_mov_r9d_imm32(16);
+            x_mov_r64_imm32(0,44); /* SYS_sendto (query, to resolver) */
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(7,-40);
+            x_lea_r64_rbpN32(6,-944);
+            x_mov_r64_imm32(2,512);
+            x_mov_r10d_imm32(0);
+            x_mov_r8d_imm32(0);
+            x_mov_r9d_imm32(0);
+            x_mov_r64_imm32(0,45); /* SYS_recvfrom (response, from resolver) */
+            emit2(0x0f,0x05);
+            x_mov_rbpN32_r64(-64,0);
+
+            x_mov_r64_rbpN32(7,-40);
+            x_mov_r64_imm32(0,3);
+            emit2(0x0f,0x05);
+
+            x_mov_r64_rbpN32(0,-64);
+            emit4(0x48,0x83,0xf8,0x00);
+            int j_recv_fail = x_jle_rel32();
+
+            /* ---- parse DNS response: skip header(12) + QNAME + QTYPE/QCLASS ---- */
+            x_mov_qword_rbpN32_imm32(-72,12);
+            int qname_loop = code_len;
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_r64_rbpN32(1,-64);
+            emit3(0x48,0x39,0xc8);
+            int j_qname_oob = x_jge_rel32();
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_al_rbx_idx(0);
+            emit2(0x84,0xc0);
+            int j_qname_end = x_jz_rel32();
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xff,0xc0);
+            x_mov_r64_rbpN32(1,-72);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-72,0);
+            int j_qname_back = x_jmp_rel32();
+            patch_i32(j_qname_back,(int32_t)(qname_loop-(j_qname_back+4)));
+
+            x_patch_here(j_qname_oob);
+            x_patch_here(j_qname_end);
+            x_mov_r64_rbpN32(0,-72);
+            emit4(0x48,0x83,0xc0,0x05);
+            x_mov_rbpN32_r64(-72,0);
+
+            x_lea_r64_rbpN32(3,-944);
+            emit3(0x0f,0xb6,0x43); emit1(0x06);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-80,0);
+            emit3(0x0f,0xb6,0x43); emit1(0x07);
+            x_mov_r64_rbpN32(1,-80);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-80,0); /* ancount */
+
+            x_mov_qword_rbpN32_imm32(-88,0); /* loop_i = 0 */
+
+            /* ---- answer-record loop: simplified for UDP -- take the
+               first A record found and stop; no connect/poll needed. ---- */
+            int rr_loop = code_len;
+            x_mov_r64_rbpN32(0,-88);
+            x_mov_r64_rbpN32(1,-80);
+            emit3(0x48,0x39,0xc8);
+            int j_rr_done1 = x_jge_rel32();
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_r64_rbpN32(1,-64);
+            emit3(0x48,0x39,0xc8);
+            int j_rr_done2 = x_jge_rel32();
+
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_al_rbx_idx(2);
+            emit2(0x24,0xc0);
+            emit2(0x3c,0xc0);
+            int j_not_ptr = x_jnz_rel32();
+            x_mov_r64_rbpN32(0,-72);
+            emit4(0x48,0x83,0xc0,0x02);
+            x_mov_rbpN32_r64(-72,0);
+            int j_name_done = x_jmp_rel32();
+
+            x_patch_here(j_not_ptr);
+            int name_walk_loop = code_len;
+            x_lea_r64_rbpN32(3,-944);
+            x_mov_r64_rbpN32(2,-72);
+            x_mov_al_rbx_idx(2);
+            emit2(0x84,0xc0);
+            int j_name_walk_zero = x_jz_rel32();
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xff,0xc0);
+            x_mov_r64_rbpN32(1,-72);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-72,0);
+            int j_name_walk_back = x_jmp_rel32();
+            patch_i32(j_name_walk_back,(int32_t)(name_walk_loop-(j_name_walk_back+4)));
+            x_patch_here(j_name_walk_zero);
+            x_mov_r64_rbpN32(0,-72);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-72,0);
+            x_patch_here(j_name_done);
+
+            x_mov_r64_rbpN32(0,-72);
+            x_lea_r64_rbpN32(3,-944);
+            emit3(0x48,0x89,0xda);
+            emit3(0x48,0x01,0xc2);
+
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-168,0);
+            emit3(0x48,0xff,0xc2);
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN32(1,-168);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-168,0); /* rr_type */
+            emit3(0x48,0xff,0xc2);
+
+            emit4(0x48,0x83,0xc2,0x06);
+
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            emit3(0x48,0xc1,0xe0); emit1(0x08);
+            x_mov_rbpN32_r64(-176,0);
+            emit3(0x48,0xff,0xc2);
+            emit2(0x8a,0x02);
+            emit3(0x0f,0xb6,0xc0);
+            x_mov_r64_rbpN32(1,-176);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-176,0); /* rr_rdlen */
+            emit3(0x48,0xff,0xc2);
+
+            emit3(0x48,0x89,0xd0);
+            emit3(0x48,0x29,0xd8);
+            x_mov_rbpN32_r64(-72,0); /* pos = RDATA start */
+
+            x_mov_r64_rbpN32(0,-168);
+            emit4(0x48,0x83,0xf8,0x01); /* rr_type==1 (A)? */
+            int j_type_no = x_jnz_rel32();
+            x_mov_r64_rbpN32(0,-176);
+            emit4(0x48,0x83,0xf8,0x04); /* rr_rdlen==4? */
+            int j_rdlen_no = x_jnz_rel32();
+
+            /* found an A record: grab its 4 IP bytes and stop looking */
+            x_lea_r64_rbpN32(1,-104);
+            emit2(0x8b,0x02); /* eax = [rdx] (RDATA) */
+            emit2(0x89,0x01); /* found_ip = eax */
+            int j_found = x_jmp_rel32();
+
+            x_patch_here(j_type_no);
+            x_patch_here(j_rdlen_no);
+            /* not an A record (or wrong length) -- advance past it and
+               try the next answer record */
+            x_mov_r64_rbpN32(0,-72);
+            x_mov_r64_rbpN32(1,-176);
+            emit3(0x48,0x01,0xc8);
+            x_mov_rbpN32_r64(-72,0);
+
+            x_mov_r64_rbpN32(0,-88);
+            emit3(0x48,0xff,0xc0);
+            x_mov_rbpN32_r64(-88,0);
+            int j_rr_back = x_jmp_rel32();
+            patch_i32(j_rr_back,(int32_t)(rr_loop-(j_rr_back+4)));
+
+            /* exhausted every answer record, no A found -> -1 */
+            x_patch_here(j_udp_fail);
+            x_patch_here(j_recv_fail);
+            x_patch_here(j_rr_done1);
+            x_patch_here(j_rr_done2);
+            x_mov_r64_imm32(0,-1);
+            int j_no_answer = x_jmp_rel32();
+
+            /* found_ip is set — sendto(sock, data_ptr, data_len, 0,
+               &sockaddr{found_ip,port}, 16), same tail __ys_net_udp_send
+               above uses. */
+            x_patch_here(j_found);
+            x_lea_r64_rbpN32(3,-160);
+            emit4(0x66,0xc7,0x03,0x02); emit1(0x00);
+            x_mov_r64_rbpN32(0,-24); /* port */
+            emit2(0x86,0xc4);
+            emit4(0x66,0x89,0x43,0x02);
+            x_mov_r64_rbpN32(0,-104); /* found_ip */
+            emit3(0x89,0x43,0x04);
+            emit3(0x48,0xc7,0x43); emit1(0x08); emit_i32(0);
+
+            x_mov_r64_rbpN32(7,-952); /* sock */
+            x_mov_r64_rbpN32(6,-960); /* data_ptr */
+            x_mov_r64_rbpN32(2,-968); /* data_len */
+            x_mov_r10d_imm32(0);
+            x_lea_r8_rbpN32(-160);
+            x_mov_r9d_imm32(16);
+            x_mov_r64_imm32(0,44); /* SYS_sendto */
+            emit2(0x0f,0x05);
+
+            x_patch_here(j_no_answer);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+        }
+
         /* __ys_net_udp_recv_print(rdi=sock, rsi=maxlen) -> rax=bytes
            received or -1. Same "no runtime string type, so print
            instead of returning a value" reasoning as __ys_net_recv_print
@@ -3199,6 +3631,13 @@ static void compile_expr(Node *n){
            r9=data_len) — robust regardless of what compile_expr does
            internally for sock/port, the only two pieces that aren't
            already compile-time constants. */
+        /* y.net.udp_send(sock, host, port, data) -> bytes sent or -1.
+           host may be an IPv4-dotted-decimal literal (existing path,
+           __ys_net_udp_send, unchanged below) or a hostname literal
+           (new: resolves via __ys_net_udp_send_host, built alongside
+           TLS server support). Both are decided here at compile time —
+           host must be a literal either way, so which runtime helper
+           to call is already known before any code is emitted. */
         if(is_y_net && strcmp(fn,"udp_send")==0){
             int base=n->left?1:0;
             Node *sock_arg=(n->argc>base)?n->args[base]:NULL;
@@ -3206,12 +3645,37 @@ static void compile_expr(Node *n){
             Node *port_arg=(n->argc>base+2)?n->args[base+2]:NULL;
             Node *data_arg=(n->argc>base+3)?n->args[base+3]:NULL;
 
-            int hoff,hlen;
-            if(host_arg && host_arg->kind==ND_STR){ hoff=data_add_str(host_arg->sval); hlen=ystrlen(host_arg->sval); }
-            else { hoff=data_add_str(""); hlen=0; }
             int doff,dlen;
             if(data_arg && data_arg->kind==ND_STR){ doff=data_add_str(data_arg->sval); dlen=ystrlen(data_arg->sval); }
             else { doff=data_add_str(""); dlen=0; }
+
+            int is_hostname = host_arg && host_arg->kind==ND_STR && !is_ipv4_literal(host_arg->sval);
+            if(is_hostname){
+                uint8_t qbuf[512]; int qlen=build_dns_query(host_arg->sval,qbuf);
+                int qoff=data_add_bytes(qbuf,qlen);
+
+                x_mov_rax_imm32(dlen); emit1(0x50);                  /* push data_len */
+                emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,doff); emit_i32(0); emit1(0x50); /* push data_ptr */
+                if(sock_arg) compile_expr(sock_arg); else x_mov_rax_imm32(-1);
+                emit1(0x50);                                          /* push sock */
+                if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(0);
+                emit1(0x50);                                          /* push port */
+                x_mov_rax_imm32(qlen); emit1(0x50);                   /* push query_len */
+                emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,qoff); emit_i32(0); emit1(0x50); /* push query_ptr */
+
+                emit1(0x5f); /* pop rdi = query_ptr */
+                emit1(0x5e); /* pop rsi = query_len */
+                emit1(0x5a); /* pop rdx = port */
+                emit1(0x59); /* pop rcx = sock */
+                emit2(0x41,0x58); /* pop r8 = data_ptr */
+                emit2(0x41,0x59); /* pop r9 = data_len */
+                int p=x_call_unresolved(); add_call_patch(p,"__ys_net_udp_send_host");
+                break;
+            }
+
+            int hoff,hlen;
+            if(host_arg && host_arg->kind==ND_STR){ hoff=data_add_str(host_arg->sval); hlen=ystrlen(host_arg->sval); }
+            else { hoff=data_add_str(""); hlen=0; }
 
             x_mov_rax_imm32(dlen); emit1(0x50);                  /* push data_len */
             emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,doff); emit_i32(0); emit1(0x50); /* push data_ptr */
