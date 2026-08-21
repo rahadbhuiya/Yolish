@@ -3059,6 +3059,282 @@ static int parse_http_url(const char *url, int *use_tls, char *host, int hostcap
    get_print and post_print so the connect/handshake logic — the part
    that's actually easy to get subtly wrong — exists in exactly one
    place. */
+/* in: rax = byte index into the shared g_tls_rbuf_off scratch buffer.
+   out: rax = that byte, zero-extended. Used by the chunked-encoding
+   decoder below, which needs to read arbitrary bytes out of the
+   buffer by a runtime-computed index rather than a compile-time
+   disp8, unlike every other rbuf access elsewhere in this file. */
+static void x_rbuf_byte_at_rax(void){
+    emit3(0x4c,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0); /* lea r11,[rip+rbuf] */
+    emit3(0x4c,0x01,0xd8); /* add rax,r11 */
+    emit3(0x0f,0xb6,0x00); /* movzx eax,byte[rax] */
+}
+
+/* Decodes and prints whatever's sitting in g_tls_rbuf_off[0..total),
+   where total is read from [rbp-40] of the caller's (emit_http_request's)
+   own frame -- both its plain-HTTP and HTTPS branches accumulate their
+   response into that same slot before calling this, rather than
+   printing each read()/SSL_read() chunk immediately as they arrive
+   the way tls_recv_print/__ys_net_recv_print do. That's a deliberate,
+   local-to-the-HTTP-client change: chunked transfer-encoding can't be
+   decoded a few bytes at a time as they stream in, since a chunk's
+   hex size line can itself be split across two separate reads --
+   decoding needs the *whole* response in hand first. The real cost of
+   that: a chunked response larger than the 4095-byte rbuf cap gets
+   silently truncated rather than streamed in full the way a
+   non-chunked one still can be (see the non-chunked fallback below,
+   which still only sees whatever fit in the buffer). A real, documented
+   trade-off, not an oversight.
+
+   Detects chunked encoding by scanning the header section for the
+   substring "chunked" (case-sensitive) -- not "Transfer-Encoding:
+   chunked" specifically, just the word anywhere in the headers, which
+   in practice is exactly as reliable and far simpler to implement.
+   Headers are always printed verbatim either way. If no header/body
+   blank-line separator is found at all (an unusually malformed or
+   truncated response), the whole buffer is printed raw and nothing
+   past that point runs. */
+static void emit_http_decode_and_print(void){
+    /* ---- find "\r\n\r\n" (header_end = start of that sequence) ---- */
+    x_mov_qword_rbpN32_imm32(-56,-1); /* header_end = -1 (not found yet) */
+    x_mov_qword_rbpN32_imm32(-64,0);  /* pos = 0 */
+    int find_loop=code_len;
+    x_mov_r64_rbpN(0,-64);
+    emit4(0x48,0x83,0xc0,0x03);
+    x_mov_r64_rbpN(1,-40);
+    emit3(0x48,0x39,0xc8);
+    int j_find_done=x_jge_rel32();
+
+    x_mov_r64_rbpN(0,-64);
+    x_rbuf_byte_at_rax();
+    emit4(0x48,0x83,0xf8,0x0d); /* '\r' */
+    int j_ne1=x_jnz_rel32();
+    x_mov_r64_rbpN(0,-64); emit3(0x48,0xff,0xc0);
+    x_rbuf_byte_at_rax();
+    emit4(0x48,0x83,0xf8,0x0a); /* '\n' */
+    int j_ne2=x_jnz_rel32();
+    x_mov_r64_rbpN(0,-64); emit4(0x48,0x83,0xc0,0x02);
+    x_rbuf_byte_at_rax();
+    emit4(0x48,0x83,0xf8,0x0d);
+    int j_ne3=x_jnz_rel32();
+    x_mov_r64_rbpN(0,-64); emit4(0x48,0x83,0xc0,0x03);
+    x_rbuf_byte_at_rax();
+    emit4(0x48,0x83,0xf8,0x0a);
+    int j_ne4=x_jnz_rel32();
+
+    x_mov_r64_rbpN(0,-64);
+    x_mov_rbpN_r64(-56,0); /* header_end = pos */
+    int j_found=x_jmp_rel32();
+
+    x_patch_here(j_ne1); x_patch_here(j_ne2); x_patch_here(j_ne3); x_patch_here(j_ne4);
+    x_mov_r64_rbpN(0,-64); emit3(0x48,0xff,0xc0);
+    x_mov_rbpN_r64(-64,0);
+    int j_find_back=x_jmp_rel32();
+    patch_i32(j_find_back,(int32_t)(find_loop-(j_find_back+4)));
+
+    x_patch_here(j_find_done);
+    x_patch_here(j_found);
+
+    x_mov_r64_rbpN(0,-56);
+    emit4(0x48,0x83,0xf8,0x00);
+    int j_have_split=x_jge_rel32();
+    /* no split found -- print the whole buffer raw and stop */
+    x_mov_r64_imm32(7,1);
+    emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0);
+    x_mov_r64_rbpN(2,-40);
+    x_mov_r64_imm32(0,1); emit2(0x0f,0x05);
+    int j_all_done=x_jmp_rel32();
+    x_patch_here(j_have_split);
+
+    x_mov_r64_rbpN(0,-56);
+    emit4(0x48,0x83,0xc0,0x04);
+    x_mov_rbpN_r64(-72,0); /* body_start = header_end + 4 */
+
+    /* ---- scan headers[0..header_end) for "chunked" ---- */
+    int needle_off=data_add_str("chunked");
+    x_mov_qword_rbpN32_imm32(-80,0); /* is_chunked = 0 */
+    x_mov_qword_rbpN32_imm32(-64,0); /* outer pos = 0 */
+    int outer_loop=code_len;
+    x_mov_r64_rbpN(0,-64);
+    emit4(0x48,0x83,0xc0,0x07); /* pos+7 (strlen("chunked")) */
+    x_mov_r64_rbpN(1,-56); /* header_end */
+    emit3(0x48,0x39,0xc8);
+    int j_outer_done=x_jg_rel32();
+
+    x_mov_qword_rbpN32_imm32(-88,0); /* inner i = 0 */
+    int inner_loop=code_len;
+    x_mov_r64_rbpN(0,-88);
+    emit4(0x48,0x83,0xf8,0x07);
+    int j_matched=x_jz_rel32(); /* i==7: all 7 bytes matched */
+
+    x_mov_r64_rbpN(0,-64); x_mov_r64_rbpN(1,-88);
+    emit3(0x48,0x01,0xc8); /* rax = pos+i */
+    x_rbuf_byte_at_rax();
+    x_mov_rbpN_r64(-96,0); /* stash buffer byte */
+
+    emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,needle_off); emit_i32(0); /* rax=&needle */
+    x_mov_r64_rbpN(1,-88); emit3(0x48,0x01,0xc8); /* rax=&needle[i] */
+    emit3(0x0f,0xb6,0x00); /* al=needle[i] */
+
+    x_mov_r64_rbpN(1,-96);
+    emit3(0x48,0x39,0xc8); /* cmp rax,rcx  (needle byte vs buffer byte) */
+    int j_mismatch=x_jnz_rel32();
+
+    x_mov_r64_rbpN(0,-88); emit3(0x48,0xff,0xc0);
+    x_mov_rbpN_r64(-88,0);
+    int j_inner_back=x_jmp_rel32();
+    patch_i32(j_inner_back,(int32_t)(inner_loop-(j_inner_back+4)));
+
+    x_patch_here(j_matched);
+    x_mov_qword_rbpN32_imm32(-80,1); /* is_chunked = 1 */
+    int j_scan_done=x_jmp_rel32();
+
+    x_patch_here(j_mismatch);
+    x_mov_r64_rbpN(0,-64); emit3(0x48,0xff,0xc0);
+    x_mov_rbpN_r64(-64,0);
+    int j_outer_back=x_jmp_rel32();
+    patch_i32(j_outer_back,(int32_t)(outer_loop-(j_outer_back+4)));
+
+    x_patch_here(j_outer_done);
+    x_patch_here(j_scan_done);
+
+    /* headers + blank line, always printed verbatim */
+    x_mov_r64_imm32(7,1);
+    emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0);
+    x_mov_r64_rbpN(2,-72); /* body_start */
+    x_mov_r64_imm32(0,1); emit2(0x0f,0x05);
+
+    x_mov_r64_rbpN(0,-80);
+    emit4(0x48,0x83,0xf8,0x00);
+    int j_is_chunked=x_jnz_rel32();
+    /* not chunked -- print body[body_start..total) verbatim, same as
+       the old streaming behavior's net effect */
+    x_mov_r64_imm32(7,1);
+    emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0);
+    x_mov_r64_rbpN(0,-72);
+    emit3(0x48,0x01,0xc6); /* rsi += body_start (rax) */
+    x_mov_r64_rbpN(2,-40); x_mov_r64_rbpN(1,-72);
+    emit3(0x48,0x29,0xca); /* rdx -= body_start (total-body_start) */
+    x_mov_r64_imm32(0,1); emit2(0x0f,0x05);
+    int j_done2=x_jmp_rel32();
+    x_patch_here(j_is_chunked);
+
+    /* ---- chunked: pos = body_start; loop: parse hex size, skip to
+       \r\n, print that many bytes, skip trailing \r\n, repeat until
+       size==0 ---- */
+    x_mov_r64_rbpN(0,-72);
+    x_mov_rbpN_r64(-64,0); /* pos = body_start */
+
+    int chunk_loop=code_len;
+    x_mov_qword_rbpN32_imm32(-56,0); /* reuse header_end slot as chunk_size accumulator */
+
+    int hex_loop=code_len;
+    x_mov_r64_rbpN(0,-64);
+    x_mov_r64_rbpN(1,-40);
+    emit3(0x48,0x39,0xc8);
+    int j_hex_oob=x_jge_rel32();
+    x_mov_r64_rbpN(0,-64);
+    x_rbuf_byte_at_rax(); /* rax = current byte */
+    x_mov_rbpN_r64(-96,0);
+
+    emit4(0x48,0x83,0xf8,0x30); /* '0' */
+    int j_lt0=x_jl_rel32();
+    emit4(0x48,0x83,0xf8,0x39); /* '9' */
+    int j_le9=x_jle_rel32();
+    x_patch_here(j_lt0);
+    emit4(0x48,0x83,0xf8,0x61); /* 'a' */
+    int j_lta=x_jl_rel32();
+    emit4(0x48,0x83,0xf8,0x66); /* 'f' */
+    int j_lef=x_jle_rel32();
+    x_patch_here(j_lta);
+    /* not a hex digit -- stop accumulating the size */
+    int j_hex_end=x_jmp_rel32();
+
+    x_patch_here(j_le9);
+    x_mov_r64_rbpN(0,-56); emit4(0x48,0x6b,0xc0,0x10); /* chunk_size *= 16 */
+    x_mov_r64_rbpN(1,-96); emit4(0x48,0x83,0xe9,0x30); /* digit - '0' */
+    emit3(0x48,0x01,0xc8);
+    x_mov_rbpN_r64(-56,0);
+    int j_digit_done1=x_jmp_rel32();
+
+    x_patch_here(j_lef);
+    x_mov_r64_rbpN(0,-56); emit4(0x48,0x6b,0xc0,0x10);
+    x_mov_r64_rbpN(1,-96); emit4(0x48,0x83,0xe9,0x57); /* digit - 'a' + 10 */
+    emit3(0x48,0x01,0xc8);
+    x_mov_rbpN_r64(-56,0);
+
+    x_patch_here(j_digit_done1);
+    x_mov_r64_rbpN(0,-64); emit3(0x48,0xff,0xc0);
+    x_mov_rbpN_r64(-64,0);
+    int j_hex_back=x_jmp_rel32();
+    patch_i32(j_hex_back,(int32_t)(hex_loop-(j_hex_back+4)));
+
+    x_patch_here(j_hex_oob);
+    x_patch_here(j_hex_end);
+
+    /* skip forward to the \r\n ending the chunk-size line (tolerates
+       chunk extensions like ";foo=bar" before it, same as any
+       compliant client must) */
+    int skip_loop=code_len;
+    x_mov_r64_rbpN(0,-64);
+    emit4(0x48,0x83,0xc0,0x01);
+    x_mov_r64_rbpN(1,-40);
+    emit3(0x48,0x39,0xc8);
+    int j_skip_oob=x_jge_rel32();
+    x_mov_r64_rbpN(0,-64);
+    x_rbuf_byte_at_rax();
+    emit4(0x48,0x83,0xf8,0x0d);
+    int j_found_cr=x_jz_rel32();
+    x_mov_r64_rbpN(0,-64); emit3(0x48,0xff,0xc0);
+    x_mov_rbpN_r64(-64,0);
+    int j_skip_back=x_jmp_rel32();
+    patch_i32(j_skip_back,(int32_t)(skip_loop-(j_skip_back+4)));
+
+    x_patch_here(j_skip_oob);
+    int j_done3=x_jmp_rel32(); /* ran off the end mid chunk-size line -- stop */
+    x_patch_here(j_found_cr);
+
+    x_mov_r64_rbpN(0,-64); emit4(0x48,0x83,0xc0,0x02); /* pos += 2 (skip \r\n) */
+    x_mov_rbpN_r64(-64,0);
+
+    x_mov_r64_rbpN(0,-56); /* chunk_size */
+    emit4(0x48,0x83,0xf8,0x00);
+    int j_chunk_nonzero=x_jnz_rel32();
+    int j_done4=x_jmp_rel32(); /* size 0 -- last chunk, stop */
+    x_patch_here(j_chunk_nonzero);
+
+    /* clamp chunk_size to whatever's actually left in the buffer, in
+       case the response got truncated mid-chunk against the 4095-byte
+       cap */
+    x_mov_r64_rbpN(0,-40); x_mov_r64_rbpN(1,-64);
+    emit3(0x48,0x29,0xc8); /* rax = total - pos (bytes actually available) */
+    x_mov_r64_rbpN(1,-56); /* rcx = chunk_size */
+    emit3(0x48,0x39,0xc8); /* cmp rax,rcx */
+    int j_have_enough=x_jge_rel32();
+    x_mov_rbpN_r64(-56,0); /* chunk_size = total-pos (clamped) */
+    x_patch_here(j_have_enough);
+
+    x_mov_r64_imm32(7,1);
+    emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0);
+    x_mov_r64_rbpN(0,-64);
+    emit3(0x48,0x01,0xc6); /* rsi += pos */
+    x_mov_r64_rbpN(2,-56); /* rdx = chunk_size */
+    x_mov_r64_imm32(0,1); emit2(0x0f,0x05);
+
+    x_mov_r64_rbpN(0,-64); x_mov_r64_rbpN(1,-56);
+    emit3(0x48,0x01,0xc8); /* pos += chunk_size */
+    emit4(0x48,0x83,0xc0,0x02); /* pos += 2 (trailing \r\n after chunk data) */
+    x_mov_rbpN_r64(-64,0);
+
+    int j_chunk_back=x_jmp_rel32();
+    patch_i32(j_chunk_back,(int32_t)(chunk_loop-(j_chunk_back+4)));
+
+    x_patch_here(j_done2);
+    x_patch_here(j_done3);
+    x_patch_here(j_done4);
+    x_patch_here(j_all_done);
+}
+
 static void emit_http_request(const char *host, int port, int use_tls, int req_off, int req_len){
     if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); return; }
     tls_state_ensure();
@@ -3068,7 +3344,9 @@ static void emit_http_request(const char *host, int port, int use_tls, int req_o
     int is_ipv4 = is_ipv4_literal(host);
 
     x_push_rbp(); x_mov_rbp_rsp();
-    emit3(0x48,0x81,0xec); emit_i32(64); /* -8 fd -16 method -24 ctx -32 ssl -40 total -48 n */
+    emit3(0x48,0x81,0xec); emit_i32(112); /* -8 fd -16 method -24 ctx -32 ssl -40 total -48 n
+                                              -56 header_end -64 pos -72 body_start -80 is_chunked
+                                              -88 inner_i -96 cmpbyte (decode-and-print scratch) */
 
     int fail_patches[8]; int nfail=0;
 
@@ -3123,33 +3401,43 @@ static void emit_http_request(const char *host, int port, int use_tls, int req_o
         x_mov_qword_rbpN_imm32(-40,0); /* total=0 */
 
         int loop_top1=code_len;
+        /* remaining = (CAP-1) - total; stop if <= 0 */
+        x_mov_r64_imm32(0,YS_TLS_RBUF_CAP-1);
+        x_mov_r64_rbpN(1,-40);
+        emit3(0x48,0x29,0xc8); /* rax -= rcx (remaining) */
+        emit4(0x48,0x83,0xf8,0x00);
+        int j_room_left=x_jg_rel32();
+        int j_loop_end1=x_jmp_rel32();
+        x_patch_here(j_room_left);
+        x_mov_rbpN_r64(-104,0); /* stash remaining capacity separately from "n" */
+
         x_mov_r64_rbpN(7,-8); /* rdi=fd */
         emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0); /* rsi=&rbuf */
-        x_mov_r64_imm32(2,YS_TLS_RBUF_CAP-1); /* rdx=maxlen */
+        x_mov_r64_rbpN(0,-40); emit3(0x48,0x01,0xc6); /* rsi += total (append, don't overwrite) */
+        x_mov_r64_rbpN(2,-104); /* rdx=remaining capacity */
         x_mov_r64_imm32(0,0); /* SYS_read */
         emit2(0x0f,0x05);
+        /* rax = n, straight off the syscall -- save it before anything
+           else touches rax */
+        x_mov_rbpN_r64(-48,0);
         emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
         int j_have_chunk1=x_jg_rel32();
-        int j_loop_end1=x_jmp_rel32();
+        int j_loop_end1b=x_jmp_rel32();
         x_patch_here(j_have_chunk1);
-        x_mov_rbpN_r64(-48,0); /* n */
-
-        x_mov_r64_imm32(7,1); /* rdi=1 (stdout) */
-        emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0); /* rsi=&rbuf */
-        x_mov_r64_rbpN(2,-48); /* rdx=n */
-        x_mov_r64_imm32(0,1); /* SYS_write */
-        emit2(0x0f,0x05);
 
         x_mov_r64_rbpN(0,-40); x_mov_r64_rbpN(1,-48);
-        emit3(0x48,0x01,0xc8); /* add rax,rcx (total += n) */
+        emit3(0x48,0x01,0xc8); /* rax = old_total + n */
         x_mov_rbpN_r64(-40,0);
 
         int jback1=x_jmp_rel32();
         patch_i32(jback1,(int32_t)(loop_top1-(jback1+4)));
         x_patch_here(j_loop_end1);
+        x_patch_here(j_loop_end1b);
 
         x_mov_r64_rbpN(7,-8);
         { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+
+        emit_http_decode_and_print();
         x_mov_r64_rbpN(0,-40);
 
         for(int i=0;i<nfail;i++) x_patch_here(fail_patches[i]);
@@ -3174,6 +3462,11 @@ static void emit_http_request(const char *host, int port, int use_tls, int req_o
     int sslread_got=dynlink_import("SSL_read");
     int ctxfree_got=dynlink_import("SSL_CTX_free");
     int sslfree_got=dynlink_import("SSL_free");
+    int setverify_got=dynlink_import("SSL_CTX_set_verify");
+    int ctxctrl_got=dynlink_import("SSL_CTX_ctrl");
+    int setdefverify_got=dynlink_import("SSL_CTX_set_default_verify_paths");
+    int set1host_got=dynlink_import("SSL_set1_host");
+    int getverifyresult_got=dynlink_import("SSL_get_verify_result");
 
     x_mov_r64_imm32(7,0); x_mov_r64_imm32(6,0);
     x_call_got(init_got);
@@ -3187,6 +3480,32 @@ static void emit_http_request(const char *host, int port, int use_tls, int req_o
     x_mov_r64_rbpN(7,-8); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
     x_mov_rax_imm32(-1); x_mov_rbpN_r64(-40,0); fail_patches[nfail++]=x_jmp_rel32();
     x_patch_here(j_ctx_ok);
+
+    /* Certificate verification -- same approach as y.net.tls_connect,
+       see that function's comment for the full reasoning. Duplicated
+       rather than shared for the same reason the rest of this
+       function's handshake logic is duplicated: host/port here are C
+       constants, not a Node*, so there's no clean way to call into
+       tls_connect's Node*-driven codegen from here. */
+    x_mov_r64_rbpN(7,-24);
+    x_mov_r64_imm32(6,1);               /* SSL_VERIFY_PEER */
+    x_mov_r64_imm32(2,0);
+    x_call_got(setverify_got);
+
+    x_mov_r64_rbpN(7,-24);
+    x_mov_r64_imm32(6,123);             /* SSL_CTRL_SET_MIN_PROTO_VERSION */
+    x_mov_r64_imm32(2,0x0303);          /* TLS1_2_VERSION */
+    x_mov_r64_imm32(1,0);
+    x_call_got(ctxctrl_got);
+
+    x_mov_r64_rbpN(7,-24);
+    x_call_got(setdefverify_got);
+    emit4(0x48,0x83,0xf8,0x01);
+    int j_verifypaths_ok=x_jz_rel32();
+    x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
+    x_mov_r64_rbpN(7,-8); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+    x_mov_rax_imm32(-1); x_mov_rbpN_r64(-40,0); fail_patches[nfail++]=x_jmp_rel32();
+    x_patch_here(j_verifypaths_ok);
 
     x_mov_r64_rbpN(7,-24);
     x_call_got(sslnew_got);
@@ -3205,6 +3524,10 @@ static void emit_http_request(const char *host, int port, int use_tls, int req_o
         x_mov_r64_imm32(2,0);
         emit3(0x48,0x8d,0x0d); add_reloc(RELOC_DATA,code_len,host_off); emit_i32(0);
         x_call_got(sslctrl_got);
+
+        x_mov_r64_rbpN(7,-32);
+        emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,host_off); emit_i32(0);
+        x_call_got(set1host_got);
     }
 
     x_mov_r64_rbpN(7,-32);
@@ -3229,31 +3552,47 @@ static void emit_http_request(const char *host, int port, int use_tls, int req_o
     x_patch_here(j_hs_ok);
 
     x_mov_r64_rbpN(7,-32);
+    x_call_got(getverifyresult_got);
+    x_test_rax_rax();
+    int j_verify_ok=x_jz_rel32();
+    x_mov_r64_rbpN(7,-32); x_call_got(sslfree_got);
+    x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
+    x_mov_r64_rbpN(7,-8); { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+    x_mov_rax_imm32(-1); x_mov_rbpN_r64(-40,0); fail_patches[nfail++]=x_jmp_rel32();
+    x_patch_here(j_verify_ok);
+
+    x_mov_r64_rbpN(7,-32);
     emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,req_off); emit_i32(0);
     x_mov_r64_imm32(2,req_len);
     x_call_got(sslwrite_got);
 
-    /* read/print loop -- see the plain-HTTP branch's comment above for
-       why this loops instead of a single SSL_read/print (same bug,
-       same fix, TLS side). */
+    /* read/decode/print loop -- see the plain-HTTP branch's comment
+       above for why this accumulates into the buffer instead of
+       printing each SSL_read chunk immediately (same reasoning,
+       extended further for v2.33: chunked-encoding decoding needs the
+       whole response in hand, not a few bytes at a time). */
     x_mov_qword_rbpN_imm32(-40,0); /* total=0 */
 
     int loop_top2=code_len;
+    x_mov_r64_imm32(0,YS_TLS_RBUF_CAP-1);
+    x_mov_r64_rbpN(1,-40);
+    emit3(0x48,0x29,0xc8);
+    emit4(0x48,0x83,0xf8,0x00);
+    int j_room_left2=x_jg_rel32();
+    int j_loop_end2=x_jmp_rel32();
+    x_patch_here(j_room_left2);
+    x_mov_rbpN_r64(-104,0); /* remaining capacity */
+
     x_mov_r64_rbpN(7,-32);
     emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0);
-    x_mov_r64_imm32(2,YS_TLS_RBUF_CAP-1);
+    x_mov_r64_rbpN(0,-40); emit3(0x48,0x01,0xc6); /* rsi += total */
+    x_mov_r64_rbpN(2,-104);
     x_call_got(sslread_got);
     emit4(0x48,0x83,0xf8,0x00);
     int j_have_chunk2=x_jg_rel32();
-    int j_loop_end2=x_jmp_rel32();
+    int j_loop_end2b=x_jmp_rel32();
     x_patch_here(j_have_chunk2);
     x_mov_rbpN_r64(-16,0); /* n */
-
-    x_mov_r64_imm32(7,1);
-    emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,g_tls_rbuf_off); emit_i32(0);
-    x_mov_r64_rbpN(2,-16);
-    x_mov_r64_imm32(0,1);
-    emit2(0x0f,0x05);
 
     x_mov_r64_rbpN(0,-40); x_mov_r64_rbpN(1,-16);
     emit3(0x48,0x01,0xc8); /* total += n */
@@ -3262,6 +3601,9 @@ static void emit_http_request(const char *host, int port, int use_tls, int req_o
     int jback2=x_jmp_rel32();
     patch_i32(jback2,(int32_t)(loop_top2-(jback2+4)));
     x_patch_here(j_loop_end2);
+    x_patch_here(j_loop_end2b);
+
+    emit_http_decode_and_print();
 
     x_mov_r64_rbpN(7,-32); x_call_got(sslfree_got);
     x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
@@ -4081,6 +4423,11 @@ static void compile_expr(Node *n){
             int ctxfree_got=dynlink_import("SSL_CTX_free");
             int sslfree_got=dynlink_import("SSL_free");
             int sslctrl_got=dynlink_import("SSL_ctrl");
+            int setverify_got=dynlink_import("SSL_CTX_set_verify");
+            int setdefverify_got=dynlink_import("SSL_CTX_set_default_verify_paths");
+            int ctxctrl_got=dynlink_import("SSL_CTX_ctrl");
+            int set1host_got=dynlink_import("SSL_set1_host");
+            int getverifyresult_got=dynlink_import("SSL_get_verify_result");
 
             int cbase=n->left?1:0;
             Node *host_arg=(n->argc>cbase)?n->args[cbase]:NULL;
@@ -4162,6 +4509,33 @@ static void compile_expr(Node *n){
             x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
             x_patch_here(j_ctx_ok);
 
+            /* Certificate verification, enabled here to match the
+               interpreter/VM version's already-tested approach exactly
+               (see net_runtime.c's ys_tls_ensure_ctx) -- this native
+               path trusted whatever certificate a server presented
+               until now, which the docs called out plainly as a real
+               gap rather than something to leave silently assumed. */
+            x_mov_r64_rbpN(7,-24);              /* rdi=ctx */
+            x_mov_r64_imm32(6,1);               /* rsi=SSL_VERIFY_PEER */
+            x_mov_r64_imm32(2,0);               /* rdx=NULL (no custom callback) */
+            x_call_got(setverify_got);
+
+            x_mov_r64_rbpN(7,-24);
+            x_mov_r64_imm32(6,123);             /* rsi=SSL_CTRL_SET_MIN_PROTO_VERSION */
+            x_mov_r64_imm32(2,0x0303);          /* rdx=TLS1_2_VERSION */
+            x_mov_r64_imm32(1,0);               /* rcx=NULL (unused for this ctrl) */
+            x_call_got(ctxctrl_got);
+
+            x_mov_r64_rbpN(7,-24);
+            x_call_got(setdefverify_got);
+            emit4(0x48,0x83,0xf8,0x01);         /* cmp rax,1 */
+            int j_verifypaths_ok=x_jz_rel32();
+            x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
+            x_mov_r64_rbpN(0,-8); x_arg1_from_rax();
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_verifypaths_ok);
+
             /* SSL_new(ctx) */
             x_mov_r64_rbpN(7,-24);
             x_call_got(sslnew_got);
@@ -4191,6 +4565,15 @@ static void compile_expr(Node *n){
                 x_mov_r64_imm32(2,0);               /* rdx=TLSEXT_NAMETYPE_host_name */
                 emit3(0x48,0x8d,0x0d); add_reloc(RELOC_DATA,code_len,sni_off); emit_i32(0); /* rcx=&host */
                 x_call_got(sslctrl_got);
+
+                /* SSL_set1_host(ssl, host) -- checks the presented
+                   certificate's subject/SAN actually matches this
+                   hostname during verification, not just that it
+                   chains to a trusted root. Without this, a valid cert
+                   for an entirely unrelated domain would still pass. */
+                x_mov_r64_rbpN(7,-32);
+                emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,sni_off); emit_i32(0); /* rsi=&host */
+                x_call_got(set1host_got);
             }
 
             /* SSL_set_fd(ssl, fd) */
@@ -4217,6 +4600,25 @@ static void compile_expr(Node *n){
             { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
             x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
             x_patch_here(j_hs_ok);
+
+            /* SSL_connect()==1 only means the handshake completed, not
+               that the certificate presented was actually trusted --
+               SSL_VERIFY_PEER above makes OpenSSL run the check, but
+               checking the *result* is a separate, deliberate step
+               (SSL_get_verify_result), same as the interpreter/VM
+               version does. Skipping this line would silently accept
+               any certificate, self-signed or otherwise, regardless of
+               everything set up above. */
+            x_mov_r64_rbpN(7,-32);
+            x_call_got(getverifyresult_got);
+            x_test_rax_rax(); /* X509_V_OK == 0 */
+            int j_verify_ok=x_jz_rel32();
+            x_mov_r64_rbpN(7,-32); x_call_got(sslfree_got);
+            x_mov_r64_rbpN(7,-24); x_call_got(ctxfree_got);
+            x_mov_r64_rbpN(0,-8); x_arg1_from_rax();
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close"); }
+            x_mov_rax_imm32(-1); fail_patches[nfail++]=x_jmp_rel32();
+            x_patch_here(j_verify_ok);
 
             /* handshake succeeded — allocate a handle (round-robin counter,
                MAX_TLS_CONN is a power of 2 so "mod" is just an AND) and

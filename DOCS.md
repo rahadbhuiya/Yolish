@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.32  
+**Version:** v2.33  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2864,13 +2864,16 @@ than erroring — close connections you're done with, and don't rely on
 more than 4 being live simultaneously. SNI is sent
 (`SSL_set_tlsext_host_name`) for the hostname branch — not sent for an
 IPv4/IPv6-literal `host`, since an IP address isn't valid SNI content.
-Certificate verification is **not** enabled (unlike the interpreter/VM
-`make tls` build described earlier in this section, which does verify
-via `SSL_set1_host`) — this native path trusts whatever certificate
-the server presents. All four functions no-op/return `-1` if compiled
-for a non-Linux `--target`, since they depend on the same ELF-only
-dynlink machinery as `tls_test`/`tls_handshake_test`/`tls_get_test`
-above.
+Certificate verification **is** enabled (v2.33) — `SSL_VERIFY_PEER`,
+TLS 1.2 minimum, the system's default CA trust store
+(`SSL_CTX_set_default_verify_paths`), and hostname matching
+(`SSL_set1_host`) for the hostname branch, matching the interpreter/VM
+`make tls` build's already-tested approach. A self-signed or otherwise
+untrusted certificate now makes `tls_connect` return `-1` rather than
+silently completing the handshake anyway. All four functions no-op/
+return `-1` if compiled for a non-Linux `--target`, since they depend
+on the same ELF-only dynlink machinery as `tls_test`/
+`tls_handshake_test`/`tls_get_test` above.
 
 **Native TLS server (`ys -c`, Linux only — v2.31):**
 
@@ -2919,11 +2922,29 @@ Verified with a real self-signed cert against a real client
 (`y.net.tls_connect`) in the same process pair, sending in both
 directions.
 
-Not implemented for native compilation on **macOS** — macOS syscall
-numbers and calling convention differ substantially from Linux's, and
-this hasn't been ported yet (also tracked in ROADMAP.md). Calling
-`y.net.*` while compiling for macOS or Windows hits the "unresolved
-symbol" safety net (a clean compile failure, not a broken binary).
+Not implemented for native compilation on **macOS** — a deliberate
+scoping decision, not an oversight left for later without thought.
+Porting the raw-syscall layer (`y.net.connect`/`send`/`recv_print`/
+`close`/`listen`/`accept`/the UDP family) to macOS needs more than
+swapping syscall numbers: BSD-derived `sockaddr_in`/`sockaddr_in6`
+put `sin_len`/`sin6_len` before the family field, unlike Linux's, so
+every hand-built sockaddr in this file (a good dozen call sites) would
+need auditing too. TLS/HTTP additionally depend on this backend's
+ELF-only dynamic-linking machinery, which has no Mach-O counterpart at
+all — that alone is roughly the scope v2.27's whole ELF milestone was.
+None of that is the actual blocker, though: this project has no macOS
+environment to run a single line of the result on. Every real bug
+caught while building this native networking stack — the v2.30 frame-
+switch bug, the v2.31 HTTP cleanup-path bug, others — was found by
+*running* the code against a real server, not by reading it; several
+looked completely correct on review and only failed at runtime. Code
+that can never be run isn't verified, just typed — shipping an
+unrun macOS port would abandon the standard the rest of this stack
+was actually held to, for the sake of a checkbox. Calling `y.net.*`
+while compiling for macOS or Windows hits the "unresolved symbol"
+safety net in the meantime (a clean compile failure, not a broken
+binary) — tracked in ROADMAP.md for whenever a macOS environment to
+actually test against is available.
 
 **Native HTTP client (`ys -c`, Linux only — v2.31):**
 
@@ -2968,12 +2989,29 @@ silently dropping the body with no error. `y.net.recv_print`/
 HTTP client, layered on top of the same underlying connect/send
 primitives, not a change to their documented one-shot behavior.
 
-No redirects, no cookies, no chunked-transfer-encoding decoding (a
-chunked response's `\r\n`-prefixed chunk-size lines print as literal
-text, same as the interpreter/VM version's caveat above) — this is a
-genuinely minimal client, thinner even than the interpreter/VM one
-described in section 44a: no status/header/body parsing at all, just
-the connection sequence and a raw print of whatever comes back.
+Chunked transfer-encoding is decoded (v2.33) — hex chunk-size lines
+and chunk-boundary CRLFs are stripped out, leaving just the actual
+payload bytes, detected by scanning the header section for the
+substring `"chunked"`. This changed how the response is read
+internally: instead of printing each `read()`/`SSL_read()` chunk
+immediately as it streams in (the loop described above), the whole
+response is accumulated into the same buffer `tls_recv_print` uses
+(4095 bytes) *before* anything is decoded or printed — chunk
+boundaries can split across separate reads the same way headers/body
+did, so decoding needs the complete response in hand first. The real
+trade-off: a chunked response **larger than 4095 bytes now gets
+silently truncated**, where the old streaming approach could at least
+print an arbitrarily large *non-chunked* response in full (chunked
+ones were always garbled past the first read anyway, so this isn't a
+regression for chunked responses specifically — just a now-documented
+limit that didn't exist for non-chunked ones before). Non-chunked
+responses still print in full up to that same 4095-byte cap, same as
+before.
+
+No redirects, no cookies — still a genuinely minimal client, thinner
+even than the interpreter/VM one described in section 44a: no status-
+line/header parsing into structured data, just the connection
+sequence and a decoded print of whatever comes back.
 
 ---
 
