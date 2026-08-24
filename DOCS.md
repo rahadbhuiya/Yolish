@@ -1,6 +1,6 @@
 # Yolish Language Reference
 
-**Version:** v2.33  
+**Version:** v2.34  
 **Interpreter/Compiler:** `ys`  
 **File extension:** `.y`
 
@@ -2922,29 +2922,42 @@ Verified with a real self-signed cert against a real client
 (`y.net.tls_connect`) in the same process pair, sending in both
 directions.
 
-Not implemented for native compilation on **macOS** — a deliberate
-scoping decision, not an oversight left for later without thought.
-Porting the raw-syscall layer (`y.net.connect`/`send`/`recv_print`/
-`close`/`listen`/`accept`/the UDP family) to macOS needs more than
-swapping syscall numbers: BSD-derived `sockaddr_in`/`sockaddr_in6`
-put `sin_len`/`sin6_len` before the family field, unlike Linux's, so
-every hand-built sockaddr in this file (a good dozen call sites) would
-need auditing too. TLS/HTTP additionally depend on this backend's
-ELF-only dynamic-linking machinery, which has no Mach-O counterpart at
-all — that alone is roughly the scope v2.27's whole ELF milestone was.
-None of that is the actual blocker, though: this project has no macOS
-environment to run a single line of the result on. Every real bug
-caught while building this native networking stack — the v2.30 frame-
-switch bug, the v2.31 HTTP cleanup-path bug, others — was found by
-*running* the code against a real server, not by reading it; several
-looked completely correct on review and only failed at runtime. Code
-that can never be run isn't verified, just typed — shipping an
-unrun macOS port would abandon the standard the rest of this stack
-was actually held to, for the sake of a checkbox. Calling `y.net.*`
-while compiling for macOS or Windows hits the "unresolved symbol"
-safety net in the meantime (a clean compile failure, not a broken
-binary) — tracked in ROADMAP.md for whenever a macOS environment to
-actually test against is available.
+**Native compilation on macOS (v2.34, UNVERIFIED):**
+
+Plain TCP/UDP (`y.net.connect`/`send`/`recv_print`/`close`/`listen`/
+`accept`/`udp_socket`/`udp_bind`/`udp_send`/`udp_recv_print`/
+`udp_recv_reply_print`) now has a macOS/Darwin implementation, guarded
+by `--target macos`, alongside the existing Linux one. It is
+**untested against real macOS** — there is no macOS environment
+anywhere in this project's toolchain to run a single line of it on.
+Confirmed so far: it produces a valid Mach-O binary, and every
+Darwin-specific constant this port depends on (syscall numbers,
+`sockaddr_in`/`sockaddr_in6` layout, `SOL_SOCKET`/`SO_REUSEADDR`)
+appears exactly as intended in the actual emitted machine code,
+checked instruction-by-instruction with a disassembler. That confirms
+the *compiler* emits what was designed — it does not confirm the
+design itself is correct, since nothing has actually executed it. If
+you're running this on real macOS and hit something wrong, that's the
+first place to look: a syscall number or struct offset that's subtly
+off, not (per everything else in this file) a logic bug in the
+codegen pattern itself, which is otherwise identical to the
+already-verified Linux version.
+
+Two things macOS specifically does **not** get in this pass, both
+returning `-1` safely (a real gap, not silently wrong output):
+- **Hostname resolution.** `y.net.connect`/`udp_send` with a hostname
+  (not an IPv4/IPv6 literal) needs the ~480-line resolv.conf/DNS-
+  query/answer-parsing logic `__ys_net_connect_host` implements for
+  Linux — porting that a second (and third, for UDP) time was out of
+  scope for this pass. IPv4 and IPv6 *literals* work.
+- **TLS and the HTTP client.** These depend on this backend's ELF-only
+  dynamic-linking machinery, which has no Mach-O counterpart at all —
+  building one would be roughly the scope v2.27's whole ELF milestone
+  was, for a different object format.
+
+Calling any of `y.net.tls_*`/`y.http.*` while compiling for macOS
+still hits the "unresolved symbol" safety net (a clean compile
+failure, not a broken binary).
 
 **Native HTTP client (`ys -c`, Linux only — v2.31):**
 

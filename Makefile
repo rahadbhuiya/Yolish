@@ -13,6 +13,10 @@ SAN       = -fsanitize=address,undefined -fno-omit-frame-pointer -g
 SRCS      = lexer.c parser.c eval.c net_runtime.c compiler.c \
             elf_out.c pe_out.c macho_out.c formatter.c checker.c \
             bytecode.c bcompiler.c vm.c main.c
+# NOTE: compiler_net.c is NOT listed above on purpose (v2.34) -- it's
+# #include-d directly into compiler.c, not compiled as its own
+# translation unit. Adding it here would define every symbol in it
+# twice and fail to link.
 
 ICONS_DIR = icons
 
