@@ -232,35 +232,37 @@ jobs:
           # as `gtimeout`.
           brew install coreutils
 
-      - name: Native TCP client — real host, real macOS syscalls
+      - name: Native UDP — self-contained on localhost
         run: |
-          # IP literal, not a hostname -- hostname resolution is one of
-          # the two things v2.34 explicitly didn't port to macOS (see
-          # that changelog entry). 93.184.216.34 is example.com's IP.
-          printf 'let h = y.net.connect("93.184.216.34", 80)\ny.println(h)\nif h >= 0 {\n    y.net.send(h, "GET / HTTP/1.0\\r\\nHost: example.com\\r\\n\\r\\n")\n    y.net.recv_print(h, 200)\n    y.net.close(h)\n}\ny.println("tcp client done")\n' \
-            > /tmp/macos_tcp_client.y
-          ./ys -c /tmp/macos_tcp_client.y --target macos -o /tmp/macos_tcp_client_bin
-          out=$(gtimeout 20 /tmp/macos_tcp_client_bin)
+          # Run first, before anything touching a real external host:
+          # this and the next step depend on nothing but loopback, so
+          # a failure here means the core socket/syscall logic itself
+          # is wrong, independent of whether real internet reachability
+          # from this runner is even part of the problem.
+          printf 'let srv = y.net.udp_bind(9501)\nlet cli = y.net.udp_socket()\ny.net.udp_send(cli, "127.0.0.1", 9501, "hello udp macos")\ny.net.udp_recv_reply_print(srv, 100)\ny.net.udp_close(srv)\ny.net.udp_close(cli)\ny.println("udp done")\n' \
+            > /tmp/macos_udp.y
+          ./ys -c /tmp/macos_udp.y --target macos -o /tmp/macos_udp_bin
+          out=$(gtimeout -k 5 10 /tmp/macos_udp_bin)
           echo "$out"
-          echo "$out" | grep -q "^0$"        # connect() returned a valid fd
-          echo "$out" | grep -qi "HTTP/1"    # a real HTTP response came back
-          echo "$out" | grep -q "^tcp client done$"
-          rm -f /tmp/macos_tcp_client.y /tmp/macos_tcp_client_bin
-          echo "PASS: macos native TCP client"
+          echo "$out" | grep -q "hello udp macos"
+          echo "$out" | grep -q "^udp done$"
+          rm -f /tmp/macos_udp.y /tmp/macos_udp_bin
+          echo "PASS: macos native UDP"
 
       - name: Native TCP server + client — self-contained on localhost
         run: |
-          # Exercises listen/accept/send/recv_print/close together,
-          # both directions, without depending on any external host.
+          # Exercises listen/accept/connect/send/recv_print/close
+          # together, both directions, without depending on any
+          # external host being reachable at all.
           printf 'let srv = y.net.listen(9500)\ny.println(srv)\nlet conn = y.net.accept(srv)\ny.println(conn)\nif conn >= 0 {\n    y.net.recv_print(conn, 100)\n    y.net.send(conn, "server reply")\n    y.net.close(conn)\n}\n' \
             > /tmp/macos_srv.y
           printf 'let h = y.net.connect("127.0.0.1", 9500)\ny.println(h)\nif h >= 0 {\n    y.net.send(h, "client hello")\n    y.net.recv_print(h, 100)\n    y.net.close(h)\n}\n' \
             > /tmp/macos_cli.y
           ./ys -c /tmp/macos_srv.y --target macos -o /tmp/macos_srv_bin
           ./ys -c /tmp/macos_cli.y --target macos -o /tmp/macos_cli_bin
-          gtimeout 15 /tmp/macos_srv_bin > /tmp/macos_srv_out.txt 2>&1 &
+          gtimeout -k 5 15 /tmp/macos_srv_bin > /tmp/macos_srv_out.txt 2>&1 &
           sleep 1
-          cli_out=$(gtimeout 10 /tmp/macos_cli_bin)
+          cli_out=$(gtimeout -k 5 10 /tmp/macos_cli_bin)
           wait
           srv_out=$(cat /tmp/macos_srv_out.txt)
           echo "server: $srv_out"
@@ -272,14 +274,41 @@ jobs:
           rm -f /tmp/macos_srv.y /tmp/macos_cli.y /tmp/macos_srv_bin /tmp/macos_cli_bin /tmp/macos_srv_out.txt
           echo "PASS: macos native TCP server + client"
 
-      - name: Native UDP — self-contained on localhost
+      - name: Native TCP connect-only smoke test — real external host
         run: |
-          printf 'let srv = y.net.udp_bind(9501)\nlet cli = y.net.udp_socket()\ny.net.udp_send(cli, "127.0.0.1", 9501, "hello udp macos")\ny.net.udp_recv_reply_print(srv, 100)\ny.net.udp_close(srv)\ny.net.udp_close(cli)\ny.println("udp done")\n' \
-            > /tmp/macos_udp.y
-          ./ys -c /tmp/macos_udp.y --target macos -o /tmp/macos_udp_bin
-          out=$(gtimeout 10 /tmp/macos_udp_bin)
+          # Deliberately minimal (connect() and nothing else) so a hang
+          # or failure here points specifically at connect() itself,
+          # separate from send()/recv_print() -- those already got real
+          # coverage over loopback in the previous step, so the only
+          # new thing this step (and the next one) actually exercises
+          # is a real routed connection over the actual internet, which
+          # loopback can't test. -k 5 forces a real kill 5s after the
+          # main timeout if the process ignores the initial signal,
+          # so a hang here reports a clean, unambiguous exit code
+          # instead of whatever an external kill of the whole job step
+          # would look like.
+          printf 'let h = y.net.connect("93.184.216.34", 80)\ny.println(h)\nif h >= 0 { y.net.close(h) }\ny.println("connect-only done")\n' \
+            > /tmp/macos_connect_only.y
+          ./ys -c /tmp/macos_connect_only.y --target macos -o /tmp/macos_connect_only_bin
+          out=$(gtimeout -k 5 15 /tmp/macos_connect_only_bin)
           echo "$out"
-          echo "$out" | grep -q "hello udp macos"
-          echo "$out" | grep -q "^udp done$"
-          rm -f /tmp/macos_udp.y /tmp/macos_udp_bin
-          echo "PASS: macos native UDP"
+          echo "$out" | grep -q "^0$"
+          echo "$out" | grep -q "^connect-only done$"
+          rm -f /tmp/macos_connect_only.y /tmp/macos_connect_only_bin
+          echo "PASS: macos native TCP connect (real host)"
+
+      - name: Native TCP client — real host, real macOS syscalls
+        run: |
+          # IP literal, not a hostname -- hostname resolution is one of
+          # the two things v2.34 explicitly didn't port to macOS (see
+          # that changelog entry). 93.184.216.34 is example.com's IP.
+          printf 'let h = y.net.connect("93.184.216.34", 80)\ny.println(h)\nif h >= 0 {\n    y.net.send(h, "GET / HTTP/1.0\\r\\nHost: example.com\\r\\n\\r\\n")\n    y.net.recv_print(h, 200)\n    y.net.close(h)\n}\ny.println("tcp client done")\n' \
+            > /tmp/macos_tcp_client.y
+          ./ys -c /tmp/macos_tcp_client.y --target macos -o /tmp/macos_tcp_client_bin
+          out=$(gtimeout -k 5 20 /tmp/macos_tcp_client_bin)
+          echo "$out"
+          echo "$out" | grep -q "^0$"        # connect() returned a valid fd
+          echo "$out" | grep -qi "HTTP/1"    # a real HTTP response came back
+          echo "$out" | grep -q "^tcp client done$"
+          rm -f /tmp/macos_tcp_client.y /tmp/macos_tcp_client_bin
+          echo "PASS: macos native TCP client"
