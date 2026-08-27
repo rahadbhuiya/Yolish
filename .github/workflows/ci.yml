@@ -232,6 +232,39 @@ jobs:
           # as `gtimeout`.
           brew install coreutils
 
+      - name: Native macOS smoke test — no networking at all
+        run: |
+          # Every single test so far has hung with zero output, even a
+          # diagnostic with no loops in the generated code at all
+          # (bind/socket/send, straight-line, no backward jumps
+          # possible). That's a strange enough result to stop assuming
+          # the bug is specifically in networking and check something
+          # more basic first: does a trivial Mach-O binary with no
+          # networking involved run and print anything at all on real
+          # macOS? --target macos has been in this project since long
+          # before any of the native networking work, but nothing in
+          # this repository's history actually confirms it was ever
+          # execution-tested end-to-end on a real Mac -- only compiled.
+          # If THIS hangs too, the bug isn't in y.net.* at all.
+          printf 'y.println("hello from macos")\ny.println(42)\n' > /tmp/macos_smoke.y
+          ./ys -c /tmp/macos_smoke.y --target macos -o /tmp/macos_smoke_bin
+          set +e
+          out=$(gtimeout -k 5 10 /tmp/macos_smoke_bin)
+          rc=$?
+          set -e
+          echo "exit code: $rc"
+          echo "--- output ---"
+          echo "$out"
+          echo "--------------"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAILED or TIMED OUT (exit $rc) -- this has nothing to do with networking; basic macOS program execution itself is broken"
+            exit 1
+          fi
+          echo "$out" | grep -q "^hello from macos$"
+          echo "$out" | grep -q "^42$"
+          rm -f /tmp/macos_smoke.y /tmp/macos_smoke_bin
+          echo "PASS: macos basic program execution + print"
+
       - name: Native UDP diagnostic — bind/socket/send only, no recv
         run: |
           # Isolates one specific hypothesis about the full UDP test's
