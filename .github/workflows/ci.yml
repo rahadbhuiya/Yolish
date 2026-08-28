@@ -232,6 +232,23 @@ jobs:
           # as `gtimeout`.
           brew install coreutils
 
+      - name: Install Rosetta 2
+        run: |
+          # GitHub's macos-latest runners are Apple Silicon (arm64) and
+          # do NOT have Rosetta 2 installed by default. ys's --target
+          # macos backend (macho_out.c) hardcodes CPU_TYPE_X86_64 --
+          # it doesn't emit arm64 Mach-O yet -- so every binary this
+          # job produces and runs below is x86_64. Without Rosetta, the
+          # kernel can't translate that at all and SIGKILLs the process
+          # before it executes a single instruction: zero output, exit
+          # 137, identical on every test regardless of what the
+          # generated code actually does (this is what earlier looked
+          # like a networking bug, then looked like a codesigning bug --
+          # it was neither; the binaries were never able to run on this
+          # runner's CPU in the first place). --agree-to-license is
+          # required for this to run unattended in CI.
+          sudo softwareupdate --install-rosetta --agree-to-license
+
       - name: Native macOS smoke test — no networking at all
         run: |
           # Every single test so far has hung with zero output, even a
