@@ -211,6 +211,20 @@ int macho_write(const char *path,
     /* Data (strings) */
     if(data_len>0) fwrite(data,1,data_len,f);
 
+    /* Pad to linkedit_off. The __LINKEDIT load command above already
+     * declares fileoff=linkedit_off with filesize=0, but without this the
+     * file's real length stops right after `data` — shorter than what the
+     * segment table claims. That mismatch (a segment starting past the
+     * actual end-of-file) is enough to make `codesign` refuse to sign the
+     * binary, since it can't place the signature superblob at an offset
+     * that doesn't match the file's true size. Padding here makes the
+     * on-disk file agree with the declared layout so codesign has a
+     * well-formed __LINKEDIT region to extend. */
+    {
+        long cur=ftell(f);
+        for(long i=cur;i<(long)linkedit_off;i++) fputc(0,f);
+    }
+
     fclose(f);
 
     /* chmod +x (POSIX only) */
