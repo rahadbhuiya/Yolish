@@ -221,5 +221,36 @@ int macho_write(const char *path,
         if(system(cmd)){}
     }
 #endif
+
+    /* macOS: an unsigned Mach-O executable is killed by the kernel's AMFI
+     * / code-signing enforcement before it ever executes a single
+     * instruction — this happens on both Apple Silicon *and* Intel Macs
+     * on modern macOS, not just arm64. The process shows up as SIGKILL
+     * (exit code 137) with zero output, because it never gets past
+     * execve(). This is true even for a completely trivial, no-syscall
+     * binary, which is why the earlier network-focused debugging never
+     * turned anything up: the bug is here, not in y.net.*.
+     *
+     * We don't hand-roll an LC_CODE_SIGNATURE + CodeDirectory blob here;
+     * instead we shell out to the system `codesign` tool to apply an
+     * ad-hoc signature ("-s -") after the file is written. This only
+     * runs (and only needs to run) when ys itself is executing on macOS
+     * and cross-compiling isn't in play; codesign isn't available on
+     * Linux/Windows build hosts, so failures there are silently ignored.
+     */
+#ifdef __APPLE__
+    {
+        char cmd[600];
+        snprintf(cmd,sizeof(cmd),
+            "codesign --force -s - \"%s\" >/dev/null 2>&1",path);
+        if(system(cmd)){
+            fprintf(stderr,
+                "warning: codesign failed for \"%s\" — the binary will be "
+                "killed by macOS at launch (SIGKILL/exit 137) until it is "
+                "signed, e.g. run: codesign -s - \"%s\"\n", path, path);
+        }
+    }
+#endif
+
     return 0;
 }
