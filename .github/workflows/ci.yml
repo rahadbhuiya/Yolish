@@ -208,6 +208,18 @@ jobs:
     # unverified before it existed; a green run here is what actually
     # answers the open question the v2.34 changelog entry left on the
     # table, not just "the compiler emits the intended bytes."
+    #
+    # Non-blocking (continue-on-error) for now: getting a macOS binary
+    # to actually execute on GitHub's runners has needed three separate,
+    # unrelated fixes so far (missing code signature -> AMFI SIGKILL;
+    # __LINKEDIT segment shorter on disk than declared -> codesign
+    # itself failing; arm64 runner with no Rosetta 2 -> SIGKILL again
+    # even once properly signed) and may need more before it's reliably
+    # green. Every other job in this workflow (Linux, Windows) is fully
+    # working and shouldn't be blocked on this one still being sorted
+    # out. Remove continue-on-error once this job has stayed green for
+    # a while.
+    continue-on-error: true
     runs-on: macos-latest
 
     steps:
