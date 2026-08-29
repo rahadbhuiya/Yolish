@@ -211,6 +211,20 @@ int macho_write(const char *path,
     /* Data (strings) */
     if(data_len>0) fwrite(data,1,data_len,f);
 
+    /* Pad to linkedit_off. The __LINKEDIT load command above already
+     * declares fileoff=linkedit_off with filesize=0, but without this the
+     * file's real length stops right after `data` — shorter than what the
+     * segment table claims. That mismatch (a segment starting past the
+     * actual end-of-file) is enough to make `codesign` refuse to sign the
+     * binary, since it can't place the signature superblob at an offset
+     * that doesn't match the file's true size. Padding here makes the
+     * on-disk file agree with the declared layout so codesign has a
+     * well-formed __LINKEDIT region to extend. */
+    {
+        long cur=ftell(f);
+        for(long i=cur;i<(long)linkedit_off;i++) fputc(0,f);
+    }
+
     fclose(f);
 
     /* chmod +x (POSIX only) */
@@ -222,37 +236,33 @@ int macho_write(const char *path,
     }
 #endif
 
-    /* Ad-hoc code signature (macOS host only).
+    /* macOS: an unsigned Mach-O executable is killed by the kernel's AMFI
+     * / code-signing enforcement before it ever executes a single
+     * instruction — this happens on both Apple Silicon *and* Intel Macs
+     * on modern macOS, not just arm64. The process shows up as SIGKILL
+     * (exit code 137) with zero output, because it never gets past
+     * execve(). This is true even for a completely trivial, no-syscall
+     * binary, which is why the earlier network-focused debugging never
+     * turned anything up: the bug is here, not in y.net.*.
      *
-     * Without ANY signature at all, this binary won't run on Apple
-     * Silicon (arm64 macOS, whether the binary is arm64 native or,
-     * like ours, x86_64 running under Rosetta 2) -- the kernel's code
-     * integrity enforcement (AMFI) requires at least an ad-hoc
-     * signature for anything to execute, and a hand-linked binary that
-     * skips the signing step Xcode/clang normally apply automatically
-     * will fail to run. This has been true since Apple Silicon shipped
-     * and has only gotten stricter since; a binary built and tested on
-     * an Intel Mac years ago may not reveal this at all, which is
-     * presumably how this went unnoticed for as long as it did here.
-     *
-     * `codesign --sign -` applies a minimal, valid ad-hoc signature --
-     * no Apple Developer certificate or account needed, just the
-     * codesign tool itself, which ships with every macOS install.
-     * Guarded by __APPLE__ (true only when *this compiler* -- ys
-     * itself -- is being built for/running on macOS) rather than
-     * Yolish's own TARGET_MACOS: codesign is a macOS-only tool, so
-     * this can only actually run here if ys itself is a native macOS
-     * build. If ys is cross-compiling a macos-target binary from
-     * Linux or Windows instead, this step is skipped and the
-     * resulting binary will still need signing on an actual Mac
-     * before it can run there -- unavoidable from a non-Mac host, but
-     * not a concern for a native macOS build (this project's own
-     * macOS CI job included). */
+     * We don't hand-roll an LC_CODE_SIGNATURE + CodeDirectory blob here;
+     * instead we shell out to the system `codesign` tool to apply an
+     * ad-hoc signature ("-s -") after the file is written. This only
+     * runs (and only needs to run) when ys itself is executing on macOS
+     * and cross-compiling isn't in play; codesign isn't available on
+     * Linux/Windows build hosts, so failures there are silently ignored.
+     */
 #ifdef __APPLE__
     {
-        char cmd[512];
-        snprintf(cmd,sizeof(cmd),"codesign --sign - --force \"%s\" 2>/dev/null",path);
-        if(system(cmd)){}
+        char cmd[600];
+        snprintf(cmd,sizeof(cmd),
+            "codesign --force -s - \"%s\" >/dev/null 2>&1",path);
+        if(system(cmd)){
+            fprintf(stderr,
+                "warning: codesign failed for \"%s\" — the binary will be "
+                "killed by macOS at launch (SIGKILL/exit 137) until it is "
+                "signed, e.g. run: codesign -s - \"%s\"\n", path, path);
+        }
     }
 #endif
 

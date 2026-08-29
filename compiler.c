@@ -33,6 +33,7 @@ static void emit1(uint8_t b){ code_buf[code_len++]=b; }
 static void emit2(uint8_t a,uint8_t b){ emit1(a);emit1(b); }
 static void emit3(uint8_t a,uint8_t b,uint8_t c){ emit1(a);emit1(b);emit1(c); }
 static void emit4(uint8_t a,uint8_t b,uint8_t c,uint8_t d){ emit1(a);emit1(b);emit1(c);emit1(d); }
+static void emit5(uint8_t a,uint8_t b,uint8_t c,uint8_t d,uint8_t e){ emit1(a);emit1(b);emit1(c);emit1(d);emit1(e); }
 
 static void emit_i32(int32_t v){
     emit1((uint8_t)(v    ));
@@ -417,7 +418,7 @@ static void compile_block(Node *b);
    here because emit_helpers() below calls emit_net_helpers() before
    that #include point is reached. */
 static void emit_net_helpers(void);
-static int compile_net_call(Node *n, const char *fn, int is_y_net, int is_y_http);
+static int compile_net_call(Node *n, const char *fn, int is_y_net, int is_y_http, int is_y_db);
 
 /*  x86-64 instruction helpers  */
 
@@ -971,6 +972,10 @@ static void compile_expr(Node *n){
             && strcmp(n->left->name,"http")==0
             && n->left->left && n->left->left->kind==ND_IDENT
             && strcmp(n->left->left->name,"y")==0;
+        int is_y_db = n->left && n->left->kind==ND_DOT
+            && strcmp(n->left->name,"db")==0
+            && n->left->left && n->left->left->kind==ND_IDENT
+            && strcmp(n->left->left->name,"y")==0;
         /* y.println(val) */
         if(strcmp(fn,"println")==0||strcmp(fn,"y.println")==0){
             if(n->argc>0){
@@ -1055,7 +1060,7 @@ static void compile_expr(Node *n){
            the TARGET_LINUX guard these are defined under above) —
            macOS/Windows have no native y.net.* support at all yet for
            any shape of address. */
-        if(compile_net_call(n, fn, is_y_net, is_y_http)) break;
+        if(compile_net_call(n, fn, is_y_net, is_y_http, is_y_db)) break;
         char fn_call_name[68];
         if(strcmp(fn,"main")==0){ snprintf(fn_call_name,68,"__ys_main"); fn=fn_call_name; }
         /* save caller-saved registers we care about: none needed now */

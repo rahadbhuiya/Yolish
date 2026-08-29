@@ -3656,6 +3656,45 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
 #endif
     }
 
+    /* y.db.sqlite_* — see the SQLite engine comment near
+       ys_db_sqlite_open (net_runtime.c) for what this does and
+       doesn't cover. Every branch here compiles regardless of
+       YS_WITH_SQLITE, same as y.net.tls_* above. */
+    if(strcmp_u(name,"y.db.sqlite_open")==0){
+#ifdef YS_WITH_SQLITE
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_int(-1);
+        Val pv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        return make_int(ys_db_sqlite_open(pv.type==YS_STR?pv.sval:""));
+#else
+        ys_net_set_err("ys was built without SQLite support (rebuild with -DYS_WITH_SQLITE -lsqlite3)");
+        return make_int(-1);
+#endif
+    }
+    if(strcmp_u(name,"y.db.sqlite_exec")==0){
+#ifdef YS_WITH_SQLITE
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_int(-1);
+        Val hv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val qv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(qv.type!=YS_STR) return make_int(-1);
+        return make_int(ys_db_sqlite_exec(val_int(hv), qv.sval));
+#else
+        return make_int(-1);
+#endif
+    }
+    if(strcmp_u(name,"y.db.sqlite_close")==0){
+#ifdef YS_WITH_SQLITE
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val hv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        ys_db_sqlite_close(val_int(hv));
+        return make_nil();
+#else
+        return make_nil();
+#endif
+    }
+
     /* y.http.* — convenience HTTP client built on the y.net connect/
        send/recv functions (see ys_http_request near the TLS engine
        for what this does and doesn't handle). Returns a map with

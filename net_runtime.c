@@ -1012,3 +1012,57 @@ int ys_map_count_live(Val *m){
         if(!ys_map_slot_empty(&m->map_keys[i]) && !ys_map_slot_tomb(&m->map_keys[i])) n2++;
     return n2;
 }
+/* y.db.sqlite_* — thin SQLite client (opt-in, YS_WITH_SQLITE). Kept
+   deliberately narrow: open a file (or ":memory:"), run one SQL
+   statement with sqlite3_exec's callback=NULL (fire-and-forget —
+   CREATE/INSERT/UPDATE/DELETE, no row results read back, same
+   "no general string/array return type" ceiling y.net.recv's
+   print-not-return native sibling already lives under), and close.
+   Reading query results back into the language is a separate,
+   larger piece of work (needs sqlite3_exec's callback, or
+   prepare/step/column) and isn't attempted here. */
+#ifdef YS_WITH_SQLITE
+/* sqlite3.h's dev-header may not be installed everywhere ys is built,
+   but the tiny slice of its C API used below is stable/frozen (SQLite
+   guarantees strict backward ABI compatibility across the 3.x series),
+   so these are declared directly rather than requiring the full
+   header. If sqlite3.h happens to already be on the include path this
+   still matches it exactly -- same types, same signatures. */
+typedef struct sqlite3 sqlite3;
+#define SQLITE_OK 0
+extern int sqlite3_open(const char *filename, sqlite3 **ppDb);
+extern int sqlite3_exec(sqlite3 *db, const char *sql,
+    int (*callback)(void*,int,char**,char**), void *arg, char **errmsg);
+extern int sqlite3_close(sqlite3 *db);
+extern const char *sqlite3_errmsg(sqlite3 *db);
+extern void sqlite3_free(void *ptr);
+
+int64_t ys_db_sqlite_open(const char *path){
+    sqlite3 *db=NULL;
+    int rc=sqlite3_open(path?path:"", &db);
+    if(rc!=SQLITE_OK){
+        ys_net_set_err(db?sqlite3_errmsg(db):"sqlite3_open failed");
+        if(db) sqlite3_close(db); /* still allocates a handle on failure; must be closed to avoid leaking it */
+        return -1;
+    }
+    return (int64_t)(intptr_t)db;
+}
+
+int ys_db_sqlite_exec(int64_t handle, const char *sql){
+    if(handle==0) return -1;
+    sqlite3 *db=(sqlite3*)(intptr_t)handle;
+    char *errmsg=NULL;
+    int rc=sqlite3_exec(db, sql?sql:"", NULL, NULL, &errmsg);
+    if(rc!=SQLITE_OK){
+        ys_net_set_err(errmsg?errmsg:"sqlite3_exec failed");
+        if(errmsg) sqlite3_free(errmsg);
+        return rc;
+    }
+    return 0;
+}
+
+void ys_db_sqlite_close(int64_t handle){
+    if(handle==0) return;
+    sqlite3_close((sqlite3*)(intptr_t)handle);
+}
+#endif

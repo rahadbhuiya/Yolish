@@ -3438,7 +3438,7 @@ static void emit_http_request(const char *host, int port, int use_tls, int req_o
    definitions elsewhere in the normal compile_expr flow. */
 static void compile_expr(Node *n);
 
-static int compile_net_call(Node *n, const char *fn, int is_y_net, int is_y_http){
+static int compile_net_call(Node *n, const char *fn, int is_y_net, int is_y_http, int is_y_db){
         if(is_y_net && strcmp(fn,"connect")==0){
             int base=n->left?1:0;
             Node *ip_arg=(n->argc>base)?n->args[base]:NULL;
@@ -3709,6 +3709,155 @@ static int compile_net_call(Node *n, const char *fn, int is_y_net, int is_y_http
             int p=x_call_unresolved(); add_call_patch(p,"__ys_net_close");
             return 1;
         }
+        /* y.db.sqlite_open(path) -> handle (the raw sqlite3* pointer,
+           reinterpreted as an int) or -1. Unlike y.net.tls_* there's no
+           separate handle table here — sqlite3_open already gives back
+           exactly one pointer, and that's all sqlite3_exec/sqlite3_close
+           need, so the pointer value itself IS the handle. Dynamically
+           links libsqlite3.so.0 via the same ELF dynlink machinery TLS
+           uses (dynlink_need_library/dynlink_import/x_call_got) — see
+           compiler.c's dynlink_need_library comment. Linux only for now,
+           same as TLS: macOS has no Mach-O dynamic-linking support at
+           all yet (macho_out.c is a fully static writer), and Windows
+           has no native y.net.* or y.db.* support of any kind yet.
+
+           All three sqlite_* builtins force 16-byte stack alignment
+           right before their external call, rather than relying on
+           counting pushes/pops relative to whatever the enclosing
+           function's rsp happens to be. That's not just defensiveness:
+           chasing this exact bug found that this program's *entry
+           point* itself leaves rsp already 8-mod-16 (one push short of
+           what a function actually reached via `call` would have),
+           and every existing native library call downstream inherits
+           that offset for its own alignment. Some call sites' own
+           push/pop counts happen to cancel it out by accident, some
+           don't -- it's invisible until a callee's own compiler-
+           generated code uses an alignment-sensitive SSE store
+           (movaps/movdqa) on its own locals, which sqlite3_exec's much
+           heavier internals hit and a bare puts() call apparently
+           never did. That root cause is a program-wide, pre-existing
+           issue (nothing to do with the SQLite work itself) and isn't
+           safe to fix blind here without re-validating every existing
+           native call site against it -- these three helpers just
+           make new call sites immune to it regardless of which way
+           it eventually gets fixed. */
+        /* Save the true rsp in r10, force rsp down to 16-byte
+           alignment, then reserve 16 more bytes: [rsp+8] holds the
+           saved original rsp (needed to restore it correctly no
+           matter how misaligned it was to begin with), [rsp+0] is
+           free for the caller to use as an 8-byte out-param scratch
+           slot if it needs one (sqlite_open does; sqlite_exec/close
+           don't but reserving it uniformly keeps this one shared
+           helper simple). */
+        #define X_ALIGN16_ENTER() do{ \
+            emit3(0x4c,0x8b,0xd4); /* mov r10,rsp */ \
+            emit4(0x48,0x83,0xe4,0xf0); /* and rsp,-16 */ \
+            emit4(0x48,0x83,0xec,0x10); /* sub rsp,16 */ \
+            emit5(0x4c,0x89,0x54,0x24,0x08); /* mov [rsp+8],r10 */ \
+        }while(0)
+        #define X_ALIGN16_EXIT() do{ \
+            emit5(0x4c,0x8b,0x54,0x24,0x08); /* mov r10,[rsp+8] */ \
+            emit3(0x4c,0x89,0xd4); /* mov rsp,r10 */ \
+        }while(0)
+        if(is_y_db && strcmp(fn,"sqlite_open")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); return 1; }
+            dynlink_need_library("libsqlite3.so.0");
+            int open_got=dynlink_import("sqlite3_open");
+            int close_got=dynlink_import("sqlite3_close");
+
+            int base=n->left?1:0;
+            Node *path_arg=(n->argc>base)?n->args[base]:NULL;
+            int off;
+            if(path_arg && path_arg->kind==ND_STR) off=data_add_str(path_arg->sval);
+            else off=data_add_str("");
+
+            X_ALIGN16_ENTER(); /* [rsp+0] is our ppDb scratch, [rsp+8]=saved rsp */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,off); emit_i32(0); /* rdi=&path */
+            emit4(0x48,0x8d,0x34,0x24); /* rsi=[rsp] i.e. lea rsi,[rsp] -- &scratch (ppDb) */
+            x_call_got(open_got);
+            /* rax=rc; [rsp] now holds sqlite3_open's written-back
+               sqlite3* pointer regardless of rc. Load it into rdx
+               before X_ALIGN16_EXIT() drops rsp back down and takes
+               that scratch slot away. */
+            emit4(0x48,0x8b,0x14,0x24); /* mov rdx,[rsp] */
+            X_ALIGN16_EXIT();
+
+            emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0  (rc) */
+            int jm_ok=x_jz_rel32();
+
+            /* error path: rc != 0. sqlite3_open still allocates a
+               handle worth freeing unless allocation itself failed
+               (handle==0), so close it before returning -1 to avoid
+               leaking it. */
+            emit4(0x48,0x83,0xfa,0x00); /* cmp rdx,0  (handle) */
+            int jm_noclose=x_jz_rel32();
+            emit3(0x48,0x89,0xd7); /* mov rdi,rdx */
+            X_ALIGN16_ENTER();
+            x_call_got(close_got);
+            X_ALIGN16_EXIT();
+            x_patch_here(jm_noclose);
+            x_mov_rax_imm32(-1);
+            int jm_done=x_jmp_rel32();
+
+            x_patch_here(jm_ok);
+            emit3(0x48,0x89,0xd0); /* mov rax,rdx -- return the handle */
+
+            x_patch_here(jm_done);
+            return 1;
+        }
+        /* y.db.sqlite_exec(handle, sql) -> 0 on success, sqlite rc
+           otherwise. callback/arg/errmsg are all NULL (SQLite's own
+           fire-and-forget mode) -- reading query results back needs a
+           callback trampoline or prepare/step/column, a separate,
+           larger piece of work than this. sql MUST be a string
+           literal, same "no general runtime string type in native
+           yet" ceiling every other native builtin taking a string
+           argument already has. */
+        if(is_y_db && strcmp(fn,"sqlite_exec")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); return 1; }
+            dynlink_need_library("libsqlite3.so.0");
+            int exec_got=dynlink_import("sqlite3_exec");
+
+            int base=n->left?1:0;
+            Node *handle_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *sql_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            int off;
+            if(sql_arg && sql_arg->kind==ND_STR) off=data_add_str(sql_arg->sval);
+            else off=data_add_str("");
+
+            if(handle_arg) compile_expr(handle_arg); else x_mov_rax_imm32(-1);
+            emit3(0x4c,0x8b,0xc8); /* mov r9,rax -- stash handle; r9 isn't touched by
+                                       X_ALIGN16_ENTER/the constant-arg setup below,
+                                       so it survives across the align dance. */
+            X_ALIGN16_ENTER();
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,off); emit_i32(0); /* rsi=&sql */
+            x_mov_r64_imm32(2,0); /* rdx=callback=NULL */
+            x_mov_r64_imm32(1,0); /* rcx=arg=NULL */
+            x_mov_r8d_imm32(0);   /* r8=errmsg=NULL */
+            emit3(0x4c,0x89,0xcf); /* mov rdi,r9 -- handle */
+            x_call_got(exec_got);
+            /* rax = rc */
+            X_ALIGN16_EXIT();
+            return 1;
+        }
+        /* y.db.sqlite_close(handle) */
+        if(is_y_db && strcmp(fn,"sqlite_close")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(0); return 1; }
+            dynlink_need_library("libsqlite3.so.0");
+            int close_got=dynlink_import("sqlite3_close");
+
+            int base=n->left?1:0;
+            Node *handle_arg=(n->argc>base)?n->args[base]:NULL;
+            if(handle_arg) compile_expr(handle_arg); else x_mov_rax_imm32(0);
+            emit3(0x4c,0x8b,0xc8); /* mov r9,rax -- stash handle across the align dance */
+            X_ALIGN16_ENTER();
+            emit3(0x4c,0x89,0xcf); /* mov rdi,r9 */
+            x_call_got(close_got);
+            X_ALIGN16_EXIT();
+            return 1;
+        }
+        #undef X_ALIGN16_ENTER
+        #undef X_ALIGN16_EXIT
         /* y.net.dynlink_test() — proof-of-concept native call into a
            real shared-library function (libc.so.6's puts, followed by
            its exit), exercising the PT_INTERP/PT_DYNAMIC machinery

@@ -45,6 +45,22 @@ void    ys_tls_close(int64_t handle);
 /* y.http.* — HTTP client built on the above */
 Val ys_http_request(const char *method, const char *url, const char *body, int body_len, const char *content_type);
 
+/* y.db.sqlite_* — SQLite client via libsqlite3 (opt-in, YS_WITH_SQLITE).
+   Same pattern as YS_WITH_TLS above: declared unconditionally so
+   eval.c's dispatch compiles either way; without YS_WITH_SQLITE these
+   simply aren't defined here and the dispatch code's own #ifdef
+   guards skip calling them, returning a clear "not compiled in"
+   error instead. The returned handle is the raw sqlite3* pointer
+   value reinterpreted as an int64_t -- there's no separate handle
+   table (unlike y.net.tls_*, which needs one because it tracks
+   {fd,ctx,ssl} per connection; a sqlite3* is already everything
+   sqlite3_exec/sqlite3_close need). */
+#ifdef YS_WITH_SQLITE
+int64_t ys_db_sqlite_open(const char *path);
+int     ys_db_sqlite_exec(int64_t handle, const char *sql);
+void    ys_db_sqlite_close(int64_t handle);
+#endif
+
 /* y.map.* — hashmap engine (open addressing, linear probing) */
 void ys_map_init(Val *m, int cap);
 void ys_map_set(Val *m, Val k, Val v);
