@@ -1623,6 +1623,27 @@ Val eval_block(Node *b,Env *parent){
 }
 
 /*  Builtins  */
+#ifdef YS_WITH_SQLITE
+/* Row callback for y.db.sqlite_query — turns one row of raw C strings
+   (from net_runtime.c's ys_db_sqlite_query, which has no knowledge of
+   Val/maps) into a real YS_MAP {column_name: value} and appends it to
+   the result array. user_data is that result array's Val*, passed
+   straight through from the call_builtin dispatch below. Every value
+   comes back as a string regardless of its real SQLite type — see
+   net_runtime.h's ys_db_sqlite_query comment for why. */
+static void ys_sqlite_query_row_cb(void *user_data, int ncol, char **vals, char **names){
+    Val *result=(Val*)user_data;
+    if(result->arr_len>=255) return; /* matches the max_rows cap passed below; shouldn't trigger */
+    Val row=make_nil(); row.type=YS_MAP;
+    ys_map_init(&row,8);
+    for(int i=0;i<ncol;i++){
+        Val k=make_str(names[i]?names[i]:"");
+        Val v=vals[i]?make_str(vals[i]):make_nil();
+        ys_map_set(&row,k,v);
+    }
+    result->arr_data[result->arr_len++]=row;
+}
+#endif
 static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     if(g_throwing) return make_nil();
 
@@ -3692,6 +3713,24 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         return make_nil();
 #else
         return make_nil();
+#endif
+    }
+    if(strcmp_u(name,"y.db.sqlite_query")==0){
+#ifdef YS_WITH_SQLITE
+        Val result=make_nil(); result.type=YS_ARR;
+        result.arr_data=alloc_arr(256); result.arr_len=0;
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return result;
+        Val hv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val qv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(qv.type!=YS_STR) return result;
+        ys_db_sqlite_query(val_int(hv), qv.sval, 255, ys_sqlite_query_row_cb, &result);
+        return result;
+#else
+        ys_net_set_err("ys was built without SQLite support (rebuild with -DYS_WITH_SQLITE -lsqlite3)");
+        Val result=make_nil(); result.type=YS_ARR;
+        result.arr_data=alloc_arr(1); result.arr_len=0;
+        return result;
 #endif
     }
 

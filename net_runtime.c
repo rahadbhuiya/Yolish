@@ -1017,10 +1017,9 @@ int ys_map_count_live(Val *m){
    statement with sqlite3_exec's callback=NULL (fire-and-forget —
    CREATE/INSERT/UPDATE/DELETE, no row results read back, same
    "no general string/array return type" ceiling y.net.recv's
-   print-not-return native sibling already lives under), and close.
-   Reading query results back into the language is a separate,
-   larger piece of work (needs sqlite3_exec's callback, or
-   prepare/step/column) and isn't attempted here. */
+   print-not-return native sibling already lives under), close, and
+   (see ys_db_sqlite_query below) read query results back as an array
+   of rows. */
 #ifdef YS_WITH_SQLITE
 /* sqlite3.h's dev-header may not be installed everywhere ys is built,
    but the tiny slice of its C API used below is stable/frozen (SQLite
@@ -1064,5 +1063,44 @@ int ys_db_sqlite_exec(int64_t handle, const char *sql){
 void ys_db_sqlite_close(int64_t handle){
     if(handle==0) return;
     sqlite3_close((sqlite3*)(intptr_t)handle);
+}
+
+typedef struct {
+    ys_db_sqlite_row_cb cb;
+    void *user_data;
+    int max_rows;
+    int count;
+    int hit_cap;
+} ys_sqlite_query_ctx;
+
+/* The actual function sqlite3_exec calls per row. Just forwards to
+   the caller's callback (unpacked to plain C strings, exactly what
+   sqlite3_exec itself hands us — no real typing available at this
+   API level) and stops once max_rows is reached by returning
+   non-zero, which makes sqlite3_exec abort further row callbacks. */
+static int ys_sqlite_query_trampoline(void *ud, int ncol, char **vals, char **names){
+    ys_sqlite_query_ctx *ctx=(ys_sqlite_query_ctx*)ud;
+    if(ctx->count>=ctx->max_rows){ ctx->hit_cap=1; return 1; }
+    ctx->cb(ctx->user_data, ncol, vals, names);
+    ctx->count++;
+    return 0;
+}
+
+int ys_db_sqlite_query(int64_t handle, const char *sql, int max_rows, ys_db_sqlite_row_cb cb, void *user_data){
+    if(handle==0 || !cb) return -1;
+    sqlite3 *db=(sqlite3*)(intptr_t)handle;
+    ys_sqlite_query_ctx ctx; ctx.cb=cb; ctx.user_data=user_data; ctx.max_rows=max_rows; ctx.count=0; ctx.hit_cap=0;
+    char *errmsg=NULL;
+    int rc=sqlite3_exec(db, sql?sql:"", ys_sqlite_query_trampoline, &ctx, &errmsg);
+    /* SQLITE_ABORT (rc!=SQLITE_OK) caused by hitting max_rows on
+       purpose isn't a real error -- only report one if the abort
+       came from somewhere else (a genuine SQL/runtime error). */
+    if(rc!=SQLITE_OK && !ctx.hit_cap){
+        ys_net_set_err(errmsg?errmsg:"sqlite3_exec failed");
+        if(errmsg) sqlite3_free(errmsg);
+        return -1;
+    }
+    if(errmsg) sqlite3_free(errmsg);
+    return ctx.count;
 }
 #endif

@@ -59,6 +59,23 @@ Val ys_http_request(const char *method, const char *url, const char *body, int b
 int64_t ys_db_sqlite_open(const char *path);
 int     ys_db_sqlite_exec(int64_t handle, const char *sql);
 void    ys_db_sqlite_close(int64_t handle);
+
+/* y.db.sqlite_query — reads rows back, unlike sqlite_exec above.
+   Deliberately kept at the raw-C-strings level here: this file has no
+   knowledge of Yolish's Val/map types, so it just marshals each row's
+   column names/values as plain char* and hands them to a
+   caller-supplied callback. eval.c supplies that callback and does
+   the actual Val-map construction, since that's where the map-
+   building helpers (ys_map_init/ys_map_set) already live. Every value
+   comes back as text regardless of its real SQLite column type
+   (sqlite3_exec's legacy callback API doesn't expose real types --
+   only prepare/step/column would -- deliberately not used here to
+   keep this to one sqlite3_exec call instead of a four-function
+   prepare/bind/step/finalize sequence). Returns the row count written
+   (capped at max_rows -- hitting the cap is not treated as an error,
+   there just aren't more slots to write into) or -1 on a real error. */
+typedef void (*ys_db_sqlite_row_cb)(void *user_data, int ncol, char **colvals, char **colnames);
+int ys_db_sqlite_query(int64_t handle, const char *sql, int max_rows, ys_db_sqlite_row_cb cb, void *user_data);
 #endif
 
 /* y.map.* — hashmap engine (open addressing, linear probing) */
