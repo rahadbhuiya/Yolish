@@ -1623,14 +1623,17 @@ Val eval_block(Node *b,Env *parent){
 }
 
 /*  Builtins  */
-#ifdef YS_WITH_SQLITE
-/* Row callback for y.db.sqlite_query — turns one row of raw C strings
-   (from net_runtime.c's ys_db_sqlite_query, which has no knowledge of
-   Val/maps) into a real YS_MAP {column_name: value} and appends it to
-   the result array. user_data is that result array's Val*, passed
-   straight through from the call_builtin dispatch below. Every value
-   comes back as a string regardless of its real SQLite type — see
-   net_runtime.h's ys_db_sqlite_query comment for why. */
+/* Row callback for y.db.sqlite_query and y.db.pg_query — turns one
+   row of raw C strings (from net_runtime.c, which has no knowledge
+   of Val/maps for either database engine) into a real YS_MAP
+   {column_name: value} and appends it to the result array.
+   user_data is that result array's Val*, passed straight through
+   from whichever dispatch block below is using it. Every value
+   comes back as a string regardless of its real column type — see
+   net_runtime.h's comments on ys_db_sqlite_query/ys_db_pg_query for
+   why, for each engine respectively. Not gated by YS_WITH_SQLITE:
+   y.db.pg_query uses this too, and PostgreSQL support has no
+   external-library opt-in flag to gate on. */
 static void ys_sqlite_query_row_cb(void *user_data, int ncol, char **vals, char **names){
     Val *result=(Val*)user_data;
     if(result->arr_len>=255) return; /* matches the max_rows cap passed below; shouldn't trigger */
@@ -1643,7 +1646,6 @@ static void ys_sqlite_query_row_cb(void *user_data, int ncol, char **vals, char 
     }
     result->arr_data[result->arr_len++]=row;
 }
-#endif
 static Val call_builtin(const char *name,Node **args,int argc,Env *env){
     if(g_throwing) return make_nil();
 
@@ -3732,6 +3734,54 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         result.arr_data=alloc_arr(1); result.arr_len=0;
         return result;
 #endif
+    }
+
+    /* y.db.pg_* — PostgreSQL client (net_runtime.c, wire protocol v3,
+       no external library). Same shapes as the sqlite_* family above:
+       pg_connect returns a handle (here, the raw socket fd) or -1,
+       pg_exec is fire-and-forget (row count as an int, no row data),
+       pg_query returns an array of maps built via the same
+       ys_sqlite_query_row_cb used for SQLite (the callback only deals
+       in plain C strings, so it's naturally engine-agnostic). */
+    if(strcmp_u(name,"y.db.pg_connect")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+5) return make_int(-1);
+        Val hostv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val portv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        Val userv=eval_node(args[s+2],env); if(g_throwing) return make_nil();
+        Val passv=eval_node(args[s+3],env); if(g_throwing) return make_nil();
+        Val dbv=eval_node(args[s+4],env);   if(g_throwing) return make_nil();
+        const char *host=(hostv.type==YS_STR)?hostv.sval:"";
+        const char *user=(userv.type==YS_STR)?userv.sval:"";
+        const char *pass=(passv.type==YS_STR)?passv.sval:"";
+        const char *dbn =(dbv.type==YS_STR)?dbv.sval:"";
+        return make_int(ys_db_pg_connect(host,(int)val_int(portv),user,pass,dbn));
+    }
+    if(strcmp_u(name,"y.db.pg_exec")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return make_int(-1);
+        Val hv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val qv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(qv.type!=YS_STR) return make_int(-1);
+        return make_int(ys_db_pg_exec(val_int(hv), qv.sval));
+    }
+    if(strcmp_u(name,"y.db.pg_query")==0){
+        Val result=make_nil(); result.type=YS_ARR;
+        result.arr_data=alloc_arr(256); result.arr_len=0;
+        int s=(argc>1)?1:0;
+        if(argc<s+2) return result;
+        Val hv=eval_node(args[s],env);   if(g_throwing) return make_nil();
+        Val qv=eval_node(args[s+1],env); if(g_throwing) return make_nil();
+        if(qv.type!=YS_STR) return result;
+        ys_db_pg_query(val_int(hv), qv.sval, 255, ys_sqlite_query_row_cb, &result);
+        return result;
+    }
+    if(strcmp_u(name,"y.db.pg_close")==0){
+        int s=(argc>1)?1:0;
+        if(argc<s+1) return make_nil();
+        Val hv=eval_node(args[s],env); if(g_throwing) return make_nil();
+        ys_db_pg_close(val_int(hv));
+        return make_nil();
     }
 
     /* y.http.* — convenience HTTP client built on the y.net connect/

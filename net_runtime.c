@@ -1104,3 +1104,368 @@ int ys_db_sqlite_query(int64_t handle, const char *sql, int max_rows, ys_db_sqli
     return ctx.count;
 }
 #endif
+
+/* ==========================================================================
+   y.db.pg_* — PostgreSQL client, wire protocol v3, implemented from
+   scratch. See net_runtime.h's comment on ys_db_pg_connect for the
+   scope (trust/MD5 auth only, no SCRAM-SHA-256 yet; text-format
+   results only). Uses ys_net_connect for the raw socket and plain
+   send()/recv() for everything after that -- no external library.
+   ========================================================================== */
+
+/* ---- MD5 (RFC 1321), self-contained: PostgreSQL's MD5 auth needs
+   md5(md5(password+username) as hex + salt) as hex, and there's no
+   guarantee any crypto library is linked into this build (OpenSSL is
+   only pulled in under YS_WITH_TLS) -- so it's implemented directly
+   here rather than adding a hard dependency just for one hash. This
+   is the standard reference algorithm, nothing PostgreSQL-specific
+   about the implementation itself. */
+typedef struct { uint32_t state[4]; uint64_t count; unsigned char buf[64]; } ys_md5_ctx;
+
+static void ys_md5_transform(uint32_t state[4], const unsigned char block[64]){
+    static const uint32_t K[64]={
+        0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+        0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+        0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+        0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+        0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+        0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+        0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+        0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391};
+    static const int S[64]={7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+        5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+        4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+        6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21};
+    uint32_t M[16];
+    for(int i=0;i<16;i++)
+        M[i]=(uint32_t)block[i*4] | ((uint32_t)block[i*4+1]<<8) | ((uint32_t)block[i*4+2]<<16) | ((uint32_t)block[i*4+3]<<24);
+    uint32_t A=state[0],B=state[1],C=state[2],D=state[3];
+    for(int i=0;i<64;i++){
+        uint32_t F; int g;
+        if(i<16){ F=(B&C)|((~B)&D); g=i; }
+        else if(i<32){ F=(D&B)|((~D)&C); g=(5*i+1)%16; }
+        else if(i<48){ F=B^C^D; g=(3*i+5)%16; }
+        else { F=C^(B|(~D)); g=(7*i)%16; }
+        uint32_t tmp=D; D=C; C=B;
+        uint32_t x=A+F+K[i]+M[g];
+        uint32_t rot=(x<<S[i])|(x>>(32-S[i]));
+        B=B+rot; A=tmp;
+    }
+    state[0]+=A; state[1]+=B; state[2]+=C; state[3]+=D;
+}
+
+static void ys_md5_init(ys_md5_ctx *ctx){
+    ctx->state[0]=0x67452301; ctx->state[1]=0xefcdab89;
+    ctx->state[2]=0x98badcfe; ctx->state[3]=0x10325476;
+    ctx->count=0;
+}
+static void ys_md5_update(ys_md5_ctx *ctx, const unsigned char *data, size_t len){
+    size_t have=(size_t)(ctx->count%64);
+    ctx->count+=len;
+    if(have){
+        size_t take=64-have; if(take>len) take=len;
+        memcpy(ctx->buf+have,data,take);
+        have+=take; data+=take; len-=take;
+        if(have==64){ ys_md5_transform(ctx->state,ctx->buf); have=0; }
+    }
+    while(len>=64){ ys_md5_transform(ctx->state,data); data+=64; len-=64; }
+    if(len) memcpy(ctx->buf,data,len);
+}
+static void ys_md5_final(ys_md5_ctx *ctx, unsigned char out[16]){
+    unsigned char pad[64]={0x80};
+    uint64_t bits=ctx->count*8;
+    size_t have=(size_t)(ctx->count%64);
+    size_t padlen=(have<56)?(56-have):(120-have);
+    ys_md5_update(ctx,pad,padlen);
+    unsigned char lenbuf[8];
+    for(int i=0;i<8;i++) lenbuf[i]=(unsigned char)(bits>>(8*i));
+    ys_md5_update(ctx,lenbuf,8);
+    for(int i=0;i<4;i++) for(int j=0;j<4;j++) out[i*4+j]=(unsigned char)(ctx->state[i]>>(8*j));
+}
+static void ys_md5_hex(const void *data, size_t len, char out[33]){
+    ys_md5_ctx ctx; ys_md5_init(&ctx);
+    ys_md5_update(&ctx,(const unsigned char*)data,len);
+    unsigned char digest[16]; ys_md5_final(&ctx,digest);
+    static const char hexd[]="0123456789abcdef";
+    for(int i=0;i<16;i++){ out[i*2]=hexd[digest[i]>>4]; out[i*2+1]=hexd[digest[i]&0xf]; }
+    out[32]=0;
+}
+
+/* ---- wire helpers: raw send/recv over the plain socket fd
+   ys_net_connect already gives us. All-or-nothing (loops until the
+   full length is sent/received or the connection dies) -- Postgres
+   messages are usually small (well under one TCP segment) so this
+   rarely loops more than once in practice, but relying on a single
+   send()/recv() call moving the whole buffer isn't guaranteed by the
+   socket API and isn't assumed here. */
+static int ys_pg_send_all(int fd, const void *buf, size_t len){
+    const unsigned char *p=(const unsigned char*)buf;
+    size_t sent=0;
+    while(sent<len){
+        long n=send(fd,(const char*)p+sent,(int)(len-sent),0);
+        if(n<=0) return -1;
+        sent+=(size_t)n;
+    }
+    return 0;
+}
+static int ys_pg_recv_all(int fd, void *buf, size_t len){
+    unsigned char *p=(unsigned char*)buf;
+    size_t got=0;
+    while(got<len){
+        long n=recv(fd,(char*)p+got,(int)(len-got),0);
+        if(n<=0) return -1;
+        got+=(size_t)n;
+    }
+    return 0;
+}
+static void ys_pg_put_u32(unsigned char *p, uint32_t v){
+    p[0]=(unsigned char)(v>>24); p[1]=(unsigned char)(v>>16);
+    p[2]=(unsigned char)(v>>8);  p[3]=(unsigned char)v;
+}
+static uint32_t ys_pg_get_u32(const unsigned char *p){
+    return ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|(uint32_t)p[3];
+}
+static uint16_t ys_pg_get_u16(const unsigned char *p){
+    return (uint16_t)(((uint16_t)p[0]<<8)|(uint16_t)p[1]);
+}
+
+/* Reads one backend message: 1-byte type + 4-byte length (length
+   INCLUDES itself but not the type byte, per the protocol) +
+   (length-4) bytes of payload. Caller owns *payload (malloc'd here,
+   NULL if payload is empty) and must free() it. Returns the message
+   type byte, or 0 on a read/connection error. */
+static char ys_pg_read_msg(int fd, unsigned char **payload, uint32_t *paylen){
+    unsigned char hdr[5];
+    if(ys_pg_recv_all(fd,hdr,5)!=0) return 0;
+    char type=(char)hdr[0];
+    uint32_t len=ys_pg_get_u32(hdr+1);
+    uint32_t plen = (len>=4) ? (len-4) : 0;
+    *paylen=plen;
+    if(plen==0){ *payload=NULL; return type; }
+    unsigned char *buf=(unsigned char*)malloc(plen);
+    if(!buf) return 0;
+    if(ys_pg_recv_all(fd,buf,plen)!=0){ free(buf); return 0; }
+    *payload=buf;
+    return type;
+}
+
+/* Handle table: unlike SQLite's sqlite3* (one pointer is everything
+   sqlite3_exec/close need), a Postgres connection here is just a
+   plain socket fd -- and fds are small non-negative integers that
+   would collide with "0 or positive means success" return-value
+   conventions used elsewhere (e.g. -1 already means "connect
+   failed"), so the raw fd doubles as the handle directly, same as
+   how y.net.connect's own TCP handles already work. No separate
+   table needed. */
+
+int64_t ys_db_pg_connect(const char *host, int port, const char *user, const char *password, const char *dbname){
+    int64_t s64=ys_net_connect(host,port);
+    if(s64<0) return -1; /* ys_net_set_err already called by ys_net_connect */
+    int fd=(int)s64;
+
+    /* StartupMessage: int32 length, int32 protocol version (3.0),
+       then a series of "key\0value\0" pairs, terminated by a lone \0.
+       No leading type byte -- StartupMessage is the one message in
+       the whole protocol that doesn't have one. */
+    char msg[512]; size_t p=4; /* leave room for the length prefix */
+    ys_pg_put_u32((unsigned char*)msg,0); /* placeholder, filled in below */
+    uint32_t proto=0x00030000;
+    msg[p++]=(char)(proto>>24); msg[p++]=(char)(proto>>16); msg[p++]=(char)(proto>>8); msg[p++]=(char)proto;
+    const char *keys[2]={"user","database"};
+    const char *vals[2]={user?user:"", dbname?dbname:(user?user:"")};
+    for(int i=0;i<2;i++){
+        size_t klen=strlen(keys[i]), vlen=strlen(vals[i]);
+        if(p+klen+vlen+2>=sizeof(msg)) { close(fd); ys_net_set_err("pg_connect: user/database name too long"); return -1; }
+        memcpy(msg+p,keys[i],klen); p+=klen; msg[p++]=0;
+        memcpy(msg+p,vals[i],vlen); p+=vlen; msg[p++]=0;
+    }
+    msg[p++]=0; /* terminator */
+    ys_pg_put_u32((unsigned char*)msg,(uint32_t)p);
+
+    if(ys_pg_send_all(fd,msg,p)!=0){
+        close(fd); ys_net_set_err("pg_connect: failed sending startup message"); return -1;
+    }
+
+    /* Auth phase: server sends Authentication* messages (type 'R')
+       until it either accepts (auth_type 0) or the connection ends
+       in an ErrorResponse ('E'). */
+    for(;;){
+        unsigned char *payload=NULL; uint32_t plen=0;
+        char type=ys_pg_read_msg(fd,&payload,&plen);
+        if(type==0){ close(fd); ys_net_set_err("pg_connect: connection closed during auth"); return -1; }
+        if(type=='E'){
+            ys_net_set_err(plen>0 ? (const char*)payload+1 : "pg_connect: server rejected connection");
+            free(payload); close(fd); return -1;
+        }
+        if(type!='R'){ free(payload); continue; } /* ignore NoticeResponse etc. before auth completes */
+        if(plen<4){ free(payload); close(fd); ys_net_set_err("pg_connect: malformed auth message"); return -1; }
+        uint32_t auth_type=ys_pg_get_u32(payload);
+        if(auth_type==0){ free(payload); break; } /* AuthenticationOk */
+        if(auth_type==3){ /* AuthenticationCleartextPassword */
+            size_t pwlen=strlen(password?password:"");
+            unsigned char pmsg[256]; size_t mp=5;
+            if(pwlen+1>=sizeof(pmsg)-5){ free(payload); close(fd); ys_net_set_err("pg_connect: password too long"); return -1; }
+            memcpy(pmsg+mp,password?password:"",pwlen); mp+=pwlen; pmsg[mp++]=0;
+            pmsg[0]='p'; ys_pg_put_u32(pmsg+1,(uint32_t)(mp-1));
+            free(payload);
+            if(ys_pg_send_all(fd,pmsg,mp)!=0){ close(fd); ys_net_set_err("pg_connect: failed sending password"); return -1; }
+            continue;
+        }
+        if(auth_type==5){ /* AuthenticationMD5Password: 4-byte salt follows */
+            if(plen<8){ free(payload); close(fd); ys_net_set_err("pg_connect: malformed MD5 auth message"); return -1; }
+            unsigned char salt[4]; memcpy(salt,payload+4,4);
+            free(payload);
+            /* md5(md5(password+username) as hex-string bytes + salt) as hex, prefixed "md5" */
+            char inner[512]; size_t ip=0;
+            const char *pw=password?password:""; const char *un=user?user:"";
+            size_t pwlen=strlen(pw), unlen=strlen(un);
+            if(pwlen+unlen>=sizeof(inner)){ close(fd); ys_net_set_err("pg_connect: username/password too long for MD5 auth"); return -1; }
+            memcpy(inner+ip,pw,pwlen); ip+=pwlen;
+            memcpy(inner+ip,un,unlen); ip+=unlen;
+            char innerhex[33]; ys_md5_hex(inner,ip,innerhex);
+            char outerbuf[33+4]; size_t op=0;
+            memcpy(outerbuf+op,innerhex,32); op+=32;
+            memcpy(outerbuf+op,salt,4); op+=4;
+            char outerhex[33]; ys_md5_hex(outerbuf,op,outerhex);
+            char final[40]; snprintf(final,sizeof(final),"md5%s",outerhex);
+            size_t flen=strlen(final);
+            unsigned char pmsg[64]; size_t mp=5;
+            memcpy(pmsg+mp,final,flen); mp+=flen; pmsg[mp++]=0;
+            pmsg[0]='p'; ys_pg_put_u32(pmsg+1,(uint32_t)(mp-1));
+            if(ys_pg_send_all(fd,pmsg,mp)!=0){ close(fd); ys_net_set_err("pg_connect: failed sending MD5 password"); return -1; }
+            continue;
+        }
+        /* Anything else (SCRAM-SHA-256 = 10, GSS, SSPI, ...) isn't
+           supported yet -- see net_runtime.h's comment on this
+           function for why SCRAM specifically is out of scope here. */
+        free(payload); close(fd);
+        char errbuf[128];
+        snprintf(errbuf,sizeof(errbuf),
+            "pg_connect: server requires an unsupported auth method (type %u) -- only trust and MD5 are implemented; SCRAM-SHA-256 is not yet",
+            auth_type);
+        ys_net_set_err(errbuf);
+        return -1;
+    }
+
+    /* Drain ParameterStatus/BackendKeyData/etc. until ReadyForQuery. */
+    for(;;){
+        unsigned char *payload=NULL; uint32_t plen=0;
+        char type=ys_pg_read_msg(fd,&payload,&plen);
+        if(type==0){ close(fd); ys_net_set_err("pg_connect: connection closed before ready"); return -1; }
+        if(type=='E'){
+            ys_net_set_err(plen>0 ? (const char*)payload+1 : "pg_connect: server error before ready");
+            free(payload); close(fd); return -1;
+        }
+        free(payload);
+        if(type=='Z') break; /* ReadyForQuery */
+    }
+    return (int64_t)fd;
+}
+
+/* Shared by pg_exec and pg_query: sends a Simple Query message and
+   reads the response until ReadyForQuery. If cb is non-NULL, each
+   DataRow is unpacked into plain C strings and handed to it (capped
+   at max_rows, same "hitting the cap isn't an error" convention as
+   y.db.sqlite_query); if cb is NULL, rows are read and discarded
+   (that's what pg_exec uses this for). Returns the row count seen
+   (0 for statements with no RowDescription, e.g. INSERT/UPDATE/DDL)
+   or -1 on error. */
+static int ys_pg_run_query(int64_t handle, const char *sql, int max_rows, ys_db_row_cb cb, void *user_data){
+    if(handle<0) return -1;
+    int fd=(int)handle;
+    size_t sqllen=strlen(sql?sql:"");
+    unsigned char *qmsg=(unsigned char*)malloc(5+sqllen+1);
+    if(!qmsg) return -1;
+    qmsg[0]='Q';
+    ys_pg_put_u32(qmsg+1,(uint32_t)(4+sqllen+1));
+    memcpy(qmsg+5,sql?sql:"",sqllen);
+    qmsg[5+sqllen]=0;
+    int sendrc=ys_pg_send_all(fd,qmsg,5+sqllen+1);
+    free(qmsg);
+    if(sendrc!=0){ ys_net_set_err("pg query: failed sending Query message"); return -1; }
+
+    char *colnames[64]; int ncol=0;
+    int rowcount=0; int had_error=0;
+
+    for(;;){
+        unsigned char *payload=NULL; uint32_t plen=0;
+        char type=ys_pg_read_msg(fd,&payload,&plen);
+        if(type==0){ ys_net_set_err("pg query: connection closed mid-response"); had_error=1; break; }
+
+        if(type=='T'){ /* RowDescription */
+            for(int i=0;i<ncol;i++) free(colnames[i]);
+            ncol=0;
+            if(plen>=2){
+                int fieldcount=ys_pg_get_u16(payload);
+                size_t off=2;
+                for(int i=0;i<fieldcount && i<64 && off<plen;i++){
+                    size_t start=off;
+                    while(off<plen && payload[off]!=0) off++;
+                    size_t namelen=off-start;
+                    colnames[i]=(char*)malloc(namelen+1);
+                    memcpy(colnames[i],payload+start,namelen);
+                    colnames[i][namelen]=0;
+                    ncol=i+1;
+                    off++; /* skip the string's NUL */
+                    off+=18; /* table OID(4)+col attnum(2)+type OID(4)+typlen(2)+typmod(4)+format(2) */
+                }
+            }
+            free(payload);
+        } else if(type=='D'){ /* DataRow */
+            if(plen>=2 && cb && rowcount<max_rows){
+                int fieldcount=ys_pg_get_u16(payload);
+                char *vals[64]; int vfree[64];
+                size_t off=2;
+                int vc=0;
+                for(int i=0;i<fieldcount && i<64 && off+4<=plen;i++){
+                    int32_t flen=(int32_t)ys_pg_get_u32(payload+off); off+=4;
+                    if(flen<0){ vals[i]=NULL; vfree[i]=0; }
+                    else {
+                        vals[i]=(char*)malloc((size_t)flen+1);
+                        memcpy(vals[i],payload+off,(size_t)flen);
+                        vals[i][flen]=0;
+                        vfree[i]=1;
+                        off+=(size_t)flen;
+                    }
+                    vc=i+1;
+                }
+                cb(user_data, vc<ncol?vc:ncol, vals, colnames);
+                for(int i=0;i<vc;i++) if(vfree[i]) free(vals[i]);
+                rowcount++;
+            } else if(cb) {
+                rowcount++; /* past the cap: still counted, just not built into a row */
+            } else {
+                rowcount++; /* pg_exec's cb==NULL case: just counting */
+            }
+            free(payload);
+        } else if(type=='C'){ /* CommandComplete */
+            free(payload);
+        } else if(type=='E'){ /* ErrorResponse */
+            ys_net_set_err(plen>0 ? (const char*)payload+1 : "pg query: server error");
+            free(payload);
+            had_error=1;
+        } else if(type=='Z'){ /* ReadyForQuery -- response is complete */
+            free(payload);
+            break;
+        } else {
+            free(payload); /* NoticeResponse, ParameterStatus, etc. -- ignore */
+        }
+    }
+
+    for(int i=0;i<ncol;i++) free(colnames[i]);
+    return had_error ? -1 : rowcount;
+}
+
+int ys_db_pg_exec(int64_t handle, const char *sql){
+    return ys_pg_run_query(handle, sql, 0, NULL, NULL);
+}
+int ys_db_pg_query(int64_t handle, const char *sql, int max_rows, ys_db_row_cb cb, void *user_data){
+    return ys_pg_run_query(handle, sql, max_rows, cb, user_data);
+}
+void ys_db_pg_close(int64_t handle){
+    if(handle<0) return;
+    int fd=(int)handle;
+    unsigned char term[5]; term[0]='X'; ys_pg_put_u32(term+1,4);
+    ys_pg_send_all(fd,term,5); /* best-effort; ignore failure, we're closing anyway */
+    close(fd);
+}

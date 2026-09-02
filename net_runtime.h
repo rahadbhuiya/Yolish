@@ -45,6 +45,16 @@ void    ys_tls_close(int64_t handle);
 /* y.http.* — HTTP client built on the above */
 Val ys_http_request(const char *method, const char *url, const char *body, int body_len, const char *content_type);
 
+/* Shared row-callback shape for both y.db.sqlite_query (gated,
+   below) and y.db.pg_query (unconditional, further down): engine-
+   agnostic on purpose, since both hand back one row at a time as
+   plain C strings and neither knows anything about Val/maps —
+   eval.c supplies the same kind of callback for both to build the
+   actual Val-map result, reusing the map-building helpers that
+   already live there. Declared here, outside any #ifdef, since
+   PostgreSQL support needs it and has no opt-in flag to gate on. */
+typedef void (*ys_db_row_cb)(void *user_data, int ncol, char **colvals, char **colnames);
+
 /* y.db.sqlite_* — SQLite client via libsqlite3 (opt-in, YS_WITH_SQLITE).
    Same pattern as YS_WITH_TLS above: declared unconditionally so
    eval.c's dispatch compiles either way; without YS_WITH_SQLITE these
@@ -70,13 +80,34 @@ void    ys_db_sqlite_close(int64_t handle);
    comes back as text regardless of its real SQLite column type
    (sqlite3_exec's legacy callback API doesn't expose real types --
    only prepare/step/column would -- deliberately not used here to
+
    keep this to one sqlite3_exec call instead of a four-function
    prepare/bind/step/finalize sequence). Returns the row count written
    (capped at max_rows -- hitting the cap is not treated as an error,
    there just aren't more slots to write into) or -1 on a real error. */
-typedef void (*ys_db_sqlite_row_cb)(void *user_data, int ncol, char **colvals, char **colnames);
-int ys_db_sqlite_query(int64_t handle, const char *sql, int max_rows, ys_db_sqlite_row_cb cb, void *user_data);
+int ys_db_sqlite_query(int64_t handle, const char *sql, int max_rows, ys_db_row_cb cb, void *user_data);
 #endif
+
+/* y.db.pg_* — PostgreSQL client, wire protocol v3 implemented from
+   scratch over the same raw ys_net_connect socket y.net.connect uses
+   -- no libpq, no external dependency, always compiled in (unlike
+   TLS/SQLite there's no external C library to opt into linking).
+   Auth: trust (no password needed) and MD5 are supported (MD5 is
+   implemented locally in net_runtime.c -- no OpenSSL dependency
+   pulled in just for this). SCRAM-SHA-256 (the default auth method
+   on PostgreSQL 14+ installs that haven't been reconfigured) is NOT
+   supported yet -- a real limitation, not an oversight; SCRAM is a
+   materially larger protocol (a real SASL exchange, HMAC, PBKDF2,
+   optional channel binding) than a straight password hash, and
+   worth its own dedicated pass rather than rushing into this one.
+   Values in query results, like y.db.sqlite_query, come back as
+   strings regardless of their real Postgres column type -- the
+   simple query protocol's default text result format, not the
+   binary format, is what's implemented here. */
+int64_t ys_db_pg_connect(const char *host, int port, const char *user, const char *password, const char *dbname);
+int     ys_db_pg_exec(int64_t handle, const char *sql);
+int     ys_db_pg_query(int64_t handle, const char *sql, int max_rows, ys_db_row_cb cb, void *user_data);
+void    ys_db_pg_close(int64_t handle);
 
 /* y.map.* — hashmap engine (open addressing, linear probing) */
 void ys_map_init(Val *m, int cap);

@@ -1,4 +1,4 @@
-#  Yolish v2.36 — Makefile
+#  Yolish v2.37 — Makefile
 #  Targets: all  debug  windows  icons  release  clean
 
 CC       ?= gcc
