@@ -1066,7 +1066,7 @@ void ys_db_sqlite_close(int64_t handle){
 }
 
 typedef struct {
-    ys_db_sqlite_row_cb cb;
+    ys_db_row_cb cb;
     void *user_data;
     int max_rows;
     int count;
@@ -1086,7 +1086,7 @@ static int ys_sqlite_query_trampoline(void *ud, int ncol, char **vals, char **na
     return 0;
 }
 
-int ys_db_sqlite_query(int64_t handle, const char *sql, int max_rows, ys_db_sqlite_row_cb cb, void *user_data){
+int ys_db_sqlite_query(int64_t handle, const char *sql, int max_rows, ys_db_row_cb cb, void *user_data){
     if(handle==0 || !cb) return -1;
     sqlite3 *db=(sqlite3*)(intptr_t)handle;
     ys_sqlite_query_ctx ctx; ctx.cb=cb; ctx.user_data=user_data; ctx.max_rows=max_rows; ctx.count=0; ctx.hit_cap=0;

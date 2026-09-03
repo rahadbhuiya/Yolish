@@ -305,7 +305,7 @@ static int build_dns_query(const char *host, uint8_t *out){
 }
 
 /*  relocations  */
-typedef enum { RELOC_DATA, RELOC_CODE } RelocKind;
+typedef enum { RELOC_DATA, RELOC_CODE, RELOC_CODEADDR } RelocKind;
 typedef struct { RelocKind kind; int code_off; int target_off; } Reloc;
 static Reloc relocs[RELOC_MAX];
 static int   nrelocs=0;
@@ -588,6 +588,42 @@ static void x_mov_al_rbx_idx(int idxreg){
 }
 static void x_mov_rbx_idx_dl(int idxreg){
     emit1(0x88); emit1(0x14); emit1((uint8_t)(0x03|(idxreg<<3)));
+}
+
+/* mov dstreg, [basereg + idxreg*8] -- 8-byte indexed load (SIB,
+   scale=8), for walking pointer arrays like char** at runtime
+   (colvals[i]/colnames[i] in the SQLite query_print callback).
+   All three register args must be in {0..7} (rax..rdi, no REX.B/X/R
+   extension) -- idxreg may not be rsp(4), which x86-64 reserves to
+   mean "no index" in SIB encoding and can't actually address with. */
+static void x_mov_r64_idx8(int dstreg, int basereg, int idxreg){
+    emit1(0x48); emit1(0x8b);
+    emit1((uint8_t)(0x04 | (dstreg<<3)));
+    emit1((uint8_t)(0xc0 | (idxreg<<3) | basereg));
+}
+
+/* cmp byte [basereg+idxreg*1], imm8 -- single-byte indexed compare,
+   scale=1 (unlike x_mov_r64_idx8's scale=8, since this walks raw
+   bytes for an inline strlen loop, not an array of 8-byte pointers).
+   Same register-range restriction as x_mov_r64_idx8 (0..7, idxreg
+   can't be rsp). */
+static void x_cmp_byte_idx1_imm8(int basereg, int idxreg, uint8_t imm){
+    emit1(0x80); emit1(0x3c);
+    emit1((uint8_t)((idxreg<<3)|basereg));
+    emit1(imm);
+}
+
+/* lea rdx, [rip+label_code_off] -- like x_lea_arg1_data's RELOC_DATA
+   version, but the target is a CODE offset (a native function's own
+   starting address, e.g. a callback about to be handed to an
+   external library like sqlite3_exec) rather than a data offset.
+   Hardcoded to rdx since that's the only register this is currently
+   needed for (sqlite3_exec's 3rd argument); generalize to a reg
+   parameter if a second call site ever needs a different register. */
+static void x_lea_rdx_codeaddr(int label_code_off){
+    emit3(0x48,0x8d,0x15);
+    add_reloc(RELOC_CODEADDR,code_len,label_code_off);
+    emit_i32(0);
 }
 
 /* patch jump at patch_off to jump to here */
@@ -1297,7 +1333,8 @@ extern int elf_write(const char *path,
     uint8_t *code, int code_len,
     uint8_t *data, int data_len,
     int *reloc_code, int *reloc_data, int nrelocs,
-    int entry_off);
+    int entry_off,
+    int *ca_code, int *ca_target, int n_ca);
 
 extern int elf_write_dynamic(const char *path,
     uint8_t *code, int code_len,
@@ -1305,7 +1342,8 @@ extern int elf_write_dynamic(const char *path,
     int *reloc_code, int *reloc_data, int nrelocs,
     int entry_off,
     const char **needed_libs, int nneeded,
-    const char **import_names, int *import_got_offs, int nimports);
+    const char **import_names, int *import_got_offs, int nimports,
+    int *ca_code, int *ca_target, int n_ca);
 
 extern int macho_write(const char *path,
     uint8_t *code, int code_len,
@@ -1532,6 +1570,7 @@ int ys_compile(Node *prog, Target target, const char *outfile){
     /* collect reloc arrays */
     static int rc[RELOC_MAX], rd[RELOC_MAX]; int nr=0;
     static int ic_off[RELOC_MAX], ic_idx[RELOC_MAX]; int n_ic=0;
+    static int ca_off[RELOC_MAX], ca_target[RELOC_MAX]; int n_ca=0;
     for(int i=0;i<nrelocs;i++){
         if(relocs[i].kind==RELOC_DATA){
             rc[nr]=relocs[i].code_off;
@@ -1541,6 +1580,10 @@ int ys_compile(Node *prog, Target target, const char *outfile){
             ic_off[n_ic]=relocs[i].code_off;
             ic_idx[n_ic]=relocs[i].target_off; /* import index */
             n_ic++;
+        } else if(relocs[i].kind==RELOC_CODEADDR){
+            ca_off[n_ca]=relocs[i].code_off;
+            ca_target[n_ca]=relocs[i].target_off; /* code offset of the referenced label */
+            n_ca++;
         }
     }
 
@@ -1556,9 +1599,9 @@ int ys_compile(Node *prog, Target target, const char *outfile){
             static const char *lnames[MAX_DYN_NEEDED];
             for(int i=0;i<g_dyn_nneeded;i++) lnames[i]=g_dyn_needed[i];
             ret=elf_write_dynamic(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off,
-                                   lnames,g_dyn_nneeded,inames,igots,g_dyn_nimports);
+                                   lnames,g_dyn_nneeded,inames,igots,g_dyn_nimports,ca_off,ca_target,n_ca);
         } else {
-            ret=elf_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off);
+            ret=elf_write(outfile,code_buf,code_len,data_buf,data_len,rc,rd,nr,entry_off,ca_off,ca_target,n_ca);
         }
         break;
     case TARGET_MACOS:

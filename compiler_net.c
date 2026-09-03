@@ -3856,6 +3856,150 @@ static int compile_net_call(Node *n, const char *fn, int is_y_net, int is_y_http
             X_ALIGN16_EXIT();
             return 1;
         }
+        /* y.db.sqlite_query_print(handle, sql) — native SQLite query
+           results, printed (not returned — same "no general
+           string/array return type in native" ceiling every other
+           native builtin already has; interpreter/VM's sqlite_query
+           returns a real array of maps because eval.c has Val to
+           build one with, native doesn't). Prints "col=value" one
+           per line per row, "NULL" for a null column.
+
+           This is the callback-callee machinery: sqlite3_exec needs a
+           real function-pointer callback to call back INTO for each
+           row, and no native builtin before this one has ever needed
+           to be a *callee* of external code (every native call site
+           so far has only ever been a *caller*). Two new pieces make
+           that possible:
+             - RELOC_CODEADDR (compiler.c/elf_out.c): lets native code
+               take the address of a label inside its OWN .text
+               section and hand it to external code as data (a real
+               function pointer) — a genuinely different kind of
+               reference than RELOC_DATA (references the data
+               section) or a normal call (jumps to a symbol, doesn't
+               need its address as a value).
+             - The callback body below, which prints each row live as
+               sqlite3_exec calls it — a completely ordinary function
+               from the callback's own point of view: sqlite3_exec
+               reaches it via a normal `call`, so it gets properly
+               16-byte-aligned rsp on entry same as any C function
+               would, with none of the special alignment handling
+               sqlite_open/exec/close needed (that was about THIS
+               program's own entry point being misaligned, not about
+               being called from outside).
+           A small local strlen+print helper is emitted once per call
+           site (not shared globally, to keep this self-contained
+           rather than touching emit_net_helpers) and reached via a
+           direct backward call (not the call_patches system — its
+           address is already known at the point the callback body
+           references it, since it's emitted first). */
+        if(is_y_db && strcmp(fn,"sqlite_query_print")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); return 1; }
+            dynlink_need_library("libsqlite3.so.0");
+            int exec_got=dynlink_import("sqlite3_exec");
+
+            int eq_off=data_add_str("=");
+            int nl_off=data_add_str("\n");
+            int null_off=data_add_str("NULL");
+
+            /* Jump over the callback + its helper -- neither is meant
+               to execute inline here, only when sqlite3_exec calls
+               the callback later. */
+            int jm_over=x_jmp_rel32();
+
+            /* ---- print_cstr_helper(rdi=ptr, may be NULL) ---- */
+            int pch_label=code_len;
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit4(0x48,0x83,0xff,0x00); /* cmp rdi,0 */
+            int jm_haveptr=x_jnz_rel32();
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,null_off); emit_i32(0); /* rdi=&"NULL" */
+            x_mov_r64_imm32(6,4); /* rsi=4 (strlen("NULL")) */
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+            int jm_pchdone=x_jmp_rel32();
+            x_patch_here(jm_haveptr);
+            emit3(0x48,0x89,0xf8); /* mov rax,rdi -- save ptr */
+            emit2(0x31,0xc9);      /* xor ecx,ecx -- len=0 */
+            int strlen_top=code_len;
+            x_cmp_byte_idx1_imm8(0,1,0); /* cmp byte [rax+rcx],0 */
+            int jm_strlendone=x_jz_rel32();
+            emit3(0x48,0xff,0xc1); /* inc rcx */
+            { int p=x_jmp_rel32(); patch_i32(p,strlen_top-(p+4)); }
+            x_patch_here(jm_strlendone);
+            emit3(0x48,0x89,0xc7); /* mov rdi,rax -- ptr */
+            emit3(0x48,0x89,0xce); /* mov rsi,rcx -- len */
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+            x_patch_here(jm_pchdone);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+
+            /* ---- callback(rdi=userdata, esi=ncol, rdx=colvals, rcx=colnames) -> eax ---- */
+            int callback_label=code_len;
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit4(0x48,0x83,0xec,0x20); /* sub rsp,32: [rbp-8]=ncol [rbp-16]=colvals [rbp-24]=colnames [rbp-32]=i */
+            x_mov_rbpN_r64(-16,2); /* [rbp-16]=rdx (colvals) */
+            x_mov_rbpN_r64(-24,1); /* [rbp-24]=rcx (colnames) */
+            emit2(0x89,0xf0);      /* mov eax,esi -- ncol, zero-extended into rax */
+            x_mov_rbpN_r64(-8,0);  /* [rbp-8]=ncol */
+            emit3(0x48,0xc7,0x45); emit1((uint8_t)-32); emit_i32(0); /* mov qword [rbp-32],0 -- i=0 */
+
+            int loop_top=code_len;
+            x_mov_r64_rbpN(0,-32); /* rax=i */
+            emit3(0x48,0x3b,0x45); emit1((uint8_t)-8); /* cmp rax,[rbp-8] */
+            int jm_loopend=x_jge_rel32();
+
+            /* print colnames[i] */
+            x_mov_r64_rbpN(0,-24); /* rax=colnames */
+            x_mov_r64_rbpN(1,-32); /* rcx=i */
+            x_mov_r64_idx8(0,0,1); /* rax=colnames[i] */
+            emit3(0x48,0x89,0xc7); /* mov rdi,rax */
+            { int p=x_call_unresolved(); patch_i32(p,pch_label-(p+4)); }
+
+            /* print "=" */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,eq_off); emit_i32(0);
+            x_mov_r64_imm32(6,1);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+
+            /* print colvals[i] (helper handles NULL itself) */
+            x_mov_r64_rbpN(0,-16); /* rax=colvals */
+            x_mov_r64_rbpN(1,-32); /* rcx=i */
+            x_mov_r64_idx8(0,0,1); /* rax=colvals[i] */
+            emit3(0x48,0x89,0xc7); /* mov rdi,rax */
+            { int p=x_call_unresolved(); patch_i32(p,pch_label-(p+4)); }
+
+            /* print "\n" */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,nl_off); emit_i32(0);
+            x_mov_r64_imm32(6,1);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+
+            x_mov_r64_rbpN(0,-32); /* rax=i */
+            emit3(0x48,0xff,0xc0); /* inc rax */
+            x_mov_rbpN_r64(-32,0); /* [rbp-32]=i */
+            { int p=x_jmp_rel32(); patch_i32(p,loop_top-(p+4)); }
+
+            x_patch_here(jm_loopend);
+            x_mov_rax_imm32(0);
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+
+            x_patch_here(jm_over);
+
+            /* ---- actual call site: sqlite3_exec(handle, sql, callback, NULL, NULL) ---- */
+            int base=n->left?1:0;
+            Node *handle_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *sql_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            int sqloff;
+            if(sql_arg && sql_arg->kind==ND_STR) sqloff=data_add_str(sql_arg->sval);
+            else sqloff=data_add_str("");
+
+            if(handle_arg) compile_expr(handle_arg); else x_mov_rax_imm32(-1);
+            emit3(0x4c,0x8b,0xc8); /* mov r9,rax -- stash handle across the align dance */
+            X_ALIGN16_ENTER();
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,sqloff); emit_i32(0); /* rsi=&sql */
+            x_lea_rdx_codeaddr(callback_label); /* rdx=&callback */
+            x_mov_r64_imm32(1,0); /* rcx=userdata=NULL */
+            x_mov_r8d_imm32(0);   /* r8=errmsg=NULL */
+            emit3(0x4c,0x89,0xcf); /* mov rdi,r9 -- handle */
+            x_call_got(exec_got);
+            X_ALIGN16_EXIT();
+            return 1;
+        }
         #undef X_ALIGN16_ENTER
         #undef X_ALIGN16_EXIT
         /* y.net.dynlink_test() — proof-of-concept native call into a

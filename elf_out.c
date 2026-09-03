@@ -37,7 +37,14 @@ int elf_write(const char *path,
               uint8_t *data, int data_len,
               /* relocs: each entry is {code_off, data_off} relative */
               int *reloc_code_offs, int *reloc_data_offs, int nrelocs,
-              int entry_off)
+              int entry_off,
+              /* code-address relocs: each entry is {code_off, target_code_off} --
+                 same RIP-relative 32-bit patch as the data relocs above, except
+                 the reference target is a label INSIDE the code section (e.g. a
+                 native callback function's own address, handed to an external
+                 library like sqlite3_exec) rather than the data section, so the
+                 patch is computed against code_vaddr instead of data_vaddr. */
+              int *ca_code_offs, int *ca_target_offs, int n_ca)
 {
     /* Layout:
      *   0x000  ELF header     (64 bytes)
@@ -65,6 +72,19 @@ int elf_write(const char *path,
         int coff=reloc_code_offs[i];
         int doff=reloc_data_offs[i];
         int64_t target = (int64_t)(data_vaddr + doff);
+        int64_t rip    = (int64_t)(code_vaddr + coff + 4);
+        int32_t rel32  = (int32_t)(target - rip);
+        code[coff  ]=(uint8_t)(rel32    );
+        code[coff+1]=(uint8_t)(rel32>> 8);
+        code[coff+2]=(uint8_t)(rel32>>16);
+        code[coff+3]=(uint8_t)(rel32>>24);
+    }
+    /* code-address relocations: same idea, target is code_vaddr+offset
+       instead of data_vaddr+offset. */
+    for(int i=0;i<n_ca;i++){
+        int coff=ca_code_offs[i];
+        int toff=ca_target_offs[i];
+        int64_t target = (int64_t)(code_vaddr + toff);
         int64_t rip    = (int64_t)(code_vaddr + coff + 4);
         int32_t rel32  = (int32_t)(target - rip);
         code[coff  ]=(uint8_t)(rel32    );
@@ -207,7 +227,8 @@ int elf_write_dynamic(const char *path,
               int *reloc_code_offs, int *reloc_data_offs, int nrelocs,
               int entry_off,
               const char **needed_libs, int nneeded,
-              const char **import_names, int *import_got_offs, int nimports)
+              const char **import_names, int *import_got_offs, int nimports,
+              int *ca_code_offs, int *ca_target_offs, int n_ca)
 {
     const char interp[] = "/lib64/ld-linux-x86-64.so.2";
     int interp_len = (int)sizeof(interp); /* includes NUL */
@@ -346,6 +367,18 @@ int elf_write_dynamic(const char *path,
     for(int i=0;i<nrelocs;i++){
         int coff=reloc_code_offs[i], doff=reloc_data_offs[i];
         int64_t target=(int64_t)(data_vaddr+(uint64_t)doff);
+        int64_t rip=(int64_t)(code_vaddr+(uint64_t)coff+4);
+        int32_t rel32=(int32_t)(target-rip);
+        code[coff]=(uint8_t)rel32; code[coff+1]=(uint8_t)(rel32>>8);
+        code[coff+2]=(uint8_t)(rel32>>16); code[coff+3]=(uint8_t)(rel32>>24);
+    }
+    /* code-address relocations: a label inside the code section
+       itself (e.g. the sqlite_query_print callback's own entry
+       point, handed to sqlite3_exec as a function-pointer argument)
+       rather than a data-section offset. */
+    for(int i=0;i<n_ca;i++){
+        int coff=ca_code_offs[i], toff=ca_target_offs[i];
+        int64_t target=(int64_t)(code_vaddr+(uint64_t)toff);
         int64_t rip=(int64_t)(code_vaddr+(uint64_t)coff+4);
         int32_t rel32=(int32_t)(target-rip);
         code[coff]=(uint8_t)rel32; code[coff+1]=(uint8_t)(rel32>>8);
