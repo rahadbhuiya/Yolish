@@ -92,14 +92,13 @@ int ys_db_sqlite_query(int64_t handle, const char *sql, int max_rows, ys_db_row_
    scratch over the same raw ys_net_connect socket y.net.connect uses
    -- no libpq, no external dependency, always compiled in (unlike
    TLS/SQLite there's no external C library to opt into linking).
-   Auth: trust (no password needed) and MD5 are supported (MD5 is
+   Auth: trust (no password needed), MD5, and SCRAM-SHA-256 (v2.39 --
+   PostgreSQL's actual default since version 14) are all supported.
+   Both MD5 and the SHA-256/HMAC/PBKDF2/Base64 SCRAM needs are
    implemented locally in net_runtime.c -- no OpenSSL dependency
-   pulled in just for this). SCRAM-SHA-256 (the default auth method
-   on PostgreSQL 14+ installs that haven't been reconfigured) is NOT
-   supported yet -- a real limitation, not an oversight; SCRAM is a
-   materially larger protocol (a real SASL exchange, HMAC, PBKDF2,
-   optional channel binding) than a straight password hash, and
-   worth its own dedicated pass rather than rushing into this one.
+   pulled in just for this. Not supported: SCRAM-SHA-256-PLUS (the
+   channel-binding variant) and GSS/SSPI -- a real limitation, not an
+   oversight, but a narrower one than "no SCRAM at all" was.
    Values in query results, like y.db.sqlite_query, come back as
    strings regardless of their real Postgres column type -- the
    simple query protocol's default text result format, not the

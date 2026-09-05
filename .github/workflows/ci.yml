@@ -210,31 +210,40 @@ jobs:
           rm -f /tmp/sqlite_native_ci.y /tmp/sqlite_native_ci_bin /tmp/ci_sqlite_native.db
           echo "PASS: SQLite (interpreter, VM, native)"
 
-      - name: Test — PostgreSQL (v2.37, real local server)
+      - name: Test — PostgreSQL (v2.37 MD5 + v2.39 SCRAM-SHA-256, real local server)
         run: |
           # y.db.pg_* needs no build flag (no external library at
           # all -- the wire protocol is implemented from scratch in
           # net_runtime.c), but it does need a real server to talk
-          # to. Installed and configured here to match what
+          # to. Installed here to match what
           # examples/db_examples/02_postgres_basics.y expects.
           sudo apt-get install -y -qq postgresql
           sudo service postgresql start
-
-          # MD5 auth specifically (not the PostgreSQL 14+ default,
-          # SCRAM-SHA-256 -- see net_runtime.h's ys_db_pg_connect
-          # comment for why that's not supported yet). Setting
-          # password_encryption before (re-)setting the password is
-          # required: pg_hba.conf saying "md5" does not retroactively
-          # make an existing SCRAM-stored credential MD5-compatible.
-          sudo -u postgres psql -c "SET password_encryption = 'md5'; ALTER USER postgres PASSWORD 'testpass';"
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'testpass';"
           sudo -u postgres psql -c "CREATE DATABASE ysdb;"
+
+          # PostgreSQL 14+ defaults to SCRAM-SHA-256 -- a fresh
+          # install (this one) needs no pg_hba.conf/password_encryption
+          # changes at all to test it; this is the real out-of-the-box
+          # auth path, not a downgraded one.
+          echo "=== SCRAM-SHA-256 (server default, unmodified) ==="
+          ./ys examples/db_examples/02_postgres_basics.y | grep -q "^done$"
+          ./ys vm examples/db_examples/02_postgres_basics.y | grep -q "^done$"
+
+          # v2.37's MD5 path is still real code with its own auth
+          # branch, and it's easy for a change to one to silently
+          # break the other (that exact regression is what testing
+          # this caught during development) -- reconfigure down to
+          # MD5 and confirm it still works too.
+          echo "=== MD5 (reconfigured) ==="
+          sudo -u postgres psql -c "SET password_encryption = 'md5'; ALTER USER postgres PASSWORD 'testpass';"
           PG_HBA=$(sudo -u postgres psql -tAc "SHOW hba_file;")
           sudo sed -i 's/^host    all             all             127.0.0.1\/32            scram-sha-256/host    all             all             127.0.0.1\/32            md5/' "$PG_HBA"
           sudo -u postgres psql -c "SELECT pg_reload_conf();"
-
           ./ys examples/db_examples/02_postgres_basics.y | grep -q "^done$"
           ./ys vm examples/db_examples/02_postgres_basics.y | grep -q "^done$"
-          echo "PASS: PostgreSQL (interpreter, VM, real server)"
+
+          echo "PASS: PostgreSQL (SCRAM-SHA-256 + MD5, interpreter + VM, real server)"
 
       - name: Windows cross-compile sanity check
         run: |

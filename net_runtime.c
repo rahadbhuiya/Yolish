@@ -1258,6 +1258,17 @@ static char ys_pg_read_msg(int fd, unsigned char **payload, uint32_t *paylen){
    how y.net.connect's own TCP handles already work. No separate
    table needed. */
 
+/* Forward-declared: implemented further down, after the SHA-256/
+   HMAC/PBKDF2/Base64 primitives it depends on. Runs the full
+   SCRAM-SHA-256 SASL exchange (RFC 5802 + RFC 7677) once the server
+   has already sent AuthenticationSASL (auth_type 10) -- everything
+   from the client's SASLInitialResponse through verifying the
+   server's final signature. Returns 0 on success, -1 on failure
+   (auth rejected, malformed message, or the server's signature not
+   verifying -- treated as a hard failure, not silently ignored). */
+static int ys_pg_do_scram(int fd, const char *user, const char *password,
+                           const unsigned char *mechanisms, uint32_t mechanisms_len);
+
 int64_t ys_db_pg_connect(const char *host, int port, const char *user, const char *password, const char *dbname){
     int64_t s64=ys_net_connect(host,port);
     if(s64<0) return -1; /* ys_net_set_err already called by ys_net_connect */
@@ -1335,13 +1346,17 @@ int64_t ys_db_pg_connect(const char *host, int port, const char *user, const cha
             if(ys_pg_send_all(fd,pmsg,mp)!=0){ close(fd); ys_net_set_err("pg_connect: failed sending MD5 password"); return -1; }
             continue;
         }
-        /* Anything else (SCRAM-SHA-256 = 10, GSS, SSPI, ...) isn't
-           supported yet -- see net_runtime.h's comment on this
-           function for why SCRAM specifically is out of scope here. */
+        if(auth_type==10){ /* AuthenticationSASL: payload lists supported mechanisms */
+            int rc=ys_pg_do_scram(fd,user,password,payload+4,plen-4);
+            free(payload);
+            if(rc!=0){ close(fd); return -1; } /* ys_pg_do_scram already called ys_net_set_err */
+            continue; /* ys_pg_do_scram leaves the connection at AuthenticationOk, still unread -- loop back to consume it */
+        }
+        /* Anything else (GSS, SSPI, ...) isn't supported. */
         free(payload); close(fd);
         char errbuf[128];
         snprintf(errbuf,sizeof(errbuf),
-            "pg_connect: server requires an unsupported auth method (type %u) -- only trust and MD5 are implemented; SCRAM-SHA-256 is not yet",
+            "pg_connect: server requires an unsupported auth method (type %u) -- trust, MD5, and SCRAM-SHA-256 are implemented",
             auth_type);
         ys_net_set_err(errbuf);
         return -1;
@@ -1468,4 +1483,323 @@ void ys_db_pg_close(int64_t handle){
     unsigned char term[5]; term[0]='X'; ys_pg_put_u32(term+1,4);
     ys_pg_send_all(fd,term,5); /* best-effort; ignore failure, we're closing anyway */
     close(fd);
+}
+
+/* ==========================================================================
+   SCRAM-SHA-256 support for y.db.pg_connect (RFC 5802 SCRAM +
+   RFC 7677 SCRAM-SHA-256), all self-contained: SHA-256, HMAC-SHA256,
+   PBKDF2-HMAC-SHA256, and Base64 encode/decode, none of it relying on
+   any crypto library (same reasoning as the MD5 implementation
+   above -- OpenSSL is only linked under YS_WITH_TLS). This is
+   PostgreSQL's actual default auth method since version 14; MD5
+   above only covers servers explicitly reconfigured away from it.
+   ========================================================================== */
+
+/* ---- SHA-256 (FIPS 180-4), self-contained ---- */
+typedef struct { uint32_t state[8]; uint64_t count; unsigned char buf[64]; } ys_sha256_ctx;
+
+static uint32_t ys_sha256_rotr(uint32_t x, int n){ return (x>>n)|(x<<(32-n)); }
+
+static void ys_sha256_transform(uint32_t state[8], const unsigned char block[64]){
+    static const uint32_t K[64]={
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+    uint32_t w[64];
+    for(int i=0;i<16;i++)
+        w[i]=((uint32_t)block[i*4]<<24)|((uint32_t)block[i*4+1]<<16)|((uint32_t)block[i*4+2]<<8)|(uint32_t)block[i*4+3];
+    for(int i=16;i<64;i++){
+        uint32_t s0=ys_sha256_rotr(w[i-15],7)^ys_sha256_rotr(w[i-15],18)^(w[i-15]>>3);
+        uint32_t s1=ys_sha256_rotr(w[i-2],17)^ys_sha256_rotr(w[i-2],19)^(w[i-2]>>10);
+        w[i]=w[i-16]+s0+w[i-7]+s1;
+    }
+    uint32_t a=state[0],b=state[1],c=state[2],d=state[3],e=state[4],f=state[5],g=state[6],h=state[7];
+    for(int i=0;i<64;i++){
+        uint32_t S1=ys_sha256_rotr(e,6)^ys_sha256_rotr(e,11)^ys_sha256_rotr(e,25);
+        uint32_t ch=(e&f)^((~e)&g);
+        uint32_t t1=h+S1+ch+K[i]+w[i];
+        uint32_t S0=ys_sha256_rotr(a,2)^ys_sha256_rotr(a,13)^ys_sha256_rotr(a,22);
+        uint32_t maj=(a&b)^(a&c)^(b&c);
+        uint32_t t2=S0+maj;
+        h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+    }
+    state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d;
+    state[4]+=e; state[5]+=f; state[6]+=g; state[7]+=h;
+}
+static void ys_sha256_init(ys_sha256_ctx *ctx){
+    ctx->state[0]=0x6a09e667; ctx->state[1]=0xbb67ae85; ctx->state[2]=0x3c6ef372; ctx->state[3]=0xa54ff53a;
+    ctx->state[4]=0x510e527f; ctx->state[5]=0x9b05688c; ctx->state[6]=0x1f83d9ab; ctx->state[7]=0x5be0cd19;
+    ctx->count=0;
+}
+static void ys_sha256_update(ys_sha256_ctx *ctx, const unsigned char *data, size_t len){
+    size_t have=(size_t)(ctx->count%64);
+    ctx->count+=len;
+    if(have){
+        size_t take=64-have; if(take>len) take=len;
+        memcpy(ctx->buf+have,data,take);
+        have+=take; data+=take; len-=take;
+        if(have==64){ ys_sha256_transform(ctx->state,ctx->buf); have=0; }
+    }
+    while(len>=64){ ys_sha256_transform(ctx->state,data); data+=64; len-=64; }
+    if(len) memcpy(ctx->buf,data,len);
+}
+static void ys_sha256_final(ys_sha256_ctx *ctx, unsigned char out[32]){
+    unsigned char pad[64]={0x80};
+    uint64_t bits=ctx->count*8;
+    size_t have=(size_t)(ctx->count%64);
+    size_t padlen=(have<56)?(56-have):(120-have);
+    ys_sha256_update(ctx,pad,padlen);
+    unsigned char lenbuf[8];
+    for(int i=0;i<8;i++) lenbuf[i]=(unsigned char)(bits>>(56-8*i)); /* big-endian length, unlike MD5 */
+    ys_sha256_update(ctx,lenbuf,8);
+    for(int i=0;i<8;i++) for(int j=0;j<4;j++) out[i*4+j]=(unsigned char)(ctx->state[i]>>(24-8*j));
+}
+static void ys_sha256(const void *data, size_t len, unsigned char out[32]){
+    ys_sha256_ctx ctx; ys_sha256_init(&ctx);
+    ys_sha256_update(&ctx,(const unsigned char*)data,len);
+    ys_sha256_final(&ctx,out);
+}
+
+/* ---- HMAC-SHA256 (RFC 2104) ---- */
+static void ys_hmac_sha256(const unsigned char *key, size_t keylen,
+                            const unsigned char *msg, size_t msglen,
+                            unsigned char out[32]){
+    unsigned char k[64];
+    if(keylen>64){ ys_sha256(key,keylen,k); memset(k+32,0,32); }
+    else { memcpy(k,key,keylen); memset(k+keylen,0,64-keylen); }
+    unsigned char ipad[64], opad[64];
+    for(int i=0;i<64;i++){ ipad[i]=k[i]^0x36; opad[i]=k[i]^0x5c; }
+    ys_sha256_ctx ctx; ys_sha256_init(&ctx);
+    ys_sha256_update(&ctx,ipad,64);
+    ys_sha256_update(&ctx,msg,msglen);
+    unsigned char inner[32]; ys_sha256_final(&ctx,inner);
+    ys_sha256_init(&ctx);
+    ys_sha256_update(&ctx,opad,64);
+    ys_sha256_update(&ctx,inner,32);
+    ys_sha256_final(&ctx,out);
+}
+
+/* ---- PBKDF2-HMAC-SHA256 (RFC 2898), SCRAM's "Hi" function -- for
+   SCRAM specifically dkLen is always exactly 32 (one SHA-256 block),
+   so this doesn't implement the general multi-block PBKDF2 case. ---- */
+static void ys_pbkdf2_hmac_sha256_scram(const unsigned char *password, size_t passlen,
+                                         const unsigned char *salt, size_t saltlen,
+                                         uint32_t iterations, unsigned char out[32]){
+    unsigned char saltbuf[128]; /* salt + 4-byte block index (0001) */
+    memcpy(saltbuf,salt,saltlen);
+    saltbuf[saltlen]=0; saltbuf[saltlen+1]=0; saltbuf[saltlen+2]=0; saltbuf[saltlen+3]=1;
+    unsigned char u[32];
+    ys_hmac_sha256(password,passlen,saltbuf,saltlen+4,u);
+    memcpy(out,u,32);
+    for(uint32_t i=1;i<iterations;i++){
+        unsigned char unext[32];
+        ys_hmac_sha256(password,passlen,u,32,unext);
+        for(int j=0;j<32;j++) out[j]^=unext[j];
+        memcpy(u,unext,32);
+    }
+}
+
+/* ---- Base64 (RFC 4648), plain -- SCRAM messages carry salts, nonces
+   and proofs base64-encoded. ---- */
+static const char ys_b64_chars[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int ys_b64_encode(const unsigned char *in, size_t inlen, char *out, size_t outcap){
+    size_t need=((inlen+2)/3)*4;
+    if(need+1>outcap) return -1;
+    size_t oi=0;
+    for(size_t i=0;i<inlen;i+=3){
+        uint32_t v=(uint32_t)in[i]<<16;
+        if(i+1<inlen) v|=(uint32_t)in[i+1]<<8;
+        if(i+2<inlen) v|=(uint32_t)in[i+2];
+        out[oi++]=ys_b64_chars[(v>>18)&0x3f];
+        out[oi++]=ys_b64_chars[(v>>12)&0x3f];
+        out[oi++]=(i+1<inlen)?ys_b64_chars[(v>>6)&0x3f]:'=';
+        out[oi++]=(i+2<inlen)?ys_b64_chars[v&0x3f]:'=';
+    }
+    out[oi]=0;
+    return (int)oi;
+}
+static int ys_b64_val(char c){
+    if(c>='A'&&c<='Z') return c-'A';
+    if(c>='a'&&c<='z') return c-'a'+26;
+    if(c>='0'&&c<='9') return c-'0'+52;
+    if(c=='+') return 62;
+    if(c=='/') return 63;
+    return -1;
+}
+static int ys_b64_decode(const char *in, unsigned char *out, size_t outcap){
+    size_t inlen=strlen(in);
+    size_t oi=0;
+    uint32_t acc=0; int bits=0;
+    for(size_t i=0;i<inlen;i++){
+        if(in[i]=='=') break;
+        int v=ys_b64_val(in[i]);
+        if(v<0) continue; /* skip whitespace/newlines defensively */
+        acc=(acc<<6)|(uint32_t)v; bits+=6;
+        if(bits>=8){
+            bits-=8;
+            if(oi>=outcap) return -1;
+            out[oi++]=(unsigned char)((acc>>bits)&0xff);
+        }
+    }
+    return (int)oi;
+}
+
+/* ---- SCRAM-SHA-256 client (RFC 5802 + RFC 7677) ----
+   Only SCRAM-SHA-256 (not the -PLUS/channel-binding variant, which
+   this doesn't implement) is requested regardless of what the
+   server's mechanism list offers — every real PostgreSQL server that
+   advertises SCRAM-SHA-256-PLUS also advertises plain SCRAM-SHA-256
+   alongside it, so this doesn't need to actually parse the
+   mechanisms list, just proceed with the one mechanism it knows. */
+static void ys_scram_client_nonce(char *out, int n){
+    /* Printable, comma-free characters (comma is SCRAM's field
+       separator) -- doesn't need to be the full base64 alphabet,
+       just needs to be unique per connection. /dev/urandom for real
+       randomness rather than rand(). */
+    static const char charset[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    unsigned char raw[64];
+    FILE *f=fopen("/dev/urandom","rb");
+    if(f){ if(fread(raw,1,(size_t)n,f)!=(size_t)n) memset(raw,0,(size_t)n); fclose(f); }
+    else { for(int i=0;i<n;i++) raw[i]=(unsigned char)(rand()&0xff); }
+    for(int i=0;i<n;i++) out[i]=charset[raw[i]%62];
+    out[n]=0;
+}
+
+/* Finds "key=" within a comma-separated SCRAM message and copies the
+   value (up to the next comma or end of string) into out. Returns
+   the value's length, or -1 if not found. */
+static int ys_scram_find_field(const char *msg, size_t msglen, char key, char *out, size_t outcap){
+    for(size_t i=0;i+1<msglen;i++){
+        if(msg[i]==key && msg[i+1]=='=' && (i==0 || msg[i-1]==',')){
+            size_t start=i+2, end=start;
+            while(end<msglen && msg[end]!=',') end++;
+            size_t len=end-start;
+            if(len+1>outcap) return -1;
+            memcpy(out,msg+start,len); out[len]=0;
+            return (int)len;
+        }
+    }
+    return -1;
+}
+
+static int ys_pg_do_scram(int fd, const char *user, const char *password,
+                           const unsigned char *mechanisms, uint32_t mechanisms_len){
+    (void)user; (void)mechanisms; (void)mechanisms_len; /* PostgreSQL's SCRAM ignores the username field entirely (already sent in the startup message) */
+
+    char nonce[25];
+    ys_scram_client_nonce(nonce,24);
+
+    char client_first_bare[64];
+    snprintf(client_first_bare,sizeof(client_first_bare),"n=,r=%s",nonce);
+    char client_first[80];
+    snprintf(client_first,sizeof(client_first),"n,,%s",client_first_bare);
+    size_t cf_len=strlen(client_first);
+
+    /* SASLInitialResponse: 'p' message = mechanism name (NUL-terminated)
+       + int32 length of client-first-message + the message itself. */
+    {
+        const char *mech="SCRAM-SHA-256";
+        size_t mechlen=strlen(mech);
+        unsigned char buf[256]; size_t p=5;
+        memcpy(buf+p,mech,mechlen); p+=mechlen; buf[p++]=0;
+        ys_pg_put_u32(buf+p,(uint32_t)cf_len); p+=4;
+        memcpy(buf+p,client_first,cf_len); p+=cf_len;
+        buf[0]='p'; ys_pg_put_u32(buf+1,(uint32_t)(p-1));
+        if(ys_pg_send_all(fd,buf,p)!=0){ ys_net_set_err("pg_connect: failed sending SASLInitialResponse"); return -1; }
+    }
+
+    /* AuthenticationSASLContinue: payload (after the 4-byte auth_type
+       already stripped by the caller) is the server-first-message. */
+    unsigned char *payload=NULL; uint32_t plen=0;
+    char type=ys_pg_read_msg(fd,&payload,&plen);
+    if(type!='R' || plen<4){ free(payload); ys_net_set_err("pg_connect: malformed SASL continue message"); return -1; }
+    const char *server_first=(const char*)payload+4;
+    size_t sf_len=plen-4;
+
+    char combined_nonce[64], salt_b64[128], iter_str[16];
+    if(ys_scram_find_field(server_first,sf_len,'r',combined_nonce,sizeof(combined_nonce))<0 ||
+       ys_scram_find_field(server_first,sf_len,'s',salt_b64,sizeof(salt_b64))<0 ||
+       ys_scram_find_field(server_first,sf_len,'i',iter_str,sizeof(iter_str))<0){
+        free(payload); ys_net_set_err("pg_connect: server-first-message missing r=/s=/i="); return -1;
+    }
+    /* the server must echo our nonce back as a prefix of the combined one */
+    if(strncmp(combined_nonce,nonce,strlen(nonce))!=0){
+        free(payload); ys_net_set_err("pg_connect: server nonce doesn't extend the client nonce"); return -1;
+    }
+    uint32_t iterations=(uint32_t)strtoul(iter_str,NULL,10);
+    unsigned char salt[64];
+    int saltlen=ys_b64_decode(salt_b64,salt,sizeof(salt));
+    if(saltlen<=0){ free(payload); ys_net_set_err("pg_connect: bad base64 salt in server-first-message"); return -1; }
+
+    /* client-final-message-without-proof: "c=biws,r=<combined_nonce>"
+       -- "biws" is base64("n,,"), the gs2 header re-sent verbatim,
+       fixed since no channel binding is ever used here. */
+    char client_final_noproof[96];
+    snprintf(client_final_noproof,sizeof(client_final_noproof),"c=biws,r=%s",combined_nonce);
+
+    char auth_message[320];
+    snprintf(auth_message,sizeof(auth_message),"%s,%.*s,%s",
+             client_first_bare,(int)sf_len,server_first,client_final_noproof);
+    size_t am_len=strlen(auth_message);
+    free(payload); /* done with server_first now that auth_message has copied it */
+
+    unsigned char salted_password[32];
+    ys_pbkdf2_hmac_sha256_scram((const unsigned char*)password,strlen(password),salt,(size_t)saltlen,iterations,salted_password);
+
+    unsigned char client_key[32];
+    ys_hmac_sha256(salted_password,32,(const unsigned char*)"Client Key",10,client_key);
+    unsigned char stored_key[32];
+    ys_sha256(client_key,32,stored_key);
+    unsigned char client_signature[32];
+    ys_hmac_sha256(stored_key,32,(const unsigned char*)auth_message,am_len,client_signature);
+    unsigned char client_proof[32];
+    for(int i=0;i<32;i++) client_proof[i]=client_key[i]^client_signature[i];
+    char proof_b64[64];
+    ys_b64_encode(client_proof,32,proof_b64,sizeof(proof_b64));
+
+    char client_final[192];
+    snprintf(client_final,sizeof(client_final),"%s,p=%s",client_final_noproof,proof_b64);
+    size_t cfin_len=strlen(client_final);
+
+    /* SASLResponse: 'p' message, just the client-final-message bytes
+       this time -- no mechanism-name framing (that was only needed
+       for the *initial* response). */
+    {
+        unsigned char buf[256]; size_t p=5;
+        memcpy(buf+p,client_final,cfin_len); p+=cfin_len;
+        buf[0]='p'; ys_pg_put_u32(buf+1,(uint32_t)(p-1));
+        if(ys_pg_send_all(fd,buf,p)!=0){ ys_net_set_err("pg_connect: failed sending SASLResponse"); return -1; }
+    }
+
+    /* AuthenticationSASLFinal: payload is "v=<base64(ServerSignature)>".
+       Verified against our own independently-computed expectation --
+       this is what actually proves the server knows the real
+       SaltedPassword, not just that it accepted our proof. */
+    unsigned char *fpayload=NULL; uint32_t flen=0;
+    char ftype=ys_pg_read_msg(fd,&fpayload,&flen);
+    if(ftype!='R' || flen<4){ free(fpayload); ys_net_set_err("pg_connect: malformed SASL final message"); return -1; }
+    char server_sig_b64[64];
+    if(ys_scram_find_field((const char*)fpayload+4,flen-4,'v',server_sig_b64,sizeof(server_sig_b64))<0){
+        free(fpayload); ys_net_set_err("pg_connect: SASL final message missing v="); return -1;
+    }
+    free(fpayload);
+
+    unsigned char server_key[32];
+    ys_hmac_sha256(salted_password,32,(const unsigned char*)"Server Key",10,server_key);
+    unsigned char expected_server_sig[32];
+    ys_hmac_sha256(server_key,32,(const unsigned char*)auth_message,am_len,expected_server_sig);
+    char expected_sig_b64[64];
+    ys_b64_encode(expected_server_sig,32,expected_sig_b64,sizeof(expected_sig_b64));
+
+    if(strcmp(server_sig_b64,expected_sig_b64)!=0){
+        ys_net_set_err("pg_connect: server's SCRAM signature did not verify -- possible MITM, or a genuinely wrong password that the server still says it accepted (which would itself be very unusual)");
+        return -1;
+    }
+    return 0;
 }
