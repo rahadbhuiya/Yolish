@@ -12,6 +12,7 @@
  */
 
 #include "yolish.h"
+#include "net_runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -611,6 +612,42 @@ static void x_cmp_byte_idx1_imm8(int basereg, int idxreg, uint8_t imm){
     emit1(0x80); emit1(0x3c);
     emit1((uint8_t)((idxreg<<3)|basereg));
     emit1(imm);
+}
+
+/* movzx dstreg32, byte [basereg+idxreg*1] -- generic scale-1 indexed
+   byte load with zero-extension (unlike x_mov_r64_idx8's scale=8,
+   this is for walking a plain byte buffer one byte at a time, e.g.
+   the input bytes and hex-table lookups in native pg_connect's
+   runtime hex-encoding loop). Same register-range restriction as the
+   other SIB helpers (0..7, idxreg can't be rsp). */
+static void x_movzx_r32_idx1(int dstreg, int basereg, int idxreg){
+    emit1(0x0f); emit1(0xb6);
+    emit1((uint8_t)(0x04|(dstreg<<3)));
+    emit1((uint8_t)((idxreg<<3)|basereg));
+}
+
+/* mov reg64, [rip+data_off]  /  mov [rip+data_off], reg64 -- generic
+   RIP-relative load/store against a data-section offset (unlike
+   x_lea_r64_codeaddr-style helpers, which only ever compute an
+   address as a VALUE, these actually read or write the 8 bytes
+   there). Used to treat a reserved data-section slot as a plain
+   "global variable" scratch location for values that need to
+   survive across many intermediate `call`s within one native
+   builtin's inline code -- simpler than threading a dedicated stack
+   frame through a long, multi-call sequence like native pg_connect's
+   auth loop. Safe because none of this native runtime is
+   thread-aware or reentrant to begin with. */
+static void x_mov_r64_from_data(int reg, int data_off){
+    emit2(0x48,0x8b);
+    emit1((uint8_t)((reg<<3)|0x05));
+    add_reloc(RELOC_DATA,code_len,data_off);
+    emit_i32(0);
+}
+static void x_mov_data_from_r64(int data_off, int reg){
+    emit2(0x48,0x89);
+    emit1((uint8_t)((reg<<3)|0x05));
+    add_reloc(RELOC_DATA,code_len,data_off);
+    emit_i32(0);
 }
 
 /* lea rdx, [rip+label_code_off] -- like x_lea_arg1_data's RELOC_DATA

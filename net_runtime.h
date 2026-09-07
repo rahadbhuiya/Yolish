@@ -108,6 +108,17 @@ int     ys_db_pg_exec(int64_t handle, const char *sql);
 int     ys_db_pg_query(int64_t handle, const char *sql, int max_rows, ys_db_row_cb cb, void *user_data);
 void    ys_db_pg_close(int64_t handle);
 
+/* Exposed for compiler_net.c: native --target linux pg_connect's MD5
+   auth path needs the SAME md5(password+username) hex computation
+   this file's ys_db_pg_connect uses at runtime -- but since native
+   code requires both password and username to be compile-time
+   string literals anyway, the compiler can just call this directly
+   at Yolish-compile time (ordinary C, not codegen) and embed the
+   resulting 32 hex characters as a data string. Only the outer
+   md5(inner_hex + 4-byte server salt) has to happen at the target
+   program's own runtime, since the salt is genuinely dynamic. */
+void ys_md5_hex(const void *data, size_t len, char out[33]);
+
 /* y.map.* — hashmap engine (open addressing, linear probing) */
 void ys_map_init(Val *m, int cap);
 void ys_map_set(Val *m, Val k, Val v);

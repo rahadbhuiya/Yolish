@@ -4002,6 +4002,406 @@ static int compile_net_call(Node *n, const char *fn, int is_y_net, int is_y_http
         }
         #undef X_ALIGN16_ENTER
         #undef X_ALIGN16_EXIT
+        /* y.db.pg_connect/pg_exec — native PostgreSQL client. Unlike
+           the C version (net_runtime.c), this reimplements the wire
+           protocol's message framing/parsing directly in hand-
+           assembled machine code, since native codegen can't call
+           back into that C implementation. Scoped down deliberately
+           from what net_runtime.c supports: host must be an IPv4
+           literal (no hostname/DNS, no IPv6), and only trust/MD5 auth
+           (no SCRAM-SHA-256 -- that needs SHA-256/HMAC/PBKDF2 all
+           reimplemented in assembly too, a separate undertaking on
+           top of everything here). No row-reading (pg_query_print)
+           either -- this covers connect+exec only.
+
+           Because there's no rbp-based stack frame here (matching
+           every other inline native builtin's convention) but this
+           needs several values (the socket fd, a message length) to
+           survive across MANY intermediate `call`s, they're kept in
+           dedicated data-section scratch slots instead of registers
+           or a stack frame -- the data segment is mapped read+write
+           (see elf_out.c's PF_R|PF_W on the second PT_LOAD), so a
+           reserved slot works exactly like a plain global variable.
+           This isn't reentrant/thread-safe, but nothing else in this
+           native runtime is either. */
+        #define X_ALIGN16_ENTER() do{ \
+            emit3(0x4c,0x8b,0xd4); emit4(0x48,0x83,0xe4,0xf0); emit4(0x48,0x83,0xec,0x10); \
+            emit5(0x4c,0x89,0x54,0x24,0x08); \
+        }while(0)
+        #define X_ALIGN16_EXIT() do{ \
+            emit5(0x4c,0x8b,0x54,0x24,0x08); emit3(0x4c,0x89,0xd4); \
+        }while(0)
+        if(is_y_db && strcmp(fn,"pg_connect")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); return 1; }
+            dynlink_need_library("libcrypto.so.3");
+            int md5_got=dynlink_import("MD5");
+
+            int base=n->left?1:0;
+            Node *host_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *port_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            Node *user_arg=(n->argc>base+2)?n->args[base+2]:NULL;
+            Node *pass_arg=(n->argc>base+3)?n->args[base+3]:NULL;
+            Node *db_arg=(n->argc>base+4)?n->args[base+4]:NULL;
+
+            const char *host=(host_arg&&host_arg->kind==ND_STR)?host_arg->sval:"";
+            const char *user=(user_arg&&user_arg->kind==ND_STR)?user_arg->sval:"";
+            const char *pass=(pass_arg&&pass_arg->kind==ND_STR)?pass_arg->sval:"";
+            const char *dbn =(db_arg&&db_arg->kind==ND_STR)?db_arg->sval:user;
+            int hostlen=(int)strlen(host);
+
+            /* ---- precompute everything the literal args allow at
+               Yolish-compile time, so the runtime code only has to
+               handle what's genuinely dynamic (the server's salt) ---- */
+            unsigned char startup[600]; size_t sp=4;
+            { uint32_t proto=0x00030000;
+              startup[sp++]=(uint8_t)(proto>>24); startup[sp++]=(uint8_t)(proto>>16);
+              startup[sp++]=(uint8_t)(proto>>8);  startup[sp++]=(uint8_t)proto; }
+            { const char *keys[2]={"user","database"}; const char *vals[2]={user,dbn};
+              for(int i=0;i<2;i++){
+                  size_t kl=strlen(keys[i]), vl=strlen(vals[i]);
+                  memcpy(startup+sp,keys[i],kl); sp+=kl; startup[sp++]=0;
+                  memcpy(startup+sp,vals[i],vl); sp+=vl; startup[sp++]=0;
+              } }
+            startup[sp++]=0;
+            { uint32_t slen=(uint32_t)sp;
+              startup[0]=(uint8_t)(slen>>24); startup[1]=(uint8_t)(slen>>16);
+              startup[2]=(uint8_t)(slen>>8);  startup[3]=(uint8_t)slen; }
+            int startup_off=data_add_bytes(startup,(int)sp);
+            int startup_len=(int)sp;
+
+            unsigned char cleartext_msg[400]; size_t cp=5;
+            { size_t passlen=strlen(pass);
+              memcpy(cleartext_msg+cp,pass,passlen); cp+=passlen; cleartext_msg[cp++]=0; }
+            cleartext_msg[0]='p';
+            { uint32_t clen=(uint32_t)(cp-1);
+              cleartext_msg[1]=(uint8_t)(clen>>24); cleartext_msg[2]=(uint8_t)(clen>>16);
+              cleartext_msg[3]=(uint8_t)(clen>>8);  cleartext_msg[4]=(uint8_t)clen; }
+            int cleartext_off=data_add_bytes(cleartext_msg,(int)cp);
+            int cleartext_len=(int)cp;
+
+            char innerbuf[600]; size_t ibp=0;
+            { size_t passlen=strlen(pass), userlen=strlen(user);
+              memcpy(innerbuf+ibp,pass,passlen); ibp+=passlen;
+              memcpy(innerbuf+ibp,user,userlen); ibp+=userlen; }
+            char innerhex[33]; ys_md5_hex(innerbuf,ibp,innerhex);
+
+            unsigned char md5input[36];
+            memcpy(md5input,innerhex,32);
+            md5input[32]=0; md5input[33]=0; md5input[34]=0; md5input[35]=0;
+            int md5input_off=data_add_bytes(md5input,36);
+
+            unsigned char md5digest_zero[16]; memset(md5digest_zero,0,16);
+            int md5digest_off=data_add_bytes(md5digest_zero,16);
+
+            unsigned char md5pwmsg[41];
+            md5pwmsg[0]='p';
+            { uint32_t mlen=40;
+              md5pwmsg[1]=(uint8_t)(mlen>>24); md5pwmsg[2]=(uint8_t)(mlen>>16);
+              md5pwmsg[3]=(uint8_t)(mlen>>8);  md5pwmsg[4]=(uint8_t)mlen; }
+            md5pwmsg[5]='m'; md5pwmsg[6]='d'; md5pwmsg[7]='5';
+            for(int i=8;i<40;i++) md5pwmsg[i]=0;
+            md5pwmsg[40]=0;
+            int md5pwmsg_off=data_add_bytes(md5pwmsg,41);
+
+            unsigned char hexdigits[16]={'0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'};
+            int hexdigits_off=data_add_bytes(hexdigits,16);
+
+            unsigned char scratch_zero[512]; memset(scratch_zero,0,512);
+            int scratch_off=data_add_bytes(scratch_zero,512);
+
+            unsigned char slot_zero[8]={0,0,0,0,0,0,0,0};
+            int fdslot_off=data_add_bytes(slot_zero,8);
+            int lenslot_off=data_add_bytes(slot_zero,8);
+
+            int host_off=data_add_bytes((const unsigned char*)host,hostlen);
+
+            /* ---- codegen ---- */
+            int jm_over=x_jmp_rel32();
+
+            /* read_exact_helper(rdi=fd,rsi=buf,rdx=len) -> rax=0/-1 */
+            int read_exact_label=code_len;
+            emit1(0x53); emit2(0x41,0x54); emit2(0x41,0x55); /* push rbx,r12,r13 */
+            emit3(0x48,0x89,0xfb); /* mov rbx,rdi */
+            emit3(0x49,0x89,0xf4); /* mov r12,rsi */
+            emit3(0x49,0x89,0xd5); /* mov r13,rdx */
+            int re_loop=code_len;
+            emit4(0x49,0x83,0xfd,0x00); /* cmp r13,0 */
+            int jm_reok=x_jle_rel32();
+            x_mov_rax_imm32(0); /* syscall# read */
+            emit3(0x48,0x89,0xdf); emit3(0x4c,0x89,0xe6); emit3(0x4c,0x89,0xea); /* rdi=rbx,rsi=r12,rdx=r13 */
+            emit2(0x0f,0x05); /* syscall */
+            emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+            int jm_refail=x_jle_rel32();
+            emit3(0x49,0x01,0xc4); emit3(0x49,0x29,0xc5); /* add r12,rax; sub r13,rax */
+            { int p=x_jmp_rel32(); patch_i32(p,re_loop-(p+4)); }
+            x_patch_here(jm_reok);
+            emit2(0x31,0xc0); /* xor eax,eax */
+            int jm_redone=x_jmp_rel32();
+            x_patch_here(jm_refail);
+            x_mov_rax_imm32(-1);
+            x_patch_here(jm_redone);
+            emit2(0x41,0x5d); emit2(0x41,0x5c); emit1(0x5b); /* pop r13,r12,rbx */
+            x_ret();
+
+            /* be32_helper(rdi=ptr) -> eax = big-endian u32 at [ptr] */
+            int be32_label=code_len;
+            emit3(0x0f,0xb6,0x07); emit3(0xc1,0xe0,0x18);
+            emit4(0x0f,0xb6,0x4f,0x01); emit3(0xc1,0xe1,0x10); emit2(0x09,0xc8);
+            emit4(0x0f,0xb6,0x4f,0x02); emit3(0xc1,0xe1,0x08); emit2(0x09,0xc8);
+            emit4(0x0f,0xb6,0x4f,0x03); emit2(0x09,0xc8);
+            x_ret();
+
+            /* hex_encode_helper(rdi=in16,rsi=out, writes 32 ASCII hex chars) */
+            int hexenc_label=code_len;
+            emit1(0x53); /* push rbx */
+            emit3(0x48,0x8d,0x1d); add_reloc(RELOC_DATA,code_len,hexdigits_off); emit_i32(0);
+            emit2(0x31,0xc9); /* xor ecx,ecx */
+            int he_loop=code_len;
+            emit3(0x83,0xf9,0x10); /* cmp ecx,16 */
+            int jm_hedone=x_jge_rel32();
+            x_movzx_r32_idx1(0,7,1); /* movzx eax, byte[rdi+rcx] */
+            emit2(0x89,0xc2); emit3(0xc1,0xea,0x04); /* mov edx,eax; shr edx,4 */
+            emit3(0x83,0xe0,0x0f); /* and eax,0x0f */
+            x_movzx_r32_idx1(2,3,2); /* movzx edx, byte[rbx+rdx] */
+            emit2(0x88,0x16); /* mov [rsi],dl */
+            x_movzx_r32_idx1(0,3,0); /* movzx eax, byte[rbx+rax] */
+            emit3(0x88,0x46,0x01); /* mov [rsi+1],al */
+            emit4(0x48,0x83,0xc6,0x02); emit3(0x48,0xff,0xc1); /* add rsi,2; inc rcx */
+            { int p=x_jmp_rel32(); patch_i32(p,he_loop-(p+4)); }
+            x_patch_here(jm_hedone);
+            emit1(0x5b); x_ret();
+
+            x_patch_here(jm_over);
+
+            int fail_jumps[32]; int n_fail=0;
+
+            /* connect */
+            if(port_arg) compile_expr(port_arg); else x_mov_rax_imm32(5432);
+            emit1(0x50); /* push rax (port) */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,host_off); emit_i32(0);
+            x_mov_rax_imm32(hostlen); emit3(0x48,0x89,0xc6);
+            emit1(0x5a); /* pop rdx (port) */
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_connect"); }
+            emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+            fail_jumps[n_fail++]=x_jl_rel32();
+            x_mov_data_from_r64(fdslot_off,0);
+
+            /* send StartupMessage */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,startup_off); emit_i32(0);
+            x_mov_rax_imm32(startup_len); emit3(0x48,0x89,0xc6);
+            x_mov_r64_from_data(2,fdslot_off);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_send"); }
+
+            /* ---- auth loop ---- */
+            int auth_loop=code_len;
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,scratch_off); emit_i32(0);
+            x_mov_rax_imm32(5); emit3(0x48,0x89,0xc2);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,scratch_off+1); emit_i32(0);
+            { int p=x_call_unresolved(); patch_i32(p,be32_label-(p+4)); }
+            emit4(0x48,0x83,0xe8,0x04); /* sub rax,4 -> payload len */
+            x_mov_data_from_r64(lenslot_off,0);
+
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,scratch_off+5); emit_i32(0);
+            x_mov_r64_from_data(2,lenslot_off);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+
+            emit3(0x0f,0xb6,0x05); add_reloc(RELOC_DATA,code_len,scratch_off); emit_i32(0); /* type byte */
+            emit4(0x48,0x83,0xf8,0x45); /* cmp rax,'E' */
+            fail_jumps[n_fail++]=x_jz_rel32();
+            emit4(0x48,0x83,0xf8,0x52); /* cmp rax,'R' */
+            int jm_isauth=x_jz_rel32();
+            { int p=x_jmp_rel32(); patch_i32(p,auth_loop-(p+4)); } /* not R/E yet -- keep draining */
+
+            x_patch_here(jm_isauth);
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,scratch_off+5); emit_i32(0);
+            { int p=x_call_unresolved(); patch_i32(p,be32_label-(p+4)); } /* eax=auth_type */
+            emit4(0x48,0x83,0xf8,0x00); /* cmp rax,0 */
+            int jm_authok=x_jz_rel32();
+            emit4(0x48,0x83,0xf8,0x03); /* cmp rax,3 */
+            int jm_cleartext=x_jz_rel32();
+            emit4(0x48,0x83,0xf8,0x05); /* cmp rax,5 */
+            int jm_md5=x_jz_rel32();
+            fail_jumps[n_fail++]=x_jmp_rel32(); /* unsupported auth type (incl. SCRAM=10) */
+
+            x_patch_here(jm_cleartext);
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,cleartext_off); emit_i32(0);
+            x_mov_rax_imm32(cleartext_len); emit3(0x48,0x89,0xc6);
+            x_mov_r64_from_data(2,fdslot_off);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_send"); }
+            { int p=x_jmp_rel32(); patch_i32(p,auth_loop-(p+4)); }
+
+            x_patch_here(jm_md5);
+            /* copy the 4-byte salt (scratch+9) into md5input+32 */
+            emit2(0x8b,0x05); add_reloc(RELOC_DATA,code_len,scratch_off+9); emit_i32(0); /* mov eax,[rip+salt] */
+            emit2(0x89,0x05); add_reloc(RELOC_DATA,code_len,md5input_off+32); emit_i32(0); /* mov [rip+md5input+32],eax */
+            X_ALIGN16_ENTER();
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,md5input_off); emit_i32(0);
+            x_mov_rax_imm32(36); emit3(0x48,0x89,0xc6);
+            emit3(0x48,0x8d,0x15); add_reloc(RELOC_DATA,code_len,md5digest_off); emit_i32(0);
+            x_call_got(md5_got);
+            X_ALIGN16_EXIT();
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,md5digest_off); emit_i32(0);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,md5pwmsg_off+8); emit_i32(0);
+            { int p=x_call_unresolved(); patch_i32(p,hexenc_label-(p+4)); }
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,md5pwmsg_off); emit_i32(0);
+            x_mov_rax_imm32(41); emit3(0x48,0x89,0xc6);
+            x_mov_r64_from_data(2,fdslot_off);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_send"); }
+            { int p=x_jmp_rel32(); patch_i32(p,auth_loop-(p+4)); }
+
+            /* ---- ready-drain loop (post AuthenticationOk) ---- */
+            x_patch_here(jm_authok);
+            int ready_loop=code_len;
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,scratch_off); emit_i32(0);
+            x_mov_rax_imm32(5); emit3(0x48,0x89,0xc2);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,scratch_off+1); emit_i32(0);
+            { int p=x_call_unresolved(); patch_i32(p,be32_label-(p+4)); }
+            emit4(0x48,0x83,0xe8,0x04);
+            x_mov_data_from_r64(lenslot_off,0);
+
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,scratch_off+5); emit_i32(0);
+            x_mov_r64_from_data(2,lenslot_off);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+
+            emit3(0x0f,0xb6,0x05); add_reloc(RELOC_DATA,code_len,scratch_off); emit_i32(0);
+            emit4(0x48,0x83,0xf8,0x5a); /* cmp rax,'Z' */
+            int jm_ready=x_jz_rel32();
+            emit4(0x48,0x83,0xf8,0x45); /* cmp rax,'E' */
+            fail_jumps[n_fail++]=x_jz_rel32();
+            { int p=x_jmp_rel32(); patch_i32(p,ready_loop-(p+4)); }
+
+            x_patch_here(jm_ready);
+            x_mov_r64_from_data(0,fdslot_off);
+            int jm_done=x_jmp_rel32();
+
+            for(int i=0;i<n_fail;i++) x_patch_here(fail_jumps[i]);
+            x_mov_rax_imm32(-1);
+            x_patch_here(jm_done);
+            return 1;
+        }
+        /* y.db.pg_exec(handle, sql) -> 0 on success, -1 on error.
+           Fire-and-forget only, same shape as sqlite_exec -- no row
+           reading (see the pg_connect comment above for why that's
+           out of scope for this native pass). sql MUST be a string
+           literal. */
+        if(is_y_db && strcmp(fn,"pg_exec")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); return 1; }
+            int base=n->left?1:0;
+            Node *handle_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *sql_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            const char *sql=(sql_arg&&sql_arg->kind==ND_STR)?sql_arg->sval:"";
+            size_t sqllen=strlen(sql);
+
+            unsigned char qmsg[2048]; size_t qp=5;
+            memcpy(qmsg+qp,sql,sqllen); qp+=sqllen; qmsg[qp++]=0;
+            qmsg[0]='Q';
+            { uint32_t qlen=(uint32_t)(qp-1);
+              qmsg[1]=(uint8_t)(qlen>>24); qmsg[2]=(uint8_t)(qlen>>16);
+              qmsg[3]=(uint8_t)(qlen>>8);  qmsg[4]=(uint8_t)qlen; }
+            int qmsg_off=data_add_bytes(qmsg,(int)qp);
+            int qmsg_len=(int)qp;
+
+            unsigned char scratch_zero[512]; memset(scratch_zero,0,512);
+            int scratch_off=data_add_bytes(scratch_zero,512);
+            unsigned char slot_zero[8]={0,0,0,0,0,0,0,0};
+            int fdslot_off=data_add_bytes(slot_zero,8);
+            int lenslot_off=data_add_bytes(slot_zero,8);
+
+            int jm_over=x_jmp_rel32();
+            int read_exact_label=code_len;
+            emit1(0x53); emit2(0x41,0x54); emit2(0x41,0x55);
+            emit3(0x48,0x89,0xfb); emit3(0x49,0x89,0xf4); emit3(0x49,0x89,0xd5);
+            int re_loop=code_len;
+            emit4(0x49,0x83,0xfd,0x00);
+            int jm_reok=x_jle_rel32();
+            x_mov_rax_imm32(0);
+            emit3(0x48,0x89,0xdf); emit3(0x4c,0x89,0xe6); emit3(0x4c,0x89,0xea);
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int jm_refail=x_jle_rel32();
+            emit3(0x49,0x01,0xc4); emit3(0x49,0x29,0xc5);
+            { int p=x_jmp_rel32(); patch_i32(p,re_loop-(p+4)); }
+            x_patch_here(jm_reok);
+            emit2(0x31,0xc0);
+            int jm_redone=x_jmp_rel32();
+            x_patch_here(jm_refail);
+            x_mov_rax_imm32(-1);
+            x_patch_here(jm_redone);
+            emit2(0x41,0x5d); emit2(0x41,0x5c); emit1(0x5b);
+            x_ret();
+
+            int be32_label=code_len;
+            emit3(0x0f,0xb6,0x07); emit3(0xc1,0xe0,0x18);
+            emit4(0x0f,0xb6,0x4f,0x01); emit3(0xc1,0xe1,0x10); emit2(0x09,0xc8);
+            emit4(0x0f,0xb6,0x4f,0x02); emit3(0xc1,0xe1,0x08); emit2(0x09,0xc8);
+            emit4(0x0f,0xb6,0x4f,0x03); emit2(0x09,0xc8);
+            x_ret();
+
+            x_patch_here(jm_over);
+
+            if(handle_arg) compile_expr(handle_arg); else x_mov_rax_imm32(-1);
+            x_mov_data_from_r64(fdslot_off,0);
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,qmsg_off); emit_i32(0);
+            x_mov_rax_imm32(qmsg_len); emit3(0x48,0x89,0xc6);
+            x_mov_r64_from_data(2,fdslot_off);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_send"); }
+
+            int fail_jumps[16]; int n_fail=0;
+            int drain_loop=code_len;
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,scratch_off); emit_i32(0);
+            x_mov_rax_imm32(5); emit3(0x48,0x89,0xc2);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,scratch_off+1); emit_i32(0);
+            { int p=x_call_unresolved(); patch_i32(p,be32_label-(p+4)); }
+            emit4(0x48,0x83,0xe8,0x04);
+            x_mov_data_from_r64(lenslot_off,0);
+
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,scratch_off+5); emit_i32(0);
+            x_mov_r64_from_data(2,lenslot_off);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+
+            emit3(0x0f,0xb6,0x05); add_reloc(RELOC_DATA,code_len,scratch_off); emit_i32(0);
+            emit4(0x48,0x83,0xf8,0x5a); /* cmp rax,'Z' */
+            int jm_success=x_jz_rel32();
+            emit4(0x48,0x83,0xf8,0x45); /* cmp rax,'E' */
+            fail_jumps[n_fail++]=x_jz_rel32();
+            { int p=x_jmp_rel32(); patch_i32(p,drain_loop-(p+4)); }
+
+            x_patch_here(jm_success);
+            x_mov_rax_imm32(0);
+            int jm_done=x_jmp_rel32();
+
+            for(int i=0;i<n_fail;i++) x_patch_here(fail_jumps[i]);
+            x_mov_rax_imm32(-1);
+            x_patch_here(jm_done);
+            return 1;
+        }
+        #undef X_ALIGN16_ENTER
+        #undef X_ALIGN16_EXIT
         /* y.net.dynlink_test() — proof-of-concept native call into a
            real shared-library function (libc.so.6's puts, followed by
            its exit), exercising the PT_INTERP/PT_DYNAMIC machinery

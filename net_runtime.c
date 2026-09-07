@@ -1182,7 +1182,7 @@ static void ys_md5_final(ys_md5_ctx *ctx, unsigned char out[16]){
     ys_md5_update(ctx,lenbuf,8);
     for(int i=0;i<4;i++) for(int j=0;j<4;j++) out[i*4+j]=(unsigned char)(ctx->state[i]>>(8*j));
 }
-static void ys_md5_hex(const void *data, size_t len, char out[33]){
+void ys_md5_hex(const void *data, size_t len, char out[33]){
     ys_md5_ctx ctx; ys_md5_init(&ctx);
     ys_md5_update(&ctx,(const unsigned char*)data,len);
     unsigned char digest[16]; ys_md5_final(&ctx,digest);
