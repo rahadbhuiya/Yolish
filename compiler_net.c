@@ -4400,6 +4400,302 @@ static int compile_net_call(Node *n, const char *fn, int is_y_net, int is_y_http
             x_patch_here(jm_done);
             return 1;
         }
+        /* y.db.pg_query_print(handle, sql) -- runs a query and prints
+           "col=value" per line per row, completing the native
+           PostgreSQL client (pg_connect/pg_exec above). Unlike
+           y.db.sqlite_query_print, there's no callback-callee trick
+           needed here: PostgreSQL hands rows back to whoever is
+           already reading the socket, so this is just an extension
+           of pg_exec's own read loop -- parse RowDescription ('T')
+           and DataRow ('D') instead of only draining past them.
+
+           RowDescription's column names need to survive being read
+           while later DataRow messages keep arriving (which would
+           otherwise overwrite a single shared scratch buffer), so
+           this uses two SEPARATE persistent buffers -- one that only
+           ever holds the latest RowDescription, one that only ever
+           holds the current DataRow -- and re-walks the
+           RowDescription buffer from its start for every row rather
+           than parsing it once into a name/pointer table. Slightly
+           more repeated work per row, meaningfully simpler code: no
+           table structure to build or index into, just two cursors
+           walked in lockstep (advance past a name, advance past a
+           value, print, repeat). */
+        if(is_y_db && strcmp(fn,"pg_query_print")==0){
+            if(g_target!=TARGET_LINUX){ x_mov_rax_imm32(-1); return 1; }
+
+            int base=n->left?1:0;
+            Node *handle_arg=(n->argc>base)?n->args[base]:NULL;
+            Node *sql_arg=(n->argc>base+1)?n->args[base+1]:NULL;
+            const char *sql=(sql_arg&&sql_arg->kind==ND_STR)?sql_arg->sval:"";
+            size_t sqllen=strlen(sql);
+
+            unsigned char qmsg[2048]; size_t qp=5;
+            memcpy(qmsg+qp,sql,sqllen); qp+=sqllen; qmsg[qp++]=0;
+            qmsg[0]='Q';
+            { uint32_t qlen=(uint32_t)(qp-1);
+              qmsg[1]=(uint8_t)(qlen>>24); qmsg[2]=(uint8_t)(qlen>>16);
+              qmsg[3]=(uint8_t)(qlen>>8);  qmsg[4]=(uint8_t)qlen; }
+            int qmsg_off=data_add_bytes(qmsg,(int)qp);
+            int qmsg_len=(int)qp;
+
+            unsigned char eq_zero[1]={'='}; int eq_off=data_add_bytes(eq_zero,1);
+            unsigned char nl_zero[1]={'\n'}; int nl_off=data_add_bytes(nl_zero,1);
+            unsigned char null_str[4]={'N','U','L','L'}; int null_off=data_add_bytes(null_str,4);
+
+            unsigned char hdr_zero[16]; memset(hdr_zero,0,16);
+            int hdr_off=data_add_bytes(hdr_zero,16);
+            unsigned char big_zero[2048]; memset(big_zero,0,2048);
+            int rowdesc_off=data_add_bytes(big_zero,2048);
+            int datarow_off=data_add_bytes(big_zero,2048);
+            unsigned char slot_zero[8]={0,0,0,0,0,0,0,0};
+            int fdslot_off=data_add_bytes(slot_zero,8);
+            int lenslot_off=data_add_bytes(slot_zero,8);
+            int rdcursor_off=data_add_bytes(slot_zero,8);
+            int drcursor_off=data_add_bytes(slot_zero,8);
+            int ncols_off=data_add_bytes(slot_zero,8);
+            int coli_off=data_add_bytes(slot_zero,8);
+            int flenslot_off=data_add_bytes(slot_zero,8);
+
+            int jm_over=x_jmp_rel32();
+
+            /* read_exact_helper(rdi=fd,rsi=buf,rdx=len) -> rax=0/-1 */
+            int read_exact_label=code_len;
+            emit1(0x53); emit2(0x41,0x54); emit2(0x41,0x55);
+            emit3(0x48,0x89,0xfb); emit3(0x49,0x89,0xf4); emit3(0x49,0x89,0xd5);
+            int re_loop=code_len;
+            emit4(0x49,0x83,0xfd,0x00);
+            int jm_reok=x_jle_rel32();
+            x_mov_rax_imm32(0);
+            emit3(0x48,0x89,0xdf); emit3(0x4c,0x89,0xe6); emit3(0x4c,0x89,0xea);
+            emit2(0x0f,0x05);
+            emit4(0x48,0x83,0xf8,0x00);
+            int jm_refail=x_jle_rel32();
+            emit3(0x49,0x01,0xc4); emit3(0x49,0x29,0xc5);
+            { int p=x_jmp_rel32(); patch_i32(p,re_loop-(p+4)); }
+            x_patch_here(jm_reok);
+            emit2(0x31,0xc0);
+            int jm_redone=x_jmp_rel32();
+            x_patch_here(jm_refail);
+            x_mov_rax_imm32(-1);
+            x_patch_here(jm_redone);
+            emit2(0x41,0x5d); emit2(0x41,0x5c); emit1(0x5b);
+            x_ret();
+
+            /* be32_helper(rdi=ptr) -> eax */
+            int be32_label=code_len;
+            emit3(0x0f,0xb6,0x07); emit3(0xc1,0xe0,0x18);
+            emit4(0x0f,0xb6,0x4f,0x01); emit3(0xc1,0xe1,0x10); emit2(0x09,0xc8);
+            emit4(0x0f,0xb6,0x4f,0x02); emit3(0xc1,0xe1,0x08); emit2(0x09,0xc8);
+            emit4(0x0f,0xb6,0x4f,0x03); emit2(0x09,0xc8);
+            x_ret();
+
+            /* print_and_len_helper(rdi=ptr) -> prints the NUL-terminated
+               string at ptr via __ys_print_str, returns its length in
+               rax (used to advance a cursor past it -- unlike
+               sqlite_query_print's print_cstr_helper, no NULL-pointer
+               case is needed here: RowDescription column names are
+               never NULL). */
+            int pcstr_label=code_len;
+            x_push_rbp(); x_mov_rbp_rsp();
+            emit4(0x48,0x83,0xec,0x10); /* sub rsp,16 -- [rbp-8] holds the length across the call below */
+            emit3(0x48,0x89,0xf8); /* mov rax,rdi */
+            emit2(0x31,0xc9); /* xor ecx,ecx */
+            int strlen_top=code_len;
+            x_cmp_byte_idx1_imm8(0,1,0); /* cmp byte[rax+rcx],0 */
+            int jm_strlendone=x_jz_rel32();
+            emit3(0x48,0xff,0xc1); /* inc rcx */
+            { int p=x_jmp_rel32(); patch_i32(p,strlen_top-(p+4)); }
+            x_patch_here(jm_strlendone);
+            emit4(0x48,0x89,0x4d,0xf8); /* mov [rbp-8],rcx -- save length; rcx is caller-saved and __ys_print_str is a real call, not guaranteed to leave it alone */
+            emit3(0x48,0x89,0xc7); /* mov rdi,rax */
+            emit3(0x48,0x89,0xce); /* mov rsi,rcx */
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+            emit4(0x48,0x8b,0x45,0xf8); /* mov rax,[rbp-8] -- return the saved length */
+            x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+
+            x_patch_here(jm_over);
+
+            if(handle_arg) compile_expr(handle_arg); else x_mov_rax_imm32(-1);
+            x_mov_data_from_r64(fdslot_off,0);
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,qmsg_off); emit_i32(0);
+            x_mov_rax_imm32(qmsg_len); emit3(0x48,0x89,0xc6);
+            x_mov_r64_from_data(2,fdslot_off);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_net_send"); }
+
+            int fail_jumps[16]; int n_fail=0;
+
+            /* ---- main response loop ---- */
+            int drain_loop=code_len;
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,hdr_off); emit_i32(0);
+            x_mov_rax_imm32(5); emit3(0x48,0x89,0xc2);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,hdr_off+1); emit_i32(0);
+            { int p=x_call_unresolved(); patch_i32(p,be32_label-(p+4)); }
+            emit4(0x48,0x83,0xe8,0x04); /* payload len */
+            x_mov_data_from_r64(lenslot_off,0);
+
+            /* dispatch on type byte (hdr[0]) */
+            emit3(0x0f,0xb6,0x05); add_reloc(RELOC_DATA,code_len,hdr_off); emit_i32(0);
+            emit4(0x48,0x83,0xf8,0x54); /* cmp rax,'T' */
+            int jm_isT=x_jz_rel32();
+            emit4(0x48,0x83,0xf8,0x44); /* cmp rax,'D' */
+            int jm_isD=x_jz_rel32();
+            emit4(0x48,0x83,0xf8,0x5a); /* cmp rax,'Z' */
+            int jm_isZ=x_jz_rel32();
+            emit4(0x48,0x83,0xf8,0x45); /* cmp rax,'E' */
+            int jm_isE=x_jz_rel32();
+            /* anything else (CommandComplete, NoticeResponse, ...):
+               read payload into datarow_off as a throwaway and keep
+               draining */
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,datarow_off); emit_i32(0);
+            x_mov_r64_from_data(2,lenslot_off);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+            { int p=x_jmp_rel32(); patch_i32(p,drain_loop-(p+4)); }
+
+            /* ---- 'T' RowDescription: keep the payload for later
+               rows to walk (no parsing needed right now, just hang
+               onto the bytes) ---- */
+            x_patch_here(jm_isT);
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,rowdesc_off); emit_i32(0);
+            x_mov_r64_from_data(2,lenslot_off);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+            { int p=x_jmp_rel32(); patch_i32(p,drain_loop-(p+4)); }
+
+            /* ---- 'D' DataRow: read it, then walk it in lockstep
+               against the last RowDescription, printing col=value ---- */
+            x_patch_here(jm_isD);
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,datarow_off); emit_i32(0);
+            x_mov_r64_from_data(2,lenslot_off);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+
+            /* ncols = be16 at datarow_off (top 2 bytes of the 4-byte
+               be32 read shifted right 16 -- simpler to just load 2
+               bytes directly: byte0<<8|byte1) */
+            emit3(0x0f,0xb6,0x05); add_reloc(RELOC_DATA,code_len,datarow_off); emit_i32(0); /* movzx eax, byte[datarow+0] */
+            emit3(0xc1,0xe0,0x08); /* shl eax,8 */
+            emit3(0x0f,0xb6,0x0d); add_reloc(RELOC_DATA,code_len,datarow_off+1); emit_i32(0); /* movzx ecx, byte[datarow+1] */
+            emit2(0x09,0xc8); /* or eax,ecx */
+            x_mov_data_from_r64(ncols_off,0);
+
+            /* cursors: rowdesc starts at +2 (skip its own fieldcount),
+               datarow starts at +2 too */
+            emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,rowdesc_off+2); emit_i32(0);
+            x_mov_data_from_r64(rdcursor_off,0);
+            emit3(0x48,0x8d,0x05); add_reloc(RELOC_DATA,code_len,datarow_off+2); emit_i32(0);
+            x_mov_data_from_r64(drcursor_off,0);
+            x_mov_rax_imm32(0);
+            x_mov_data_from_r64(coli_off,0);
+
+            int col_loop=code_len;
+            x_mov_r64_from_data(0,coli_off);
+            emit3(0x48,0x3b,0x05); add_reloc(RELOC_DATA,code_len,ncols_off); emit_i32(0); /* cmp rax,[rip+ncols] */
+            int jm_rowdone=x_jge_rel32();
+
+            /* print column name: print_and_len_helper(rowdesc_cursor) -> rax=namelen */
+            x_mov_r64_from_data(7,rdcursor_off);
+            { int p=x_call_unresolved(); patch_i32(p,pcstr_label-(p+4)); }
+            /* advance rowdesc cursor past name+NUL(1)+metadata(18) */
+            x_mov_r64_from_data(1,rdcursor_off); /* rcx=old cursor */
+            emit3(0x48,0x01,0xc1); /* add rcx,rax (namelen) */
+            emit4(0x48,0x83,0xc1,0x13); /* add rcx,19 (NUL+18 metadata bytes) */
+            x_mov_data_from_r64(rdcursor_off,1);
+
+            /* print "=" */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,eq_off); emit_i32(0);
+            x_mov_rax_imm32(1); emit3(0x48,0x89,0xc6);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+
+            /* value: be32 length at datarow cursor */
+            x_mov_r64_from_data(7,drcursor_off);
+            { int p=x_call_unresolved(); patch_i32(p,be32_label-(p+4)); }
+            /* advance cursor past the 4-byte length field */
+            x_mov_r64_from_data(1,drcursor_off);
+            emit4(0x48,0x83,0xc1,0x04); /* add rcx,4 */
+            x_mov_data_from_r64(drcursor_off,1);
+
+            emit3(0x83,0xf8,0xff); /* cmp eax,-1 (NULL marker) -- 32-bit compare: be32_helper's result is zero-extended into rax, so it must be compared as eax (0xffffffff), not sign-extended rax */
+            int jm_isnull=x_jz_rel32();
+            /* non-NULL: print flen bytes at cursor, then advance cursor by flen */
+            x_mov_data_from_r64(flenslot_off,0); /* save flen -- rcx (or any register) isn't guaranteed to survive the __ys_print_str call below */
+            emit3(0x48,0x89,0xc1); /* mov rcx,rax -- flen */
+            x_mov_r64_from_data(7,drcursor_off); /* rdi=cursor */
+            emit3(0x48,0x89,0xce); /* mov rsi,rcx */
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+            x_mov_r64_from_data(0,drcursor_off);
+            x_mov_r64_from_data(1,flenslot_off); /* reload flen fresh, don't trust rcx across the call */
+            emit3(0x48,0x01,0xc8); /* add rax,rcx */
+            x_mov_data_from_r64(drcursor_off,0);
+            int jm_valdone=x_jmp_rel32();
+
+            x_patch_here(jm_isnull);
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,null_off); emit_i32(0);
+            x_mov_rax_imm32(4); emit3(0x48,0x89,0xc6);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+
+            x_patch_here(jm_valdone);
+            /* print newline */
+            emit3(0x48,0x8d,0x3d); add_reloc(RELOC_DATA,code_len,nl_off); emit_i32(0);
+            x_mov_rax_imm32(1); emit3(0x48,0x89,0xc6);
+            { int p=x_call_unresolved(); add_call_patch(p,"__ys_print_str"); }
+
+            x_mov_r64_from_data(0,coli_off);
+            emit3(0x48,0xff,0xc0); /* inc rax */
+            x_mov_data_from_r64(coli_off,0);
+            { int p=x_jmp_rel32(); patch_i32(p,col_loop-(p+4)); }
+
+            x_patch_here(jm_rowdone);
+            { int p=x_jmp_rel32(); patch_i32(p,drain_loop-(p+4)); }
+
+            /* ---- 'E' ErrorResponse: read payload (throwaway), mark
+               failure, keep draining to reach 'Z' cleanly ---- */
+            x_patch_here(jm_isE);
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,datarow_off); emit_i32(0);
+            x_mov_r64_from_data(2,lenslot_off);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            fail_jumps[n_fail++]=x_jmp_rel32(); /* unconditional -- any ErrorResponse is a hard failure */
+
+            /* ---- 'Z' ReadyForQuery: still has to consume its own
+               1-byte payload (transaction status) before finishing --
+               skipping this would leave that byte unread in the
+               socket, silently misaligning the very next message this
+               connection reads (whether that's a later query on the
+               same handle, or this same connection's next call to
+               pg_exec/pg_query_print). pg_exec's own drain loop never
+               had this bug because it always reads a message's
+               payload before branching on type; this dispatch branches
+               on type first (T and D need different destinations), so
+               Z needs its own explicit read. */
+            x_patch_here(jm_isZ);
+            x_mov_r64_from_data(7,fdslot_off);
+            emit3(0x48,0x8d,0x35); add_reloc(RELOC_DATA,code_len,datarow_off); emit_i32(0);
+            x_mov_r64_from_data(2,lenslot_off);
+            { int p=x_call_unresolved(); patch_i32(p,read_exact_label-(p+4)); }
+            emit4(0x48,0x83,0xf8,0x00);
+            fail_jumps[n_fail++]=x_jnz_rel32();
+            x_mov_rax_imm32(0);
+            int jm_done=x_jmp_rel32();
+
+            for(int i=0;i<n_fail;i++) x_patch_here(fail_jumps[i]);
+            x_mov_rax_imm32(-1);
+            x_patch_here(jm_done);
+            return 1;
+        }
         #undef X_ALIGN16_ENTER
         #undef X_ALIGN16_EXIT
         /* y.net.dynlink_test() — proof-of-concept native call into a
