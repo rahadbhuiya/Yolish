@@ -177,9 +177,14 @@ static void gc_mark_ptr(Val *data){
     for(int i=0; i<node->size; i++) gc_mark_val(&data[i]);
 }
 
+/* v2.4: shared static empty-string literal (defined below); forward
+   declared here so gc_mark_str can recognize it as non-GC-heap */
+static char g_empty_str[1];
+
 /* v2.4: mark a GC-tracked string buffer — leaf node, no recursion needed */
 static void gc_mark_str(char *s){
     if(!s) return;
+    if(s==g_empty_str) return; /* shared static literal, not GC-heap — not a real node */
     GCNode *node = ((GCNode*)s) - 1;
     if(node->magic != GC_MAGIC) return;
     node->marked = 1; /* strings hold no further references */
@@ -1515,7 +1520,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         mod.field_vals=alloc_fld(menv->count+1);
         mod.field_names=alloc_nm(menv->count+1);
         for(int i=0;i<menv->count;i++){
-            for(int j=0;j<64;j++) mod.field_names[i][j]=menv->names[i][j];
+            for(int j=0;j<32;j++) mod.field_names[i][j]=menv->names[i][j];
             mod.field_vals[i]=menv->vals[i];
             /* v2.6 fix: a module's own named functions need to resolve
                other module-level names (other functions, constants)
@@ -1552,7 +1557,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
         {int last=-1,rl=(int)strlen(resolved);
          for(int i=0;i<rl;i++){char ch=resolved[i];if(ch==47||ch==92)last=i;}
          if(last>=0){strncpy(g_src_dir,resolved,last);g_src_dir[last]=0;}
-         strncpy(g_src_file,resolved,511);}
+         strncpy(g_src_file,resolved,511); g_src_file[511]=0;}
         Lexer il; lex_init(&il,import_src,sz);
         Node *iprog=parse_program(&il);
         eval_program(iprog,env);
@@ -4050,7 +4055,7 @@ Val eval_module_public(const char *raw_path, const char *ns_name){
     mod.field_vals=alloc_fld(menv->count+1);
     mod.field_names=alloc_nm(menv->count+1);
     for(int i=0;i<menv->count;i++){
-        for(int j=0;j<64;j++) mod.field_names[i][j]=menv->names[i][j];
+        for(int j=0;j<32;j++) mod.field_names[i][j]=menv->names[i][j];
         mod.field_vals[i]=menv->vals[i];
         /* A module's own named functions (unlike a plain top-level `fn`)
            need to be callable from *outside* the module while still

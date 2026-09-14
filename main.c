@@ -64,7 +64,7 @@ static int run_tests(const char *tfile) {
     int tlen=(int)fread(tsrc,1,sizeof(tsrc)-1,f);
     fclose(f); tsrc[tlen]=0;
 
-    strncpy(g_src_file,tfile,511);
+    strncpy(g_src_file,tfile,511); g_src_file[511]=0;
     {   int last=-1,fl=(int)strlen(tfile);
         for(int i=0;i<fl;i++) if(tfile[i]=='/'||tfile[i]=='\\') last=i;
         if(last>=0){ strncpy(g_src_dir,tfile,last); g_src_dir[last]=0; }
@@ -141,7 +141,7 @@ static int run_vm(const char *vfile) {
     int vlen=(int)fread(vsrc,1,sizeof(vsrc)-1,f);
     fclose(f); vsrc[vlen]=0;
 
-    strncpy(g_src_file,vfile,511);
+    strncpy(g_src_file,vfile,511); g_src_file[511]=0;
     {   int last=-1,fl=(int)strlen(vfile);
         for(int i=0;i<fl;i++) if(vfile[i]=='/'||vfile[i]=='\\') last=i;
         if(last>=0){ strncpy(g_src_dir,vfile,last); g_src_dir[last]=0; }
@@ -257,7 +257,7 @@ int main(int argc,char **argv){
             g_src_dir[last_sep]=0;
             if(chdir(g_src_dir)){}
             g_src_dir[0]=0;
-            strncpy(g_src_file,infile,511);
+            strncpy(g_src_file,infile,511); g_src_file[511]=0;
         }
     }
 
