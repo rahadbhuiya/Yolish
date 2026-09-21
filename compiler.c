@@ -371,9 +371,60 @@ static int sym_find(const char *name){
     return -1;
 }
 
+/*  v2.42: native struct layouts (compile-time only — no runtime type
+    info exists in this backend, so field offsets are resolved entirely
+    while compiling, the same way struct literals resolve field *names*
+    to positions in the interpreter's Val.field_names at eval time, just
+    one stage earlier here). Registered from top-level `struct Name {..}`
+    declarations before any function body is compiled (see the new scan
+    added in ys_compile below) so a struct can be used by any function
+    in the file regardless of declaration order relative to that use. */
+#define NSTRUCT_MAX 32
+typedef struct { char name[32]; char fields[8][32]; int nfields; } NStructDef;
+static NStructDef nstruct_defs[NSTRUCT_MAX];
+static int        n_nstruct_defs=0;
+
+static NStructDef *nstruct_find(const char *name){
+    for(int i=0;i<n_nstruct_defs;i++)
+        if(strcmp(nstruct_defs[i].name,name)==0) return &nstruct_defs[i];
+    return NULL;
+}
+
+static void nstruct_register(Node *n){
+    if(n_nstruct_defs>=NSTRUCT_MAX) return;
+    if(nstruct_find(n->name)) return; /* already registered */
+    NStructDef *d=&nstruct_defs[n_nstruct_defs++];
+    /* manual clamp-and-copy, same idiom already used elsewhere in this
+       file (see the len>63 clamps above) — strncpy triggered
+       -Wstringop-truncation and snprintf triggered -Wformat-truncation
+       in its place; both warnings are gcc reasoning about the general
+       case (it can't see the source is always null-terminated shorter
+       than 64 by construction), not a real bug either way, but a
+       hand-rolled bounded copy sidesteps both cleanly. */
+    int nlen=(int)strlen(n->name); if(nlen>31) nlen=31;
+    memcpy(d->name,n->name,nlen); d->name[nlen]=0;
+    d->nfields=n->stmtc<8?n->stmtc:8;
+    for(int i=0;i<d->nfields;i++){
+        int flen=(int)strlen(n->stmts[i]->name); if(flen>31) flen=31;
+        memcpy(d->fields[i],n->stmts[i]->name,flen); d->fields[i][flen]=0;
+    }
+}
+
 /*  local variable table  */
 #define LOCAL_MAX 64
-typedef struct { char name[64]; int rbp_off; int is_float; } Local;
+typedef struct {
+    char name[64];
+    int  rbp_off;
+    int  is_float;
+    /* v2.42: struct-typed locals. is_struct set means rbp_off is the
+       offset of *field 0*; field i lives at rbp_off - i*8 (see
+       local_alloc_struct below for why fields land in that order).
+       field_is_float mirrors is_float but per field, since a struct's
+       fields aren't all necessarily the same runtime representation. */
+    int  is_struct;
+    char struct_type[32];
+    int  field_is_float[8];
+} Local;
 static Local locals[LOCAL_MAX];
 static int   nlocals=0;
 static int   stack_size=0;  /* current frame size in bytes */
@@ -385,14 +436,68 @@ static int local_get(const char *name){
     return 0; /* 0 = not found */
 }
 
+static Local *local_find(const char *name){
+    for(int i=0;i<nlocals;i++) if(strcmp(locals[i].name,name)==0) return &locals[i];
+    return NULL;
+}
+
 static int local_alloc(const char *name){
     int existing=local_get(name);
     if(existing) return existing;
     stack_size+=8;
     locals[nlocals].rbp_off=-stack_size;
+    locals[nlocals].is_struct=0;
     strncpy(locals[nlocals].name,name,63);
     nlocals++;
     return -stack_size;
+}
+
+/* v2.42: reserve nfields contiguous 8-byte slots for a struct-typed
+   local. Slots are reserved in field order (field 0 first), so field 0
+   ends up at the *least* negative rbp offset of the block and each
+   later field is 8 bytes deeper (more negative) than the one before
+   it — i.e. field i's offset is always (field 0's offset) - i*8,
+   regardless of how many other locals come before or after this one.
+   Returns the existing Local* unchanged if this name was already
+   allocated as this same struct type (so re-entering the same `let`
+   in a loop body, or a plain re-read, doesn't reserve stack twice). */
+static Local *local_alloc_struct(const char *name, const char *struct_type){
+    Local *existing=local_find(name);
+    if(existing && existing->is_struct && strcmp(existing->struct_type,struct_type)==0)
+        return existing;
+    NStructDef *def=nstruct_find(struct_type);
+    int nfields=def?def->nfields:0;
+    if(nfields<1) nfields=1; /* degrade to a single word rather than 0 bytes */
+    int field0_off=0;
+    for(int i=0;i<nfields;i++){ stack_size+=8; if(i==0) field0_off=-stack_size; }
+    Local *L=&locals[nlocals++];
+    strncpy(L->name,name,63); L->name[63]=0;
+    L->rbp_off=field0_off;
+    L->is_float=0;
+    L->is_struct=1;
+    strncpy(L->struct_type,struct_type,31); L->struct_type[31]=0;
+    for(int i=0;i<8;i++) L->field_is_float[i]=0;
+    return L;
+}
+
+/* v2.42: resolve field_name to its byte offset within a struct-typed
+   Local. Returns 1 and sets out_off/out_is_float on success, 0 if
+   the field name doesn't exist on this struct (caller decides how to
+   fail — see ND_DOT/ND_ASSIGN below, both treat this as "compiles to
+   0" the same way an unresolved plain identifier already does
+   elsewhere in this file, rather than aborting the whole compile). */
+static int nstruct_field_offset(Local *L, const char *field_name, int *out_off, int *out_is_float){
+    if(!L->is_struct) return 0;
+    NStructDef *def=nstruct_find(L->struct_type);
+    if(!def) return 0;
+    for(int i=0;i<def->nfields;i++){
+        if(strcmp(def->fields[i],field_name)==0){
+            *out_off=L->rbp_off-i*8;
+            *out_is_float=L->field_is_float[i];
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /*  call patches  */
@@ -1160,9 +1265,59 @@ static void compile_expr(Node *n){
         int p=x_call_unresolved(); add_call_patch(p,fn);
         break;
     }
+    case ND_DOT:{
+        /* v2.42: struct field read (p.x). Only a plain local identifier
+           on the left is supported this pass — arr[i].field would need
+           native array indexing to exist first, which it doesn't (see
+           ROADMAP.md's v2.42 entry for the scope line on this); a
+           left side that isn't a struct-typed local falls through to
+           the same "compiles to 0" behavior an unresolved plain
+           identifier already gets elsewhere in this file, rather than
+           a hard compile error. */
+        g_last_float=0;
+        if(n->left && n->left->kind==ND_IDENT){
+            Local *L=local_find(n->left->name);
+            if(L && L->is_struct){
+                int off, isf;
+                if(nstruct_field_offset(L,n->name,&off,&isf)){
+                    x_mov_rax_mem(off);
+                    g_last_float=isf;
+                    break;
+                }
+            }
+        }
+        x_mov_rax_imm32(0);
+        break;
+    }
     default:
         x_mov_rax_imm32(0);
         break;
+    }
+}
+
+/* v2.42: write a struct literal (Point{x: 1, y: 2}) directly into a
+   struct-typed local's stack slots, field by field, in the *struct
+   declaration's* field order (not necessarily the literal's — a
+   literal is allowed to list fields in any order, same as the
+   interpreter's ND_STRUCT_LIT/eval.c). A field the literal doesn't
+   mention is left at whatever was already in that stack slot (0 on
+   first entry into a fresh frame in practice, since this backend
+   never reuses a frame's raw memory for anything else beforehand) —
+   matching this pass's stack-block-per-local storage model, which has
+   no separate "uninitialized" representation to write instead. */
+static void compile_struct_lit_into(Node *lit, Local *L){
+    NStructDef *def=nstruct_find(L->struct_type);
+    if(!def) return;
+    for(int fi=0; fi<def->nfields; fi++){
+        for(int li=0; li<lit->argc; li++){
+            if(strcmp(lit->field_names[li],def->fields[fi])==0){
+                compile_expr(lit->args[li]);
+                int off=L->rbp_off - fi*8;
+                x_mov_mem_rax(off);
+                L->field_is_float[fi]=g_last_float;
+                break;
+            }
+        }
     }
 }
 
@@ -1172,20 +1327,67 @@ static void compile_node(Node *n){
     switch(n->kind){
     case ND_LET:
     case ND_VAR:{
+        /* v2.42: `let p = Point{x: 1, y: 2}` — the right side is a
+           struct literal, so it doesn't go through compile_expr/rax
+           at all (a struct doesn't fit in one register); allocate the
+           struct-typed local's whole block up front and write every
+           field straight into its own slot instead. */
+        if(n->right && n->right->kind==ND_STRUCT_LIT){
+            Local *L=local_alloc_struct(n->name, n->right->name);
+            compile_struct_lit_into(n->right, L);
+            break;
+        }
         compile_expr(n->right);
         int off=local_alloc(n->name);
         for(int _i=0;_i<nlocals;_i++) if(strcmp(locals[_i].name,n->name)==0){locals[_i].is_float=g_last_float;break;}
         x_mov_mem_rax(off); break;
     }
     case ND_ASSIGN:{
-        compile_expr(n->right);
         /* target name is in n->left->name (parser stores ident as left child) */
         const char *aname = (n->name[0]) ? n->name
                           : (n->left && n->left->name[0]) ? n->left->name : "";
+        /* v2.42: obj.field = v — field write on a struct-typed local.
+           Only a plain local identifier on the left of the dot is
+           supported this pass, same limitation as ND_DOT's read side
+           above (no native array indexing yet to support arr[i].field). */
+        if(n->left && n->left->kind==ND_DOT && n->left->left && n->left->left->kind==ND_IDENT){
+            Local *L=local_find(n->left->left->name);
+            if(L && L->is_struct){
+                NStructDef *def=nstruct_find(L->struct_type);
+                if(def){
+                    for(int fi=0; fi<def->nfields; fi++){
+                        if(strcmp(def->fields[fi],n->left->name)==0){
+                            compile_expr(n->right);
+                            int off=L->rbp_off - fi*8;
+                            x_mov_mem_rax(off);
+                            L->field_is_float[fi]=g_last_float;
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        /* v2.42: `p = Point{...}` — reassigning a whole struct-typed
+           local to a fresh literal. Same direct field-by-field write
+           as ND_LET/ND_VAR above, reusing the existing block if `p`
+           is already this struct type rather than growing the frame
+           again (see local_alloc_struct). */
+        if(n->right && n->right->kind==ND_STRUCT_LIT){
+            Local *L=local_alloc_struct(aname, n->right->name);
+            compile_struct_lit_into(n->right, L);
+            break;
+        }
+        compile_expr(n->right);
         int off=local_get(aname); if(off==0) off=local_alloc(aname);
         for(int _i=0;_i<nlocals;_i++) if(strcmp(locals[_i].name,aname)==0){locals[_i].is_float=g_last_float;break;}
         x_mov_mem_rax(off); break;
     }
+    case ND_STRUCT:
+        /* v2.42: declarations are registered into nstruct_defs by the
+           dedicated scan in ys_compile, before any function body is
+           compiled — nothing left to emit here. */
+        break;
     case ND_RETURN:{
         if(n->right) compile_expr(n->right);
         else x_mov_rax_imm32(0);
@@ -1303,8 +1505,24 @@ static void compile_node(Node *n){
         /* ModRM bytes for mov [rbp+disp8], rdi/rsi/rdx/rcx */
         {
             static const uint8_t modrm[]={0x7d,0x75,0x55,0x4d};
+            /* v2.42 fix: a real, pre-existing bug, found while testing
+               struct support — parser.c's TK_FN case (see its own
+               comment: "parse parameter names into field_names[]")
+               stores parameter names in n->field_names[], the same
+               place eval.c's own function-call binding
+               (`env_def(fe,fd->field_names[i],arg)`) reads them from.
+               n->args is never populated for ND_FN at all — it's only
+               ever set on ND_CALL. Reading n->args[pi]->name here was
+               therefore always a NULL-pointer dereference in a
+               statically-linked binary the moment ANY native-compiled
+               function had one or more parameters — not a struct-
+               related bug, just never previously exercised, since
+               ROADMAP.md's own native-compiler examples/regression
+               notes don't mention compiling a plain user function with
+               parameters. Confirmed by reproducing the crash against
+               the pre-struct-work compiler too. */
             for(int pi=0; pi<n->argc && pi<4; pi++){
-                int poff=local_alloc(n->args[pi]->name);
+                int poff=local_alloc(n->field_names[pi]);
                 if(poff>=-128&&poff<=127){
                     emit4(0x48,0x89,(uint8_t)(modrm[pi]|0x40),(uint8_t)(int8_t)poff);
                 } else {
@@ -1542,6 +1760,17 @@ int ys_compile(Node *prog, Target target, const char *outfile){
     /* emit runtime helpers */
     if(target==TARGET_WINDOWS) emit_win32_helpers();
     else emit_helpers();
+
+    /* v2.42: register struct declarations before anything else — a
+       function may use a struct declared later in the same file
+       (top-level declaration order shouldn't matter, same as it
+       doesn't for ND_FN below), so this has to be its own pass ahead
+       of the function-compiling pass, not folded into it. */
+    n_nstruct_defs=0;
+    for(int i=0;i<prog->stmtc;i++){
+        Node *n=prog->stmts[i];
+        if(n && n->kind==ND_STRUCT) nstruct_register(n);
+    }
 
     /* scan top-level for function definitions first */
     for(int i=0;i<prog->stmtc;i++){

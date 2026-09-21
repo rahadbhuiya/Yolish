@@ -130,6 +130,25 @@ Exploidus, readable, safe, and practical.
 
 ## Upcoming
 
+### v2.43: struct function parameters/returns, and native array indexing
+- v2.42 shipped struct locals only (declarations, literals, field
+  read/write on plain local variables) — see the README v2.42 changelog
+  entry for what's actually done and the two pre-existing bugs it found
+  along the way. Two real pieces of scope remain, both bigger than
+  v2.42's own slice:
+  1. **Struct function parameters/return values** — needs matching the
+     real System V x86-64 struct-passing ABI (small structs passed in
+     registers, larger ones via a hidden pointer to caller-allocated
+     space) rather than v2.42's simpler all-stack local model. Not
+     started.
+  2. **Native array indexing (`arr[i]`)** — turned out to be a bigger,
+     separate, pre-existing gap surfaced while scoping v2.42:
+     `compiler.c` has no `ND_INDEX` case at all, so `arr[i].field`
+     wasn't attempted. Needed before chained struct field access can
+     work natively, and useful well beyond structs on its own. Not
+     started.
+
+
 ### v2.20: UDP sockets
 - Done: `y.net.udp_socket()`/`udp_bind(port)`/`udp_send(sock, host,
   port, data)`/`udp_recv(sock, maxlen)`/`udp_close(sock)`, interpreter

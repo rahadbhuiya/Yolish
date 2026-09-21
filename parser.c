@@ -565,7 +565,27 @@ static Node *parse_stmt(Lexer *l){
         int nl=nm.len<63?nm.len:63;
         for(int i=0;i<nl;i++){n->name[i]=nm.start[i];} n->name[nl]=0;
         expect(l,TK_LBRACE);
-        static Node *fields[16]; int fc=0;
+        /* v2.42 fix: this was `static Node *fields[16]` — a function-
+           local static array shared by EVERY struct declaration in
+           the file, not a fresh array per struct. n->stmts just
+           stores the pointer to it, so the first struct's n->stmts
+           silently pointed at whatever the *last-parsed* struct's
+           fields were by the time anything read it back, since
+           parsing finishes fully before any evaluation/compilation
+           begins. Two structs, `struct Point { x y }` then
+           `struct Size { w h }`, left Point->stmts reporting fields
+           "w","h" instead of "x","y" — confirmed directly during the
+           v2.42 native-struct-support work (which relies on the
+           declaration's own field order at compile time, since there's
+           no runtime type info in native binaries). Silent everywhere
+           else in the codebase because eval.c's struct-literal read
+           path (ND_DOT) resolves field names from the *literal's own*
+           per-node field_names array, not from the declaration, so it
+           never actually dereferenced the corrupted shared pointer.
+           Fixed with alloc_stmts(), the same heap-pool allocator
+           already used for enum variants a few lines above, so each
+           struct declaration gets its own independent storage. */
+        Node **fields=alloc_stmts(16); int fc=0;
         while(!check(l,TK_RBRACE)&&!check(l,TK_EOF)){
             while(check(l,TK_NL)||check(l,TK_COMMA)) eat(l);
             if(check(l,TK_RBRACE)) break;
