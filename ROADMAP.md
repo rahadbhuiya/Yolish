@@ -130,24 +130,52 @@ Exploidus, readable, safe, and practical.
 
 ## Upcoming
 
-### v2.43: struct function parameters/returns, and native array indexing
+### v2.43: struct function return values (done) — function params and native array indexing still open
+- **Struct function return values are done and verified**: `fn
+  make_point(a, b) { let p = Point{x: a, y: b}; return p }` followed by
+  `let q = make_point(3, 4)` now works natively, field-for-field
+  matching the interpreter, including a 3-field struct and repeated
+  reassignment (`r = make_point(...)` over an existing struct local).
+  Uses a Yolish-only "hidden pointer" convention — the caller passes
+  the destination's address in `rdi`, the callee writes fields
+  directly into it and shifts its own real parameters to start at
+  `rsi` — rather than trying to match real System V struct-return
+  register classification (RAX:RDX for small structs, a hidden pointer
+  for large ones). That's a deliberate simplification, not a shortcut
+  taken by accident: nothing outside a native Yolish binary ever needs
+  to interoperate with one of these values directly (struct-crossing-
+  the-FFI-boundary is still separately out of scope, same as v2.42 left
+  it), so matching the real ABI would add a small/large-struct case
+  split for no actual benefit here.
+  - Real bug caught during testing, not by inspection: the first
+    version of the field-copy loop wrote field `i` at `[hidden_ptr +
+    i*8]`. Fields actually lay out *downward* from field 0 (field `i`
+    = `base - i*8`, per v2.42's own local_alloc_struct), so field `i`'s
+    real address relative to the hidden pointer (which holds field 0's
+    address) is `hidden_ptr - i*8`, not `+i*8`. Symptom was exactly
+    what you'd expect from that sign error: field 0 came back correct,
+    every other field came back as 0 (silently overwritten by the next
+    field's write landing one slot short, and the last field written
+    past the actual struct's end). Fixed by flipping the sign; re-run
+    of the 2-field and 3-field tests both matched the interpreter
+    afterward.
+  - **Cost of this pass's simplification**: a struct-returning function
+    is capped at 3 real parameters (rsi/rdx/rcx), one fewer than a
+    normal function's 4, since rdi is reserved for the hidden pointer.
+    Documented here rather than left to be discovered as a mysterious
+    limit.
+- **Still open, unchanged from the original entry below**: struct
+  function *parameters* (passing a whole struct value *into* a
+  function, as opposed to receiving one via a `let`/`var`/reassignment
+  at the call site) were not attempted this pass — the call-site and
+  return-value work above only handles a struct coming *back out* of a
+  call. Native array indexing (`arr[i]`) also remains unimplemented;
+  `compiler.c` still has no `ND_INDEX` case at all, so `arr[i].field`
+  isn't possible yet either, natively.
 - v2.42 shipped struct locals only (declarations, literals, field
   read/write on plain local variables) — see the README v2.42 changelog
   entry for what's actually done and the two pre-existing bugs it found
-  along the way. Two real pieces of scope remain, both bigger than
-  v2.42's own slice:
-  1. **Struct function parameters/return values** — needs matching the
-     real System V x86-64 struct-passing ABI (small structs passed in
-     registers, larger ones via a hidden pointer to caller-allocated
-     space) rather than v2.42's simpler all-stack local model. Not
-     started.
-  2. **Native array indexing (`arr[i]`)** — turned out to be a bigger,
-     separate, pre-existing gap surfaced while scoping v2.42:
-     `compiler.c` has no `ND_INDEX` case at all, so `arr[i].field`
-     wasn't attempted. Needed before chained struct field access can
-     work natively, and useful well beyond structs on its own. Not
-     started.
-
+  along the way.
 
 ### v2.20: UDP sockets
 - Done: `y.net.udp_socket()`/`udp_bind(port)`/`udp_send(sock, host,

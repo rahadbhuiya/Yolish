@@ -500,6 +500,90 @@ static int nstruct_field_offset(Local *L, const char *field_name, int *out_off, 
     return 0;
 }
 
+/* v2.43: which native-compiled functions return a struct, and which
+   struct type. This is a Yolish-internal calling-convention choice,
+   not an attempt to match real System V struct-return register
+   classification (RAX:RDX for small structs, hidden pointer for large
+   ones) — nothing outside a native Yolish binary ever needs to
+   interoperate with one of these values directly (unlike the
+   dynlink-FFI case, which is why struct-crossing-the-FFI-boundary is
+   still explicitly out of scope), so there's no correctness reason to
+   match the real ABI and a real reason not to: it would mean splitting
+   codegen into a small-struct/large-struct case for no benefit here.
+   Every struct-returning function uses a hidden pointer (passed in
+   rdi, real params shifted to start at rsi) regardless of field count. */
+#define FN_STRUCT_MAX 32
+typedef struct { char fn_name[64]; char struct_type[32]; } FnStructReturn;
+static FnStructReturn fn_struct_returns[FN_STRUCT_MAX];
+static int             n_fn_struct_returns=0;
+
+static const char *fn_returns_struct(const char *fn_name){
+    for(int i=0;i<n_fn_struct_returns;i++)
+        if(strcmp(fn_struct_returns[i].fn_name,fn_name)==0) return fn_struct_returns[i].struct_type;
+    return NULL;
+}
+static void fn_struct_return_register(const char *fn_name, const char *struct_type){
+    if(n_fn_struct_returns>=FN_STRUCT_MAX) return;
+    if(fn_returns_struct(fn_name)) return;
+    FnStructReturn *r=&fn_struct_returns[n_fn_struct_returns++];
+    int l1=(int)strlen(fn_name); if(l1>63) l1=63;
+    memcpy(r->fn_name,fn_name,l1); r->fn_name[l1]=0;
+    int l2=(int)strlen(struct_type); if(l2>31) l2=31;
+    memcpy(r->struct_type,struct_type,l2); r->struct_type[l2]=0;
+}
+
+/* v2.43: does this function's body return a struct, and which one?
+   A lightweight dry-run scan (no codegen) over the function's *top-
+   level* statements only — deliberately not descending into if/while
+   bodies, matching this pass's existing "start narrow" scoping — that
+   tracks a small local name→struct-type map as it walks `let`/`var`/
+   plain assignment statements, then checks whether any top-level
+   `return <ident>` refers to a name the map currently has as a struct.
+   This has to run as its own pass, before compiling any function body
+   for real, because a function can call a struct-returning function
+   that's declared later in the same file — the caller's codegen
+   (whether it treats the callee as struct-returning or not) needs the
+   answer before it compiles the call, not after. */
+#define SCAN_LOCAL_MAX 16
+static int scan_infer_return_struct(Node *body, char *out_type /* size 32 */){
+    if(!body) return 0;
+    char names[SCAN_LOCAL_MAX][64]; char types[SCAN_LOCAL_MAX][32]; int n=0;
+    for(int i=0;i<body->stmtc;i++){
+        Node *s=body->stmts[i];
+        if(!s) continue;
+        if((s->kind==ND_LET||s->kind==ND_VAR) && s->right && s->right->kind==ND_STRUCT_LIT){
+            if(n<SCAN_LOCAL_MAX){
+                int nl=(int)strlen(s->name); if(nl>63) nl=63;
+                memcpy(names[n],s->name,nl); names[n][nl]=0;
+                int tl=(int)strlen(s->right->name); if(tl>31) tl=31;
+                memcpy(types[n],s->right->name,tl); types[n][tl]=0;
+                n++;
+            }
+        } else if(s->kind==ND_ASSIGN && s->right && s->right->kind==ND_STRUCT_LIT){
+            const char *aname=(s->name[0])?s->name:(s->left&&s->left->name[0]?s->left->name:"");
+            int found=0;
+            for(int j=0;j<n;j++) if(strcmp(names[j],aname)==0){
+                int tl=(int)strlen(s->right->name); if(tl>31) tl=31;
+                memcpy(types[j],s->right->name,tl); types[j][tl]=0;
+                found=1; break;
+            }
+            if(!found && n<SCAN_LOCAL_MAX){
+                int nl=(int)strlen(aname); if(nl>63) nl=63;
+                memcpy(names[n],aname,nl); names[n][nl]=0;
+                int tl=(int)strlen(s->right->name); if(tl>31) tl=31;
+                memcpy(types[n],s->right->name,tl); types[n][tl]=0;
+                n++;
+            }
+        } else if(s->kind==ND_RETURN && s->right && s->right->kind==ND_IDENT){
+            for(int j=0;j<n;j++) if(strcmp(names[j],s->right->name)==0){
+                memcpy(out_type,types[j],32);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /*  call patches  */
 #define CALL_PATCH_MAX 512
 typedef struct { int code_off; char target[72]; } CallPatch;
@@ -566,6 +650,21 @@ static void x_mov_mem_rax(int off){
 static void x_mov_rax_mem(int off){
     if(off>=-128&&off<=127){ emit3(0x48,0x8b,0x45); emit1((uint8_t)(int8_t)off); }
     else { emit3(0x48,0x8b,0x85); emit_i32(off); }
+}
+/* v2.43: two helpers for struct-return codegen — r10 is used as a
+   scratch pointer register (never allocated to anything else in this
+   file, so nothing to save/restore around it) that holds the caller's
+   hidden destination address while a callee copies its return struct's
+   fields into it field by field. */
+/* mov r10, [rbp+off] */
+static void x_mov_r10_mem(int off){
+    if(off>=-128&&off<=127){ emit4(0x4c,0x8b,0x55,(uint8_t)(int8_t)off); }
+    else { emit3(0x4c,0x8b,0x95); emit_i32(off); }
+}
+/* mov [r10+off], rax */
+static void x_mov_r10off_rax(int off){
+    if(off>=-128&&off<=127){ emit3(0x49,0x89,0x42); emit1((uint8_t)(int8_t)off); }
+    else { emit3(0x49,0x89,0x82); emit_i32(off); }
 }
 
 /* add rax, rcx */
@@ -797,6 +896,13 @@ static int helper_print_float_off = -1;
 
 /* v1.1: per-local float tracking */
 static int g_last_float = 0;
+/* v2.43: set while compiling the body of a function that
+   scan_infer_return_struct found to return a struct — g_cur_fn_ret_ptr_off
+   is where that function's hidden return-pointer argument (rdi at
+   entry) got spilled to, so ND_RETURN can find it. Empty string /
+   0 respectively mean "not currently in a struct-returning function". */
+static char g_cur_fn_struct_ret_type[32] = {0};
+static int  g_cur_fn_struct_ret_ptr_off = 0;
 
 /* SSE2 helpers */
 static void x_movq_xmm0_rax(){ emit4(0x66,0x48,0x0f,0x6e); emit1(0xc0); }
@@ -1321,6 +1427,34 @@ static void compile_struct_lit_into(Node *lit, Local *L){
     }
 }
 
+/* v2.43: call a struct-returning function, writing its result directly
+   into destL's slots rather than through rax — see fn_struct_returns'
+   comment for why this uses a Yolish-only hidden-pointer convention
+   for every struct-returning call rather than real SysV classification.
+   Args are pushed then popped in reverse, same pattern the plain
+   ND_CALL user-function path already uses, so evaluating one arg can't
+   clobber a register another arg's value is sitting in. Capped at 3
+   real arguments (rsi/rdx/rcx) since rdi is reserved for the hidden
+   pointer — one fewer than a normal function gets, documented in
+   ROADMAP.md's v2.43 entry, not silently different from plain calls. */
+static void compile_struct_returning_call(Node *call, Local *destL){
+    static const uint8_t arg_regs[][3]={
+        {0x48,0x89,0xc6}, /* mov rsi,rax */
+        {0x48,0x89,0xc2}, /* mov rdx,rax */
+        {0x48,0x89,0xc1}, /* mov rcx,rax */
+    };
+    int nargs=call->argc; if(nargs>3) nargs=3;
+    for(int i=0;i<nargs;i++){ compile_expr(call->args[i]); x_push_rax(); }
+    for(int i=nargs-1;i>=0;i--){ x_pop_rax(); emit3(arg_regs[i][0],arg_regs[i][1],arg_regs[i][2]); }
+    /* rdi = &destL (lea rdi,[rbp+destL->rbp_off]) */
+    if(destL->rbp_off>=-128 && destL->rbp_off<=127){
+        emit3(0x48,0x8d,0x7d); emit1((uint8_t)(int8_t)destL->rbp_off);
+    } else {
+        emit3(0x48,0x8d,0xbd); emit_i32(destL->rbp_off);
+    }
+    int p=x_call_unresolved(); add_call_patch(p,call->name);
+}
+
 /*  compile statement  */
 static void compile_node(Node *n){
     if(!n) return;
@@ -1336,6 +1470,18 @@ static void compile_node(Node *n){
             Local *L=local_alloc_struct(n->name, n->right->name);
             compile_struct_lit_into(n->right, L);
             break;
+        }
+        /* v2.43: `let q = make_point(1, 2)` where make_point is a
+           known struct-returning function — same idea, but the
+           source of the fields is the callee's own hidden-pointer
+           write rather than a literal compiled locally. */
+        if(n->right && n->right->kind==ND_CALL){
+            const char *rt=fn_returns_struct(n->right->name);
+            if(rt){
+                Local *L=local_alloc_struct(n->name, rt);
+                compile_struct_returning_call(n->right, L);
+                break;
+            }
         }
         compile_expr(n->right);
         int off=local_alloc(n->name);
@@ -1378,6 +1524,16 @@ static void compile_node(Node *n){
             compile_struct_lit_into(n->right, L);
             break;
         }
+        /* v2.43: `p = make_point(1, 2)` — same struct-returning-call
+           path ND_LET/ND_VAR use above. */
+        if(n->right && n->right->kind==ND_CALL){
+            const char *rt=fn_returns_struct(n->right->name);
+            if(rt){
+                Local *L=local_alloc_struct(aname, rt);
+                compile_struct_returning_call(n->right, L);
+                break;
+            }
+        }
         compile_expr(n->right);
         int off=local_get(aname); if(off==0) off=local_alloc(aname);
         for(int _i=0;_i<nlocals;_i++) if(strcmp(locals[_i].name,aname)==0){locals[_i].is_float=g_last_float;break;}
@@ -1389,6 +1545,41 @@ static void compile_node(Node *n){
            compiled — nothing left to emit here. */
         break;
     case ND_RETURN:{
+        /* v2.43: `return p` inside a function scan_infer_return_struct
+           already determined returns a struct — copy p's fields into
+           the caller's hidden destination (held in r10, loaded from
+           where the hidden pointer arg was spilled at function entry)
+           instead of trying to fit a whole struct through rax. Falls
+           through to the plain scalar path below for anything that
+           doesn't match (returning a non-struct expression from a
+           struct-returning function isn't meaningful Yolish and isn't
+           specially handled — same "compiles to something rather than
+           erroring" posture the rest of this pass already takes). */
+        if(g_cur_fn_struct_ret_type[0] && n->right && n->right->kind==ND_IDENT){
+            Local *L=local_find(n->right->name);
+            if(L && L->is_struct && strcmp(L->struct_type,g_cur_fn_struct_ret_type)==0){
+                NStructDef *def=nstruct_find(L->struct_type);
+                if(def){
+                    x_mov_r10_mem(g_cur_fn_struct_ret_ptr_off);
+                    for(int fi=0; fi<def->nfields; fi++){
+                        /* fields lay out *downward* from field 0 (see
+                           local_alloc_struct: field i = base - i*8),
+                           and r10 holds field 0's own address — so
+                           field i's address relative to r10 is -i*8,
+                           not +i*8. First version of this loop used
+                           +fi*8 and wrote field 1 back on top of field
+                           0's slot (and field 0 one slot past the end)
+                           — caught immediately by testing: q.x came
+                           back right, q.y came back as 0 every time. */
+                        x_mov_rax_mem(L->rbp_off - fi*8);
+                        x_mov_r10off_rax(-fi*8);
+                    }
+                    x_mov_rax_mem(g_cur_fn_struct_ret_ptr_off); /* rax=hidden ptr too, harmless extra courtesy for any caller that happens to check it */
+                    x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
+                    break;
+                }
+            }
+        }
         if(n->right) compile_expr(n->right);
         else x_mov_rax_imm32(0);
         /* epilogue */
@@ -1499,6 +1690,19 @@ static void compile_node(Node *n){
         x_push_rbp(); x_mov_rbp_rsp();
         int sub_patch=code_len;
         emit3(0x48,0x81,0xec); emit_i32(0); /* sub rsp, frame — patched later */
+        /* v2.43: is this a function scan_infer_return_struct found to
+           return a struct? If so, rdi at entry is the caller's hidden
+           destination pointer, not this function's first real
+           parameter — spill it immediately to its own local slot (so
+           ND_RETURN can find it later; nothing here tries to keep it
+           in a register across the whole function body, since this
+           compiler doesn't track register liveness across statements)
+           and shift real parameters to start at rsi instead of rdi. */
+        const char *ret_struct_type=fn_returns_struct(n->name);
+        if(ret_struct_type){
+            g_cur_fn_struct_ret_ptr_off=local_alloc("__struct_ret_ptr__");
+        }
+        memcpy(g_cur_fn_struct_ret_type, ret_struct_type?ret_struct_type:"", ret_struct_type?strlen(ret_struct_type)+1:1);
         /* allocate parameters as locals */
         /* SysV ABI: args in rdi, rsi, rdx, rcx, r8, r9 */
         /* We store each arg onto the stack: mov [rbp+off], reg */
@@ -1521,17 +1725,41 @@ static void compile_node(Node *n){
                notes don't mention compiling a plain user function with
                parameters. Confirmed by reproducing the crash against
                the pre-struct-work compiler too. */
-            for(int pi=0; pi<n->argc && pi<4; pi++){
-                int poff=local_alloc(n->field_names[pi]);
-                if(poff>=-128&&poff<=127){
-                    emit4(0x48,0x89,(uint8_t)(modrm[pi]|0x40),(uint8_t)(int8_t)poff);
+            if(ret_struct_type){
+                /* rdi is the hidden destination pointer here, not a
+                   real parameter — spill it to its own slot with a
+                   direct mov (not through the generic per-slot loop
+                   below, since that loop's index-to-register mapping
+                   is for real parameters only). Real params start at
+                   modrm[1] (rsi), capped at 3 (rsi,rdx,rcx). */
+                if(g_cur_fn_struct_ret_ptr_off>=-128 && g_cur_fn_struct_ret_ptr_off<=127){
+                    emit4(0x48,0x89,(uint8_t)(modrm[0]|0x40),(uint8_t)(int8_t)g_cur_fn_struct_ret_ptr_off);
                 } else {
-                    emit3(0x48,0x89,(uint8_t)(modrm[pi]|0x80)); emit_i32(poff);
+                    emit3(0x48,0x89,(uint8_t)(modrm[0]|0x80)); emit_i32(g_cur_fn_struct_ret_ptr_off);
+                }
+                for(int pi=0; pi<n->argc && pi<3; pi++){
+                    int poff=local_alloc(n->field_names[pi]);
+                    int mi=pi+1; /* rsi,rdx,rcx */
+                    if(poff>=-128&&poff<=127){
+                        emit4(0x48,0x89,(uint8_t)(modrm[mi]|0x40),(uint8_t)(int8_t)poff);
+                    } else {
+                        emit3(0x48,0x89,(uint8_t)(modrm[mi]|0x80)); emit_i32(poff);
+                    }
+                }
+            } else {
+                for(int pi=0; pi<n->argc && pi<4; pi++){
+                    int poff=local_alloc(n->field_names[pi]);
+                    if(poff>=-128&&poff<=127){
+                        emit4(0x48,0x89,(uint8_t)(modrm[pi]|0x40),(uint8_t)(int8_t)poff);
+                    } else {
+                        emit3(0x48,0x89,(uint8_t)(modrm[pi]|0x80)); emit_i32(poff);
+                    }
                 }
             }
         }
         /* compile body */
         compile_block(n->body);
+        g_cur_fn_struct_ret_type[0]=0;
         /* default return 0 if no return stmt */
         x_mov_rax_imm32(0);
         x_mov_rsp_rbp(); x_pop_rbp(); x_ret();
@@ -1770,6 +1998,23 @@ int ys_compile(Node *prog, Target target, const char *outfile){
     for(int i=0;i<prog->stmtc;i++){
         Node *n=prog->stmts[i];
         if(n && n->kind==ND_STRUCT) nstruct_register(n);
+    }
+
+    /* v2.43: which functions return a struct, and which one — must run
+       after struct registration (needs nstruct_defs to make sense of
+       what a literal's type name refers to isn't actually required by
+       the scan itself, but keeping struct-related setup together
+       avoids ordering surprises) and before any function body compiles
+       for real, so a caller's codegen already knows whether a callee
+       returns a struct by the time it needs to compile a call to it,
+       regardless of which function is declared first in the file. */
+    n_fn_struct_returns=0;
+    for(int i=0;i<prog->stmtc;i++){
+        Node *n=prog->stmts[i];
+        if(n && n->kind==ND_FN){
+            char rt[32];
+            if(scan_infer_return_struct(n->body, rt)) fn_struct_return_register(n->name, rt);
+        }
     }
 
     /* scan top-level for function definitions first */
