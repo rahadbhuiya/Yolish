@@ -424,6 +424,15 @@ typedef struct {
     int  is_struct;
     char struct_type[32];
     int  field_is_float[8];
+    /* v2.44: is_ref means this is a struct-typed *parameter* — the
+       local holds one 8-byte pointer (into the *caller's* stack frame)
+       rather than the struct's fields themselves, so field access has
+       to go through that pointer at runtime instead of reading
+       rbp_off-relative slots directly the way a plain struct local
+       (v2.42) or a struct return's destination (v2.43) does. rbp_off
+       here is where the incoming pointer itself is spilled, not a
+       field offset. */
+    int  is_ref;
 } Local;
 static Local locals[LOCAL_MAX];
 static int   nlocals=0;
@@ -447,6 +456,16 @@ static int local_alloc(const char *name){
     stack_size+=8;
     locals[nlocals].rbp_off=-stack_size;
     locals[nlocals].is_struct=0;
+    locals[nlocals].is_ref=0; /* v2.44: locals[] is one fixed-size
+        global array reused across every function compiled in the
+        file (cleared by resetting nlocals, not by zeroing the array),
+        so every field a struct-typed local relies on has to be set
+        explicitly on allocation rather than assumed zero from a
+        previous function's leftover entry — is_ref is new this
+        version, so setting it here from the start, rather than
+        adding it in a later fix, avoids exactly the kind of stale-
+        flag bug local_alloc_struct below already had to guard
+        against for its own fields (is_struct, is_float, etc.). */
     strncpy(locals[nlocals].name,name,63);
     nlocals++;
     return -stack_size;
@@ -463,7 +482,7 @@ static int local_alloc(const char *name){
    in a loop body, or a plain re-read, doesn't reserve stack twice). */
 static Local *local_alloc_struct(const char *name, const char *struct_type){
     Local *existing=local_find(name);
-    if(existing && existing->is_struct && strcmp(existing->struct_type,struct_type)==0)
+    if(existing && existing->is_struct && !existing->is_ref && strcmp(existing->struct_type,struct_type)==0)
         return existing;
     NStructDef *def=nstruct_find(struct_type);
     int nfields=def?def->nfields:0;
@@ -475,8 +494,26 @@ static Local *local_alloc_struct(const char *name, const char *struct_type){
     L->rbp_off=field0_off;
     L->is_float=0;
     L->is_struct=1;
+    L->is_ref=0;
     strncpy(L->struct_type,struct_type,31); L->struct_type[31]=0;
     for(int i=0;i<8;i++) L->field_is_float[i]=0;
+    return L;
+}
+
+/* v2.44: reserve one 8-byte slot for a struct-typed *parameter* — just
+   a pointer, not the struct's fields (see Local.is_ref's comment).
+   Always a fresh local_alloc() call, never reused across re-entry the
+   way local_alloc_struct's block is, because a parameter is bound
+   exactly once per call, at function entry — there's no loop-body
+   re-declaration case to guard against here. */
+static Local *local_alloc_struct_ref(const char *name, const char *struct_type){
+    int off=local_alloc(name);
+    Local *L=local_find(name);
+    L->is_struct=1;
+    L->is_ref=1;
+    strncpy(L->struct_type,struct_type,31); L->struct_type[31]=0;
+    for(int i=0;i<8;i++) L->field_is_float[i]=0;
+    (void)off;
     return L;
 }
 
@@ -496,6 +533,35 @@ static int nstruct_field_offset(Local *L, const char *field_name, int *out_off, 
             *out_is_float=L->field_is_float[i];
             return 1;
         }
+    }
+    return 0;
+}
+
+/* v2.44: same field lookup, but for a struct-typed *parameter*
+   (Local.is_ref) — there's no rbp-relative slot per field to compute
+   (the local only holds one pointer, spilled at L->rbp_off), so this
+   returns the field's offset *relative to that pointer's target*
+   instead. The pointer holds the *caller's* field-0 address (from
+   local_alloc_struct: field 0 is the least-negative/highest-address
+   slot of the block, and field i sits at field0_off - i*8, i.e.
+   *lower* addresses as i increases — see that function's own comment).
+   So field i's address relative to the pointer is also -i*8, the same
+   downward direction, not +i*8 — this matches the sign-error lesson
+   from v2.43's return-value copy loop exactly, caught here by
+   reasoning it through against local_alloc_struct's actual layout
+   before running anything, rather than by a second field-1-comes-
+   back-wrong test failure. Struct-ref locals track no per-field
+   float-ness (field_is_float is only ever populated by a literal
+   write, which never happens to a pointed-to caller's struct from
+   inside the callee), so float fields read through a parameter don't
+   get float formatting right yet — a known, narrow limitation of this
+   pass, not attempted. */
+static int nstruct_field_ptr_offset(Local *L, const char *field_name, int *out_off){
+    if(!L->is_struct || !L->is_ref) return 0;
+    NStructDef *def=nstruct_find(L->struct_type);
+    if(!def) return 0;
+    for(int i=0;i<def->nfields;i++){
+        if(strcmp(def->fields[i],field_name)==0){ *out_off=-i*8; return 1; }
     }
     return 0;
 }
@@ -532,6 +598,141 @@ static void fn_struct_return_register(const char *fn_name, const char *struct_ty
     memcpy(r->struct_type,struct_type,l2); r->struct_type[l2]=0;
 }
 
+/* v2.44: which native-compiled functions take a struct-typed
+   *parameter*, at which position, and which struct type. Unlike return
+   types (inferred purely from the function's own body), a parameter
+   has no type annotation anywhere in Yolish source at all — the only
+   signal that a given parameter is meant to be a struct is that some
+   call site, somewhere in the file, actually passes one. So this table
+   is filled by scanning every *call site* in the program (see
+   scan_call_args_for_struct_params below), not by scanning each
+   function once in isolation. Passed by pointer at runtime either way
+   (see Local.is_ref) — "value" here just means the source-level
+   parameter name refers to the caller's fields, indirected through one
+   pointer register, not that this pass copies bytes on every call. */
+#define FN_PARAM_MAX 64
+#define SCAN_LOCAL_MAX 16
+typedef struct { char fn_name[64]; int param_idx; char struct_type[32]; } FnParamStruct;
+static FnParamStruct fn_param_structs[FN_PARAM_MAX];
+static int            n_fn_param_structs=0;
+
+static const char *fn_param_struct_type(const char *fn_name, int idx){
+    for(int i=0;i<n_fn_param_structs;i++)
+        if(fn_param_structs[i].param_idx==idx && strcmp(fn_param_structs[i].fn_name,fn_name)==0)
+            return fn_param_structs[i].struct_type;
+    return NULL;
+}
+static void fn_param_struct_register(const char *fn_name, int idx, const char *struct_type){
+    if(fn_param_struct_type(fn_name,idx)) return; /* first sighting wins */
+    if(n_fn_param_structs>=FN_PARAM_MAX) return;
+    FnParamStruct *r=&fn_param_structs[n_fn_param_structs++];
+    int l1=(int)strlen(fn_name); if(l1>63) l1=63;
+    memcpy(r->fn_name,fn_name,l1); r->fn_name[l1]=0;
+    r->param_idx=idx;
+    int l2=(int)strlen(struct_type); if(l2>31) l2=31;
+    memcpy(r->struct_type,struct_type,l2); r->struct_type[l2]=0;
+}
+
+/* Given a call node and the *caller's own* current name→struct-type
+   map (built the same way scan_infer_return_struct tracks one, just
+   inline here instead of shared, to keep each scan self-contained),
+   register any argument that's a plain identifier referring to a
+   currently-known struct local as that parameter position's type on
+   the callee. Deliberately narrow, matching every prior pass in this
+   feature: a struct literal passed directly as an argument (`f(Point{
+   x:1,y:2})`) isn't recognized — only passing an existing struct
+   local through is. */
+static void scan_call_args_for_struct_params(Node *call, char names[][64], char types[][32], int nlocal){
+    if(!call || !call->name[0]) return;
+    for(int ai=0; ai<call->argc && ai<4; ai++){
+        Node *arg=call->args[ai];
+        if(!arg || arg->kind!=ND_IDENT) continue;
+        for(int j=0;j<nlocal;j++){
+            if(strcmp(names[j],arg->name)==0){
+                fn_param_struct_register(call->name, ai, types[j]);
+                break;
+            }
+        }
+    }
+}
+
+/* v2.44: walk one function's top-level statements (same narrow, non-
+   recursive scope as scan_infer_return_struct — no descending into
+   if/while bodies) tracking its own local struct-type map, and feed
+   every call site found in a `let`/`var`/plain-assignment right-hand
+   side, a bare call statement, or a `return` expression to
+   scan_call_args_for_struct_params above. This has to see every
+   function's calls, not just one function in isolation — a struct
+   parameter is discovered from the *caller's* side, so the scan is
+   driven by walking callers, then recording what it learns against
+   the callee's name in the shared fn_param_structs table.
+   `fn` (the function being scanned) seeds the local map with its own
+   parameters wherever fn_param_struct_type already has an answer for
+   them — otherwise a *forwarding* function (`fn forward(p){
+   other(p) }`, called as `forward(some_struct)`) would never be
+   recognized as passing a struct to `other`, since `p` is a parameter,
+   not a `let`-tracked local, and nothing about forward's own body says
+   it's a struct. Combined with running this whole scan to a fixpoint
+   in ys_compile (see there) rather than a single pass, this lets
+   struct-ness propagate through an arbitrarily long forwarding chain
+   regardless of which order the functions happen to appear in the
+   file — caught by testing a two-hop forward(p){ print_forwarded(p) }
+   case specifically, which came back wrong (0/0 instead of the real
+   values) under a single non-seeded pass. */
+static void scan_fn_body_for_param_structs(Node *fn){
+    Node *body=fn?fn->body:NULL;
+    if(!body) return;
+    char names[SCAN_LOCAL_MAX][64]; char types[SCAN_LOCAL_MAX][32]; int n=0;
+    for(int pi=0; pi<fn->argc && pi<4 && n<SCAN_LOCAL_MAX; pi++){
+        const char *pst=fn_param_struct_type(fn->name,pi);
+        if(pst){
+            int nl=(int)strlen(fn->field_names[pi]); if(nl>63) nl=63;
+            memcpy(names[n],fn->field_names[pi],nl); names[n][nl]=0;
+            int tl=(int)strlen(pst); if(tl>31) tl=31;
+            memcpy(types[n],pst,tl); types[n][tl]=0;
+            n++;
+        }
+    }
+    for(int i=0;i<body->stmtc;i++){
+        Node *s=body->stmts[i];
+        if(!s) continue;
+        if((s->kind==ND_LET||s->kind==ND_VAR) && s->right){
+            if(s->right->kind==ND_STRUCT_LIT && n<SCAN_LOCAL_MAX){
+                int nl=(int)strlen(s->name); if(nl>63) nl=63;
+                memcpy(names[n],s->name,nl); names[n][nl]=0;
+                int tl=(int)strlen(s->right->name); if(tl>31) tl=31;
+                memcpy(types[n],s->right->name,tl); types[n][tl]=0;
+                n++;
+            } else if(s->right->kind==ND_CALL){
+                scan_call_args_for_struct_params(s->right, names, types, n);
+            }
+        } else if(s->kind==ND_ASSIGN && s->right){
+            const char *aname=(s->name[0])?s->name:(s->left&&s->left->name[0]?s->left->name:"");
+            if(s->right->kind==ND_STRUCT_LIT){
+                int found=0;
+                for(int j=0;j<n;j++) if(strcmp(names[j],aname)==0){
+                    int tl=(int)strlen(s->right->name); if(tl>31) tl=31;
+                    memcpy(types[j],s->right->name,tl); types[j][tl]=0;
+                    found=1; break;
+                }
+                if(!found && n<SCAN_LOCAL_MAX){
+                    int nl=(int)strlen(aname); if(nl>63) nl=63;
+                    memcpy(names[n],aname,nl); names[n][nl]=0;
+                    int tl=(int)strlen(s->right->name); if(tl>31) tl=31;
+                    memcpy(types[n],s->right->name,tl); types[n][tl]=0;
+                    n++;
+                }
+            } else if(s->right->kind==ND_CALL){
+                scan_call_args_for_struct_params(s->right, names, types, n);
+            }
+        } else if(s->kind==ND_CALL){
+            scan_call_args_for_struct_params(s, names, types, n);
+        } else if(s->kind==ND_RETURN && s->right && s->right->kind==ND_CALL){
+            scan_call_args_for_struct_params(s->right, names, types, n);
+        }
+    }
+}
+
 /* v2.43: does this function's body return a struct, and which one?
    A lightweight dry-run scan (no codegen) over the function's *top-
    level* statements only — deliberately not descending into if/while
@@ -544,7 +745,6 @@ static void fn_struct_return_register(const char *fn_name, const char *struct_ty
    that's declared later in the same file — the caller's codegen
    (whether it treats the callee as struct-returning or not) needs the
    answer before it compiles the call, not after. */
-#define SCAN_LOCAL_MAX 16
 static int scan_infer_return_struct(Node *body, char *out_type /* size 32 */){
     if(!body) return 0;
     char names[SCAN_LOCAL_MAX][64]; char types[SCAN_LOCAL_MAX][32]; int n=0;
@@ -602,6 +802,11 @@ static Target g_target=TARGET_LINUX;
 
 /*  forward declarations  */
 static void compile_node(Node *n);
+/* v2.44: defined after compile_expr (it's declared alongside the
+   other struct-call helpers, compile_struct_lit_into/
+   compile_struct_returning_call) but used from inside compile_expr's
+   own ND_CALL case, hence the forward declaration here. */
+static void compile_struct_arg_ptr(Local *AL);
 static void compile_block(Node *b);
 /* Defined in compiler_net.c (see the #include further down, after all
    of this file's shared helpers it depends on) -- forward-declared
@@ -665,6 +870,14 @@ static void x_mov_r10_mem(int off){
 static void x_mov_r10off_rax(int off){
     if(off>=-128&&off<=127){ emit3(0x49,0x89,0x42); emit1((uint8_t)(int8_t)off); }
     else { emit3(0x49,0x89,0x82); emit_i32(off); }
+}
+/* v2.44: mov rax, [r10+off] — the read counterpart, needed for struct-
+   typed *parameters* (a caller-owned struct, accessed by pointer, as
+   opposed to v2.42/v2.43's directly-owned struct locals/return
+   destinations, which only ever needed the write direction above). */
+static void x_mov_rax_r10off(int off){
+    if(off>=-128&&off<=127){ emit4(0x49,0x8b,0x42,(uint8_t)(int8_t)off); }
+    else { emit3(0x49,0x8b,0x82); emit_i32(off); }
 }
 
 /* add rax, rcx */
@@ -1360,7 +1573,14 @@ static void compile_expr(Node *n){
         if(nargs>4) nargs=4;
         /* push args in reverse then load */
         for(int i=first;i<n->argc&&i-first<4;i++){
-            compile_expr(n->args[i]);
+            /* v2.44: an argument this callee's signature (per the
+               scan_fn_body_for_param_structs pre-pass) expects as a
+               struct is passed by address, not by value — see
+               compile_struct_arg_ptr's own comment. */
+            const char *pst=fn_param_struct_type(n->name,i);
+            Local *AL = (pst && n->args[i] && n->args[i]->kind==ND_IDENT) ? local_find(n->args[i]->name) : NULL;
+            if(AL && AL->is_struct) compile_struct_arg_ptr(AL);
+            else compile_expr(n->args[i]);
             x_push_rax();
         }
         for(int i=nargs-1;i>=0;i--){
@@ -1383,7 +1603,16 @@ static void compile_expr(Node *n){
         g_last_float=0;
         if(n->left && n->left->kind==ND_IDENT){
             Local *L=local_find(n->left->name);
-            if(L && L->is_struct){
+            if(L && L->is_struct && L->is_ref){
+                /* v2.44: struct parameter — indirect through the
+                   pointer spilled at L->rbp_off. */
+                int off;
+                if(nstruct_field_ptr_offset(L,n->name,&off)){
+                    x_mov_r10_mem(L->rbp_off);
+                    x_mov_rax_r10off(off);
+                    break;
+                }
+            } else if(L && L->is_struct){
                 int off, isf;
                 if(nstruct_field_offset(L,n->name,&off,&isf)){
                     x_mov_rax_mem(off);
@@ -1427,6 +1656,27 @@ static void compile_struct_lit_into(Node *lit, Local *L){
     }
 }
 
+/* v2.44: put the *address* of a struct-typed argument in rax, for a
+   call site passing it to a parameter the fn_param_struct_type scan
+   found to be a struct. If AL is a directly-owned struct local
+   (v2.42's local_alloc_struct), that's a fresh lea of its block's
+   base. If AL is itself a struct *parameter* being forwarded to
+   another call (AL->is_ref), the local already holds a pointer —
+   passing it on means loading that pointer's value, not lea'ing the
+   local's own slot (which would take the address of the pointer
+   variable, not the struct it points to). */
+static void compile_struct_arg_ptr(Local *AL){
+    if(AL->is_ref){
+        x_mov_rax_mem(AL->rbp_off);
+        return;
+    }
+    if(AL->rbp_off>=-128 && AL->rbp_off<=127){
+        emit3(0x48,0x8d,0x45); emit1((uint8_t)(int8_t)AL->rbp_off);
+    } else {
+        emit3(0x48,0x8d,0x85); emit_i32(AL->rbp_off);
+    }
+}
+
 /* v2.43: call a struct-returning function, writing its result directly
    into destL's slots rather than through rax — see fn_struct_returns'
    comment for why this uses a Yolish-only hidden-pointer convention
@@ -1436,7 +1686,10 @@ static void compile_struct_lit_into(Node *lit, Local *L){
    clobber a register another arg's value is sitting in. Capped at 3
    real arguments (rsi/rdx/rcx) since rdi is reserved for the hidden
    pointer — one fewer than a normal function gets, documented in
-   ROADMAP.md's v2.43 entry, not silently different from plain calls. */
+   ROADMAP.md's v2.43 entry, not silently different from plain calls.
+   v2.44 addition: an argument the callee expects as a struct (per
+   fn_param_struct_type) is passed by address via compile_struct_arg_ptr
+   instead of compile_expr, same as the plain-call path below. */
 static void compile_struct_returning_call(Node *call, Local *destL){
     static const uint8_t arg_regs[][3]={
         {0x48,0x89,0xc6}, /* mov rsi,rax */
@@ -1444,7 +1697,13 @@ static void compile_struct_returning_call(Node *call, Local *destL){
         {0x48,0x89,0xc1}, /* mov rcx,rax */
     };
     int nargs=call->argc; if(nargs>3) nargs=3;
-    for(int i=0;i<nargs;i++){ compile_expr(call->args[i]); x_push_rax(); }
+    for(int i=0;i<nargs;i++){
+        const char *pst=fn_param_struct_type(call->name,i);
+        Local *AL = (pst && call->args[i] && call->args[i]->kind==ND_IDENT) ? local_find(call->args[i]->name) : NULL;
+        if(AL && AL->is_struct) compile_struct_arg_ptr(AL);
+        else compile_expr(call->args[i]);
+        x_push_rax();
+    }
     for(int i=nargs-1;i>=0;i--){ x_pop_rax(); emit3(arg_regs[i][0],arg_regs[i][1],arg_regs[i][2]); }
     /* rdi = &destL (lea rdi,[rbp+destL->rbp_off]) */
     if(destL->rbp_off>=-128 && destL->rbp_off<=127){
@@ -1498,7 +1757,16 @@ static void compile_node(Node *n){
            above (no native array indexing yet to support arr[i].field). */
         if(n->left && n->left->kind==ND_DOT && n->left->left && n->left->left->kind==ND_IDENT){
             Local *L=local_find(n->left->left->name);
-            if(L && L->is_struct){
+            if(L && L->is_struct && L->is_ref){
+                /* v2.44: field write through a struct parameter. */
+                int off;
+                if(nstruct_field_ptr_offset(L,n->left->name,&off)){
+                    compile_expr(n->right);
+                    x_mov_r10_mem(L->rbp_off);
+                    x_mov_r10off_rax(off);
+                }
+                break;
+            } else if(L && L->is_struct){
                 NStructDef *def=nstruct_find(L->struct_type);
                 if(def){
                     for(int fi=0; fi<def->nfields; fi++){
@@ -1738,7 +2006,9 @@ static void compile_node(Node *n){
                     emit3(0x48,0x89,(uint8_t)(modrm[0]|0x80)); emit_i32(g_cur_fn_struct_ret_ptr_off);
                 }
                 for(int pi=0; pi<n->argc && pi<3; pi++){
-                    int poff=local_alloc(n->field_names[pi]);
+                    const char *pst=fn_param_struct_type(n->name,pi);
+                    int poff = pst ? local_alloc_struct_ref(n->field_names[pi],pst)->rbp_off
+                                   : local_alloc(n->field_names[pi]);
                     int mi=pi+1; /* rsi,rdx,rcx */
                     if(poff>=-128&&poff<=127){
                         emit4(0x48,0x89,(uint8_t)(modrm[mi]|0x40),(uint8_t)(int8_t)poff);
@@ -1748,7 +2018,9 @@ static void compile_node(Node *n){
                 }
             } else {
                 for(int pi=0; pi<n->argc && pi<4; pi++){
-                    int poff=local_alloc(n->field_names[pi]);
+                    const char *pst=fn_param_struct_type(n->name,pi);
+                    int poff = pst ? local_alloc_struct_ref(n->field_names[pi],pst)->rbp_off
+                                   : local_alloc(n->field_names[pi]);
                     if(poff>=-128&&poff<=127){
                         emit4(0x48,0x89,(uint8_t)(modrm[pi]|0x40),(uint8_t)(int8_t)poff);
                     } else {
@@ -2015,6 +2287,34 @@ int ys_compile(Node *prog, Target target, const char *outfile){
             char rt[32];
             if(scan_infer_return_struct(n->body, rt)) fn_struct_return_register(n->name, rt);
         }
+    }
+
+    /* v2.44: struct-typed function *parameters* — discovered from call
+       sites (see scan_fn_body_for_param_structs' own comment for why),
+       so this has to walk every function's body looking for calls,
+       not just each function's own signature. Runs after the return-
+       type scan above (no ordering dependency between the two, but
+       keeping all of v2.42/v2.43/v2.44's struct-signature setup
+       together avoids surprises) and, like it, before any function
+       body compiles for real.
+       Run to a fixpoint (bounded at 8 rounds — generous headroom over
+       any forwarding chain a real program is likely to have, and
+       cheap to re-run since these are small top-level-only scans) so
+       struct-ness propagates through a forwarding chain — a function
+       that only passes its own struct parameter on to another call —
+       regardless of which order the functions are declared in the
+       file. A single pass isn't enough: scan_fn_body_for_param_structs
+       seeds each function's local map from what's *already* known
+       about its own parameters, so a chain of N forwarding hops needs
+       up to N passes before the last hop's parameter type is known. */
+    n_fn_param_structs=0;
+    for(int round=0; round<8; round++){
+        int before=n_fn_param_structs;
+        for(int i=0;i<prog->stmtc;i++){
+            Node *n=prog->stmts[i];
+            if(n && n->kind==ND_FN) scan_fn_body_for_param_structs(n);
+        }
+        if(n_fn_param_structs==before) break; /* no new signatures learned this round */
     }
 
     /* scan top-level for function definitions first */

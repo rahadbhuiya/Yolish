@@ -177,6 +177,58 @@ Exploidus, readable, safe, and practical.
   entry for what's actually done and the two pre-existing bugs it found
   along the way.
 
+### v2.44: struct function parameters (done) — native array indexing still the last open piece
+- **Struct function parameters are done and verified.** A function can
+  now receive a whole struct as a parameter (`fn print_point(p) {
+  y.println(p.x); y.println(p.y) }`), read its fields, and write
+  through them (`p.x = p.x + 100`) with the write visible to the
+  caller — verified against the interpreter for plain field read,
+  field write-through, a function that both takes a struct parameter
+  *and* returns a (possibly different) struct built from it, and a
+  two-hop forwarding chain (`fn forward(p) { print_forwarded(p) }`).
+  Passed by pointer under the hood — the caller passes the address of
+  its own struct local, the callee reads/writes through it — rather
+  than by copying the struct's words into the callee's own frame; see
+  `Local.is_ref`'s comment in compiler.c for why (this is the same
+  "Yolish-internal convention, not real System V classification"
+  choice v2.43 made for return values, applied to the other direction).
+- **A genuinely two-part problem, and the second part is why this took
+  a fixpoint scan rather than one pass**: unlike a return type (which a
+  function's own body determines on its own), nothing about a
+  parameter's *name* says it's a struct — the only signal is that some
+  *call site*, somewhere else in the file, happens to pass one. So this
+  version scans every function's body for calls, not just each
+  function's own signature, and registers what it learns against the
+  *callee's* name. That alone isn't enough, though: a forwarding
+  function (`forward` above, receiving a struct only to hand it
+  straight to `print_forwarded`) has no `let`-tracked local of its
+  own to reveal that its parameter `p` is a struct — that fact only
+  exists once some *caller* of `forward` is scanned and found to pass
+  one. First version of this (single pass, not seeded) failed exactly
+  the two-hop case: `print_forwarded`'s fields came back as `0`/`0`
+  instead of the real values, caught immediately by testing it
+  specifically rather than assuming single-hop coverage would
+  generalize. Fixed by seeding each function's local map, at the start
+  of its own scan, with whichever of its own parameters
+  `fn_param_struct_type` already has an answer for, and running the
+  whole scan to a fixpoint (bounded at 8 rounds) instead of once, so a
+  forwarding chain of any depth resolves regardless of which order the
+  functions are declared in the file.
+- **Known narrow limitations, not attempted this pass**: a struct
+  literal passed directly as a call argument (`f(Point{x:1,y:2})`
+  rather than `f(existing_struct_local)`) isn't recognized by the scan
+  — only forwarding an existing struct local is. A struct parameter's
+  fields also don't carry float-ness (`field_is_float` is only ever
+  populated by a literal write, which a pointed-to caller's struct
+  never goes through from inside the callee), so a float field read
+  through a parameter won't get float formatting right yet.
+- **What's left for structs, and it's now the only piece**: native
+  array indexing (`arr[i]`) — `compiler.c` still has no `ND_INDEX`
+  case at all, so `arr[i].field` remains impossible either way. Full
+  existing example suite (55/56, one pre-existing unrelated failure)
+  and every prior v2.42/v2.43 struct test file re-verified clean
+  alongside this version's own new tests.
+
 ### v2.20: UDP sockets
 - Done: `y.net.udp_socket()`/`udp_bind(port)`/`udp_send(sock, host,
   port, data)`/`udp_recv(sock, maxlen)`/`udp_close(sock)`, interpreter
