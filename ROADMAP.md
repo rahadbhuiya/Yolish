@@ -229,6 +229,59 @@ Exploidus, readable, safe, and practical.
   and every prior v2.42/v2.43 struct test file re-verified clean
   alongside this version's own new tests.
 
+### v2.45: native array indexing (done) — the last piece of this feature line
+- **Native `arr[i]` read and write are done and verified.** `let a =
+  [10, 20, 30, 40]`, reading `a[i]` with `i` an arbitrary runtime
+  expression (not just a compile-time constant — unlike a struct
+  field name, an index has to be computed), writing `a[1] = 999`, and
+  looping over an array with a `while` all compile and run correctly
+  natively, matching the interpreter. Fixed-size and stack-allocated
+  only, decided at compile time from a literal's own element count —
+  no `y.push`/growth support, which would need real heap allocation
+  this backend doesn't have (a separate, bigger undertaking, not
+  attempted here, same category of thing as the struct-FFI-boundary
+  and real-SysV-ABI-matching gaps v2.42–v2.44 already left open).
+  Element layout reuses the exact downward-from-element-0 convention
+  (`element i = element 0 − i*8`) v2.42 already established for struct
+  fields, applied on purpose rather than reinvented — this backend has
+  already paid for the opposite sign-error lesson twice on the struct
+  side (v2.43's return-value copy loop, then v2.44's parameter-pointer
+  offset), so array indexing went in with that direction settled from
+  the start instead of risking a third repeat of the same mistake.
+- **A real bug this version's testing caught, in code v2.42 shipped,
+  not in anything new here**: reassigning an array-typed local to a
+  literal with a *different* element count (`var a = [1, 2, 3]` then
+  `a = [100, 200]`) silently left `a[0]`/`a[1]` still reading the
+  original 3-element block's values. Root cause: `local_alloc_array`
+  (and `local_alloc_struct`, which has the identical shape of bug —
+  reassigning a struct-typed local to a *different* struct type) only
+  reused the existing same-named `Local*` when sizes/types matched;
+  on a mismatch it allocated a brand-new entry under `locals[nlocals
+  ++]` instead of reusing the existing slot. Since `local_find` returns
+  the *first* name match by linear scan, every later reference to that
+  name kept resolving to the stale original entry — the "new" one was
+  permanently unreachable dead weight. Fixed in both functions by
+  reusing the existing `Local*` on a mismatch (still reserving a fresh
+  stack block either way, just writing the new type/size into the same
+  slot rather than a second one). Caught by testing array reassignment
+  specifically (where element-count mismatches happen far more
+  naturally than a struct changing type does) but confirmed to be the
+  identical bug on the struct side too, and fixed there in the same
+  pass rather than left for later, since it was already proven live.
+- **Known narrow limitations, not attempted this pass**: `arr[i][j]`
+  (nested indexing) and `obj.field[i]`/`arr[i].field` (mixing array
+  and struct access) aren't recognized — only a plain array local
+  indexed once. No bounds checking — an out-of-range index reads or
+  writes whatever stack memory happens to sit at that computed offset,
+  rather than erroring or returning nil the way the interpreter does;
+  this backend has neither the infrastructure nor, for a first pass,
+  the stated need for runtime bounds checks, same posture as every
+  other "compiles to 0 / does the arithmetic, doesn't validate it"
+  choice already made elsewhere in this file.
+- Full existing example suite (55/56, one pre-existing unrelated
+  failure) and every prior v2.42–v2.44 struct test file re-verified
+  clean alongside this version's new array tests.
+
 ### v2.20: UDP sockets
 - Done: `y.net.udp_socket()`/`udp_bind(port)`/`udp_send(sock, host,
   port, data)`/`udp_recv(sock, maxlen)`/`udp_close(sock)`, interpreter

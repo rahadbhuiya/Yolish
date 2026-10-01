@@ -433,6 +433,18 @@ typedef struct {
        here is where the incoming pointer itself is spilled, not a
        field offset. */
     int  is_ref;
+    /* v2.45: fixed-size native arrays. is_array set means rbp_off is
+       element 0's offset and element i lives at rbp_off - i*8 — same
+       downward-from-element-0 layout v2.42/v2.43/v2.44 already settled
+       on for struct fields, reused here rather than reinvented, and
+       for the same reason: it's just how local_alloc-style stack
+       growth naturally falls out (see local_alloc_array below). Fixed
+       size only, decided at compile time from the literal's own
+       element count — no y.push/growth support, since that would need
+       real heap allocation this backend doesn't have yet (a bigger,
+       separate undertaking, not attempted here). */
+    int  is_array;
+    int  arr_nelems;
 } Local;
 static Local locals[LOCAL_MAX];
 static int   nlocals=0;
@@ -466,6 +478,7 @@ static int local_alloc(const char *name){
         adding it in a later fix, avoids exactly the kind of stale-
         flag bug local_alloc_struct below already had to guard
         against for its own fields (is_struct, is_float, etc.). */
+    locals[nlocals].is_array=0; /* v2.45: same stale-flag reasoning */
     strncpy(locals[nlocals].name,name,63);
     nlocals++;
     return -stack_size;
@@ -489,12 +502,32 @@ static Local *local_alloc_struct(const char *name, const char *struct_type){
     if(nfields<1) nfields=1; /* degrade to a single word rather than 0 bytes */
     int field0_off=0;
     for(int i=0;i<nfields;i++){ stack_size+=8; if(i==0) field0_off=-stack_size; }
-    Local *L=&locals[nlocals++];
+    /* v2.45 fix: a same-named local that exists but didn't match above
+       (reassigning `p` from one struct type to a *different* one) must
+       reuse the SAME Local* slot, not append a new entry under
+       nlocals++ — local_find/local_get return the first name match by
+       linear scan, so a second same-named entry would just become
+       permanently unreachable dead weight while every later lookup of
+       `p` kept resolving to the stale first entry. Caught by testing
+       array reassignment to a different element count (the same
+       append-on-mismatch bug, just easier to trigger there since
+       local_alloc_array's reuse condition checks element count, which
+       changes far more naturally during normal use than a struct's
+       type does) — a[0]/a[1] kept reading the pre-reassignment values
+       after `a = [100, 200]`. Fixed here too since the bug was
+       structurally identical, not specific to arrays. Never shrinks
+       stack_size on a mismatch (always reserves a fresh block above,
+       even when reusing the Local*) — slightly wasteful on repeated
+       reassignment to a growing/shrinking type/size, but simple and
+       correct, consistent with this backend's existing "frames only
+       grow, never reused mid-function" model everywhere else. */
+    Local *L = existing ? existing : &locals[nlocals++];
     strncpy(L->name,name,63); L->name[63]=0;
     L->rbp_off=field0_off;
     L->is_float=0;
     L->is_struct=1;
     L->is_ref=0;
+    L->is_array=0;
     strncpy(L->struct_type,struct_type,31); L->struct_type[31]=0;
     for(int i=0;i<8;i++) L->field_is_float[i]=0;
     return L;
@@ -511,9 +544,46 @@ static Local *local_alloc_struct_ref(const char *name, const char *struct_type){
     Local *L=local_find(name);
     L->is_struct=1;
     L->is_ref=1;
+    L->is_array=0;
     strncpy(L->struct_type,struct_type,31); L->struct_type[31]=0;
     for(int i=0;i<8;i++) L->field_is_float[i]=0;
     (void)off;
+    return L;
+}
+
+/* v2.45: reserve nelems contiguous 8-byte slots for a fixed-size
+   native array local — same reservation shape as local_alloc_struct
+   just above (element 0 first/least-negative, each later element 8
+   bytes deeper), minus the NStructDef lookup, since an array has no
+   named fields, just a count. Re-entering the same `let` (e.g. inside
+   a loop body) with the same element count reuses the existing block,
+   same as local_alloc_struct; a different element count reserves a
+   fresh block rather than trying to resize in place, since this
+   backend has no realloc-style move-and-copy machinery — matches how
+   this whole feature is scoped to fixed-size arrays only (no
+   y.push/growth) in the first place. */
+static Local *local_alloc_array(const char *name, int nelems){
+    Local *existing=local_find(name);
+    if(existing && existing->is_array && existing->arr_nelems==nelems)
+        return existing;
+    if(nelems<1) nelems=1;
+    int elem0_off=0;
+    for(int i=0;i<nelems;i++){ stack_size+=8; if(i==0) elem0_off=-stack_size; }
+    /* v2.45 fix: see local_alloc_struct's matching comment just above
+       — reuse the existing same-named Local* on a size mismatch
+       instead of appending a new, permanently-unreachable entry. This
+       was the actual bug this comment's sibling describes catching:
+       `a = [100, 200]` after `var a = [1, 2, 3]` left a[0]/a[1] still
+       reading the old 3-element block's values, because local_find
+       kept resolving `a` to the original entry. */
+    Local *L = existing ? existing : &locals[nlocals++];
+    strncpy(L->name,name,63); L->name[63]=0;
+    L->rbp_off=elem0_off;
+    L->is_float=0;
+    L->is_struct=0;
+    L->is_ref=0;
+    L->is_array=1;
+    L->arr_nelems=nelems;
     return L;
 }
 
@@ -879,6 +949,30 @@ static void x_mov_rax_r10off(int off){
     if(off>=-128&&off<=127){ emit4(0x49,0x8b,0x42,(uint8_t)(int8_t)off); }
     else { emit3(0x49,0x8b,0x82); emit_i32(off); }
 }
+/* v2.45: three more helpers for native array indexing — arr[i] needs
+   the element's address computed at *runtime* (i is an arbitrary
+   expression, not a compile-time-constant field name the way a
+   struct's field is), unlike every struct helper above which only
+   ever needed a fixed, compile-time-known offset. */
+/* lea r10, [rbp+off] — r10 = address of a local's block (element 0 for
+   an array, matching x_mov_r10_mem's disp encoding exactly, just LEA
+   instead of MOV since this computes an address, not a load). */
+static void x_lea_r10_mem(int off){
+    if(off>=-128&&off<=127){ emit4(0x4c,0x8d,0x55,(uint8_t)(int8_t)off); }
+    else { emit3(0x4c,0x8d,0x95); emit_i32(off); }
+}
+/* imul rax, rax, 8 — rax = index * 8 (scale a runtime index to a byte
+   offset; every element is one 8-byte word, matching every other
+   fixed-size-word assumption v2.42 onward already makes). */
+static void x_imul_rax_8(){ emit4(0x48,0x6b,0xc0,0x08); }
+/* sub r10, rax — r10 -= index*8, giving r10 = &element[i] given r10
+   already held &element[0] and elements lay out *downward* (element i
+   = element0 - i*8, the same direction v2.42/v2.43/v2.44 all use for
+   struct fields, so subtracting rather than adding here too — this
+   backend has already paid for that sign-error lesson twice on the
+   struct side; array indexing reuses the same direction on purpose,
+   not by accident). */
+static void x_sub_r10_rax(){ emit3(0x49,0x29,0xc2); }
 
 /* add rax, rcx */
 static void x_add_rax_rcx(){ emit3(0x48,0x01,0xc8); }
@@ -1624,6 +1718,33 @@ static void compile_expr(Node *n){
         x_mov_rax_imm32(0);
         break;
     }
+    case ND_INDEX:{
+        /* v2.45: array index read (arr[i]), i an arbitrary runtime
+           expression. Only a plain local identifier on the left is
+           supported this pass — arr[i][j] and obj.field[i] aren't
+           attempted — matching every struct-access case's own scoping
+           above. A left side that isn't an array-typed local, or an
+           out-of-range index, both fall through to the same
+           "compiles to 0" behavior the rest of this file already uses
+           for an unresolved access, rather than a hard compile error
+           or a runtime bounds check (this backend has neither the
+           infrastructure nor, for a first pass, the stated need for
+           bounds-checked array access — see ROADMAP.md's v2.45 entry). */
+        g_last_float=0;
+        if(n->left && n->left->kind==ND_IDENT){
+            Local *L=local_find(n->left->name);
+            if(L && L->is_array){
+                compile_expr(n->right); /* index -> rax */
+                x_imul_rax_8();
+                x_lea_r10_mem(L->rbp_off);
+                x_sub_r10_rax();        /* r10 = &elem[i] */
+                x_mov_rax_r10off(0);
+                break;
+            }
+        }
+        x_mov_rax_imm32(0);
+        break;
+    }
     default:
         x_mov_rax_imm32(0);
         break;
@@ -1653,6 +1774,23 @@ static void compile_struct_lit_into(Node *lit, Local *L){
                 break;
             }
         }
+    }
+}
+
+/* v2.45: write an array literal ([1, 2, 3]) directly into an array-
+   typed local's stack slots, element by element. Element count/node
+   access mirrors eval.c's own ND_ARRAY handling exactly
+   (`nc = stmtc>0 ? stmtc : argc`, element i from stmts[i] or args[i])
+   — the parser apparently uses one or the other depending on which
+   literal syntax was used, so this has to check the same way eval.c
+   already does rather than assuming one is always populated. */
+static void compile_array_lit_into(Node *lit, Local *L){
+    int nc = (lit->stmtc > 0) ? lit->stmtc : lit->argc;
+    if(nc>L->arr_nelems) nc=L->arr_nelems;
+    for(int i=0;i<nc;i++){
+        Node *el = (lit->stmtc > 0) ? lit->stmts[i] : lit->args[i];
+        compile_expr(el);
+        x_mov_mem_rax(L->rbp_off - i*8);
     }
 }
 
@@ -1730,6 +1868,15 @@ static void compile_node(Node *n){
             compile_struct_lit_into(n->right, L);
             break;
         }
+        /* v2.45: `let arr = [1, 2, 3]` — same idea as the struct
+           literal case just above, fixed-size and stack-allocated
+           rather than going through compile_expr/rax. */
+        if(n->right && n->right->kind==ND_ARRAY){
+            int nc = (n->right->stmtc > 0) ? n->right->stmtc : n->right->argc;
+            Local *L=local_alloc_array(n->name, nc);
+            compile_array_lit_into(n->right, L);
+            break;
+        }
         /* v2.43: `let q = make_point(1, 2)` where make_point is a
            known struct-returning function — same idea, but the
            source of the fields is the callee's own hidden-pointer
@@ -1782,6 +1929,24 @@ static void compile_node(Node *n){
                 break;
             }
         }
+        /* v2.45: arr[i] = v — array index write, same plain-local-only
+           scope as every struct branch above (n->left->left must be a
+           direct ND_IDENT referring to an array local; arr[i][j] = v
+           or obj.field[i] = v aren't attempted this pass). */
+        if(n->left && n->left->kind==ND_INDEX && n->left->left && n->left->left->kind==ND_IDENT){
+            Local *L=local_find(n->left->left->name);
+            if(L && L->is_array){
+                compile_expr(n->right);   /* value to store -> rax */
+                x_push_rax();
+                compile_expr(n->left->right); /* index -> rax */
+                x_imul_rax_8();
+                x_lea_r10_mem(L->rbp_off);
+                x_sub_r10_rax();          /* r10 = &elem[i] */
+                x_pop_rax();              /* restore value */
+                x_mov_r10off_rax(0);
+                break;
+            }
+        }
         /* v2.42: `p = Point{...}` — reassigning a whole struct-typed
            local to a fresh literal. Same direct field-by-field write
            as ND_LET/ND_VAR above, reusing the existing block if `p`
@@ -1790,6 +1955,15 @@ static void compile_node(Node *n){
         if(n->right && n->right->kind==ND_STRUCT_LIT){
             Local *L=local_alloc_struct(aname, n->right->name);
             compile_struct_lit_into(n->right, L);
+            break;
+        }
+        /* v2.45: `arr = [1, 2, 3]` — reassigning a whole array-typed
+           local to a fresh literal, same pattern as the struct case
+           just above. */
+        if(n->right && n->right->kind==ND_ARRAY){
+            int nc = (n->right->stmtc > 0) ? n->right->stmtc : n->right->argc;
+            Local *L=local_alloc_array(aname, nc);
+            compile_array_lit_into(n->right, L);
             break;
         }
         /* v2.43: `p = make_point(1, 2)` — same struct-returning-call
