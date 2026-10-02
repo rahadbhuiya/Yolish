@@ -282,6 +282,32 @@ Exploidus, readable, safe, and practical.
   failure) and every prior v2.42–v2.44 struct test file re-verified
   clean alongside this version's new array tests.
 
+### v2.46: `arr[i].field` — array-of-struct-pointers (done)
+- **Closes the first of the two "known narrow limitations" v2.45 left
+  open.** `let arr = [p, q]`, where `p`/`q` are existing struct
+  locals, now makes `arr` an array of *pointers* to those structs
+  (same pointer-passing convention v2.44 already built for struct
+  function parameters, reused rather than duplicated), so
+  `arr[0].x`, `arr[1].y`, and `arr[i].x` with `i` a runtime expression
+  all read correctly, and `arr[0].x = 999` writes through — verified
+  to be visible on `p` itself afterward too (`arr[0]` and `p` are the
+  *same* struct, not a copy, matching the interpreter's own shared-
+  reference array semantics exactly, confirmed by diffing output
+  rather than assumed).
+- Which struct type an array's elements point to is decided from the
+  *first* element only, at the literal site — an array mixing struct
+  and non-struct elements, or elements of genuinely different struct
+  types, isn't validated or given correct behavior; an inline struct
+  literal as an array element (`[Point{x:1,y:2}]`, rather than an
+  existing struct local) isn't recognized either, the same "forward an
+  existing local, not an inline literal" restriction this whole
+  feature line has used since v2.44's struct parameters.
+- **Still open**: `arr[i][j]` (nested array indexing) remains
+  unimplemented — v2.45's other known limitation, untouched by this
+  version. Full existing example suite (55/56, one pre-existing
+  unrelated failure) and every prior v2.42–v2.45 struct/array test
+  file re-verified clean alongside this version's new tests.
+
 ### v2.20: UDP sockets
 - Done: `y.net.udp_socket()`/`udp_bind(port)`/`udp_send(sock, host,
   port, data)`/`udp_recv(sock, maxlen)`/`udp_close(sock)`, interpreter

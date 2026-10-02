@@ -445,6 +445,18 @@ typedef struct {
        separate undertaking, not attempted here). */
     int  is_array;
     int  arr_nelems;
+    /* v2.46: an array whose elements were each an *existing struct
+       local* at the literal site (`let arr = [p, q]` where p, q are
+       already Point{...} locals) stores each element as a pointer to
+       that struct, same as a struct-typed parameter (Local.is_ref)
+       does — see compile_array_lit_into for how this gets set. Lets
+       `arr[i].field` resolve field offsets the same way a struct
+       parameter's fields already do. An array mixing struct and
+       non-struct elements, or whose elements are inline struct
+       literals rather than existing locals, isn't supported — see
+       compile_array_lit_into's own comment for the exact narrow rule. */
+    int  arr_is_struct_ptr;
+    char arr_struct_type[32];
 } Local;
 static Local locals[LOCAL_MAX];
 static int   nlocals=0;
@@ -584,6 +596,8 @@ static Local *local_alloc_array(const char *name, int nelems){
     L->is_ref=0;
     L->is_array=1;
     L->arr_nelems=nelems;
+    L->arr_is_struct_ptr=0; /* set by compile_array_lit_into if elements turn out to be struct locals */
+    L->arr_struct_type[0]=0;
     return L;
 }
 
@@ -629,6 +643,20 @@ static int nstruct_field_offset(Local *L, const char *field_name, int *out_off, 
 static int nstruct_field_ptr_offset(Local *L, const char *field_name, int *out_off){
     if(!L->is_struct || !L->is_ref) return 0;
     NStructDef *def=nstruct_find(L->struct_type);
+    if(!def) return 0;
+    for(int i=0;i<def->nfields;i++){
+        if(strcmp(def->fields[i],field_name)==0){ *out_off=-i*8; return 1; }
+    }
+    return 0;
+}
+
+/* v2.46: same field-offset lookup as nstruct_field_ptr_offset above,
+   but keyed by a struct type *name* rather than a Local — used for
+   arr[i].field, where the pointer being dereferenced comes from an
+   array element (Local.arr_struct_type), not from a struct-typed
+   local itself. */
+static int nstruct_field_offset_by_type(const char *struct_type, const char *field_name, int *out_off){
+    NStructDef *def=nstruct_find(struct_type);
     if(!def) return 0;
     for(int i=0;i<def->nfields;i++){
         if(strcmp(def->fields[i],field_name)==0){ *out_off=-i*8; return 1; }
@@ -973,6 +1001,15 @@ static void x_imul_rax_8(){ emit4(0x48,0x6b,0xc0,0x08); }
    struct side; array indexing reuses the same direction on purpose,
    not by accident). */
 static void x_sub_r10_rax(){ emit3(0x49,0x29,0xc2); }
+/* v2.46: mov r10, [r10+off] — follow a pointer already held in r10
+   (used for arr[i].field: r10 first holds &elem[i], which itself
+   holds a struct pointer per v2.46's array-of-struct-pointers
+   support, so this re-reads through it to get the actual struct
+   address before applying a field offset). */
+static void x_mov_r10_r10off(int off){
+    if(off>=-128&&off<=127){ emit4(0x4d,0x8b,0x52,(uint8_t)(int8_t)off); }
+    else { emit3(0x4d,0x8b,0x92); emit_i32(off); }
+}
 
 /* add rax, rcx */
 static void x_add_rax_rcx(){ emit3(0x48,0x01,0xc8); }
@@ -1715,6 +1752,29 @@ static void compile_expr(Node *n){
                 }
             }
         }
+        /* v2.46: arr[i].field — the array-index case falls outside
+           the "n->left->kind==ND_IDENT" check above (n->left is itself
+           an ND_INDEX node here), so it needs its own branch rather
+           than extending that one. Only recognized when the array was
+           built as an array-of-struct-pointers (Local.arr_is_struct_ptr,
+           set by compile_array_lit_into) — an array of plain scalars
+           falls through to the same "compiles to 0" default every
+           other unresolved access in this file already gets. */
+        if(n->left && n->left->kind==ND_INDEX && n->left->left && n->left->left->kind==ND_IDENT){
+            Local *AL=local_find(n->left->left->name);
+            if(AL && AL->is_array && AL->arr_is_struct_ptr){
+                int foff;
+                if(nstruct_field_offset_by_type(AL->arr_struct_type,n->name,&foff)){
+                    compile_expr(n->left->right); /* index -> rax */
+                    x_imul_rax_8();
+                    x_lea_r10_mem(AL->rbp_off);
+                    x_sub_r10_rax();        /* r10 = &elem[i] */
+                    x_mov_r10_r10off(0);    /* r10 = elem[i] itself (the struct pointer) */
+                    x_mov_rax_r10off(foff);
+                    break;
+                }
+            }
+        }
         x_mov_rax_imm32(0);
         break;
     }
@@ -1783,12 +1843,43 @@ static void compile_struct_lit_into(Node *lit, Local *L){
    (`nc = stmtc>0 ? stmtc : argc`, element i from stmts[i] or args[i])
    — the parser apparently uses one or the other depending on which
    literal syntax was used, so this has to check the same way eval.c
-   already does rather than assuming one is always populated. */
+   already does rather than assuming one is always populated.
+   v2.46 addition: if every element is a plain identifier referring to
+   an *existing* struct local (`let arr = [p, q]`), store each
+   element as a pointer to that struct instead of a scalar word — the
+   same compile_struct_arg_ptr helper v2.44 already built for passing
+   a struct to a function parameter, reused here rather than
+   duplicated — and record the array's element struct type on L so
+   `arr[i].field` can resolve it later. Narrow on purpose: this is
+   decided from the *first* element only (an array mixing struct and
+   non-struct elements, or whose struct elements are different struct
+   types, isn't validated or specially handled — later elements are
+   still written as struct pointers if the first one was, which is
+   wrong for a genuinely mixed array, but mixed-type arrays aren't a
+   case this pass claims to support in the first place); an inline
+   struct literal as an array element (`[Point{x:1,y:2}]`, as opposed
+   to an existing struct local) isn't recognized either, matching
+   every other "forward an existing local, not an inline literal"
+   restriction already established throughout this feature. */
 static void compile_array_lit_into(Node *lit, Local *L){
     int nc = (lit->stmtc > 0) ? lit->stmtc : lit->argc;
     if(nc>L->arr_nelems) nc=L->arr_nelems;
+    if(nc>0){
+        Node *el0 = (lit->stmtc > 0) ? lit->stmts[0] : lit->args[0];
+        if(el0 && el0->kind==ND_IDENT){
+            Local *AL0=local_find(el0->name);
+            if(AL0 && AL0->is_struct){
+                L->arr_is_struct_ptr=1;
+                strncpy(L->arr_struct_type,AL0->struct_type,31); L->arr_struct_type[31]=0;
+            }
+        }
+    }
     for(int i=0;i<nc;i++){
         Node *el = (lit->stmtc > 0) ? lit->stmts[i] : lit->args[i];
+        if(L->arr_is_struct_ptr && el && el->kind==ND_IDENT){
+            Local *AL=local_find(el->name);
+            if(AL && AL->is_struct){ compile_struct_arg_ptr(AL); x_mov_mem_rax(L->rbp_off - i*8); continue; }
+        }
         compile_expr(el);
         x_mov_mem_rax(L->rbp_off - i*8);
     }
@@ -1898,6 +1989,30 @@ static void compile_node(Node *n){
         /* target name is in n->left->name (parser stores ident as left child) */
         const char *aname = (n->name[0]) ? n->name
                           : (n->left && n->left->name[0]) ? n->left->name : "";
+        /* v2.46: arr[i].field = v — field write through an array-of-
+           struct-pointers element. Checked before the plain obj.field
+           branch below, since n->left->left is an ND_INDEX node here,
+           not an ND_IDENT — this is a genuinely different shape, not
+           an extension of that branch's existing ND_IDENT check. */
+        if(n->left && n->left->kind==ND_DOT && n->left->left && n->left->left->kind==ND_INDEX
+           && n->left->left->left && n->left->left->left->kind==ND_IDENT){
+            Local *AL=local_find(n->left->left->left->name);
+            if(AL && AL->is_array && AL->arr_is_struct_ptr){
+                int foff;
+                if(nstruct_field_offset_by_type(AL->arr_struct_type,n->left->name,&foff)){
+                    compile_expr(n->right);          /* value -> rax */
+                    x_push_rax();
+                    compile_expr(n->left->left->right); /* index -> rax */
+                    x_imul_rax_8();
+                    x_lea_r10_mem(AL->rbp_off);
+                    x_sub_r10_rax();                 /* r10 = &elem[i] */
+                    x_mov_r10_r10off(0);              /* r10 = elem[i] (struct pointer) */
+                    x_pop_rax();                      /* restore value */
+                    x_mov_r10off_rax(foff);
+                }
+                break;
+            }
+        }
         /* v2.42: obj.field = v — field write on a struct-typed local.
            Only a plain local identifier on the left of the dot is
            supported this pass, same limitation as ND_DOT's read side
