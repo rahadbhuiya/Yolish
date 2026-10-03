@@ -308,6 +308,40 @@ Exploidus, readable, safe, and practical.
   unrelated failure) and every prior v2.42–v2.45 struct/array test
   file re-verified clean alongside this version's new tests.
 
+### v2.47: `arr[i][j]` — array-of-array-pointers, exactly two levels (done)
+- **Closes the second of v2.45's two known limitations**, the same way
+  v2.46 closed the first (`arr[i].field`): `let grid = [row0, row1]`,
+  where `row0`/`row1` are existing array locals, makes `grid` an array
+  of *pointers* to those arrays — reusing the address-taking pattern
+  v2.46 already established for struct elements, applied to array
+  elements instead. `grid[0][0]`, `grid[1][1]`, `grid[i][j]` with both
+  indices arbitrary runtime expressions, and `grid[0][1] = 999` (write-
+  through, confirmed visible on `row0[1]` afterward too — shared
+  reference, not a copy, matching the interpreter) all verified.
+  Deliberately exactly two levels — `grid[i][j][k]` isn't attempted,
+  not because of a recursion limit this code happens to hit, but
+  because nothing in this feature line has built arrays-of-arrays-of-
+  arrays as a concept at all; two levels is what "the second of v2.45's
+  two limitations" actually asked for.
+- **A real risk caught by reasoning about the instruction sequence
+  while writing it, not by a failing test**: the inner index expression
+  (`j` in `grid[i][j]`) is compiled *after* r10 already holds the inner
+  array's address — and that index expression could itself be anything,
+  including another access that uses r10 as scratch internally (every
+  struct-parameter and array-of-struct-pointer field access already
+  does), which would silently clobber the saved address before it gets
+  used. Fixed by saving r10 across that one `compile_expr` call and
+  restoring it immediately after, both for the read case and the write
+  case. Added defensively rather than in response to an observed
+  failure — a simple `grid[i][j]` with a plain variable or literal
+  index wouldn't have exercised the clobber at all, so this is flagged
+  explicitly rather than left implicit in "all tests passed."
+- Full existing example suite (55/56, one pre-existing unrelated
+  failure) and every prior v2.42–v2.46 struct/array test file re-
+  verified clean alongside this version's new tests. With this, both
+  limitations v2.45 flagged as open are closed — `arr[i].field` since
+  v2.46, `arr[i][j]` here.
+
 ### v2.20: UDP sockets
 - Done: `y.net.udp_socket()`/`udp_bind(port)`/`udp_send(sock, host,
   port, data)`/`udp_recv(sock, maxlen)`/`udp_close(sock)`, interpreter

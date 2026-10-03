@@ -457,6 +457,14 @@ typedef struct {
        compile_array_lit_into's own comment for the exact narrow rule. */
     int  arr_is_struct_ptr;
     char arr_struct_type[32];
+    /* v2.47: same idea as arr_is_struct_ptr, for `let arr = [a, b]`
+       where a, b are themselves *array* locals — each element stores
+       a pointer to the inner array instead of a scalar, enabling
+       exactly two levels of arr[i][j] (the inner array's own elements
+       are read/written as plain scalars; a third level, arr[i][j][k],
+       isn't attempted — see the ND_INDEX case's comment for why two
+       levels was the chosen scope). */
+    int  arr_is_array_ptr;
 } Local;
 static Local locals[LOCAL_MAX];
 static int   nlocals=0;
@@ -598,6 +606,7 @@ static Local *local_alloc_array(const char *name, int nelems){
     L->arr_nelems=nelems;
     L->arr_is_struct_ptr=0; /* set by compile_array_lit_into if elements turn out to be struct locals */
     L->arr_struct_type[0]=0;
+    L->arr_is_array_ptr=0; /* set by compile_array_lit_into if elements turn out to be array locals */
     return L;
 }
 
@@ -1010,6 +1019,18 @@ static void x_mov_r10_r10off(int off){
     if(off>=-128&&off<=127){ emit4(0x4d,0x8b,0x52,(uint8_t)(int8_t)off); }
     else { emit3(0x4d,0x8b,0x92); emit_i32(off); }
 }
+/* v2.47: push/pop r10 — needed because arr[i][j]'s inner index
+   expression (j) is compiled *after* r10 already holds the inner
+   array's address, and that index expression could itself be
+   anything, including another struct/array access that uses r10 as
+   scratch internally and would silently clobber it. Saving r10 across
+   that compile_expr call and restoring it afterward avoids relying on
+   "the index expression probably won't touch r10" — caught by
+   reasoning about it while writing the ND_INDEX nested case, not by a
+   failing test (a simple arr[i][j] with a plain variable or literal
+   index wouldn't have exercised this at all). */
+static void x_push_r10(){ emit2(0x41,0x52); }
+static void x_pop_r10(){ emit2(0x41,0x5a); }
 
 /* add rax, rcx */
 static void x_add_rax_rcx(){ emit3(0x48,0x01,0xc8); }
@@ -1780,16 +1801,14 @@ static void compile_expr(Node *n){
     }
     case ND_INDEX:{
         /* v2.45: array index read (arr[i]), i an arbitrary runtime
-           expression. Only a plain local identifier on the left is
-           supported this pass — arr[i][j] and obj.field[i] aren't
-           attempted — matching every struct-access case's own scoping
-           above. A left side that isn't an array-typed local, or an
-           out-of-range index, both fall through to the same
-           "compiles to 0" behavior the rest of this file already uses
-           for an unresolved access, rather than a hard compile error
-           or a runtime bounds check (this backend has neither the
-           infrastructure nor, for a first pass, the stated need for
-           bounds-checked array access — see ROADMAP.md's v2.45 entry). */
+           expression. obj.field[i] still isn't attempted. A left side
+           that isn't an array-typed local, or an out-of-range index,
+           both fall through to the same "compiles to 0" behavior the
+           rest of this file already uses for an unresolved access,
+           rather than a hard compile error or a runtime bounds check
+           (this backend has neither the infrastructure nor, for a
+           first pass, the stated need for bounds-checked array
+           access — see ROADMAP.md's v2.45 entry). */
         g_last_float=0;
         if(n->left && n->left->kind==ND_IDENT){
             Local *L=local_find(n->left->name);
@@ -1798,6 +1817,33 @@ static void compile_expr(Node *n){
                 x_imul_rax_8();
                 x_lea_r10_mem(L->rbp_off);
                 x_sub_r10_rax();        /* r10 = &elem[i] */
+                x_mov_rax_r10off(0);
+                break;
+            }
+        }
+        /* v2.47: arr[i][j] — exactly two levels, array-of-array-
+           pointers (Local.arr_is_array_ptr, set by
+           compile_array_lit_into) only; arr[i][j][k] isn't attempted.
+           n->left here is itself an ND_INDEX (arr[i]), whose own left
+           must be a plain array-local identifier — the inner index
+           chain isn't walked any deeper than that one extra level, a
+           deliberate scope line rather than a recursion depth this
+           code happens to fall short of: going further would need
+           arrays-of-arrays-of-arrays to exist as a concept at all,
+           which nothing in this feature line has built yet. */
+        if(n->left && n->left->kind==ND_INDEX && n->left->left && n->left->left->kind==ND_IDENT){
+            Local *L=local_find(n->left->left->name);
+            if(L && L->is_array && L->arr_is_array_ptr){
+                compile_expr(n->left->right); /* outer index i -> rax */
+                x_imul_rax_8();
+                x_lea_r10_mem(L->rbp_off);
+                x_sub_r10_rax();         /* r10 = &outer_elem[i] */
+                x_mov_r10_r10off(0);     /* r10 = outer_elem[i] itself (inner array's address) */
+                x_push_r10();            /* save — n->right may itself use r10 as scratch */
+                compile_expr(n->right);  /* inner index j -> rax */
+                x_imul_rax_8();
+                x_pop_r10();             /* restore inner array's address */
+                x_sub_r10_rax();         /* r10 = &inner[j] */
                 x_mov_rax_r10off(0);
                 break;
             }
@@ -1871,6 +1917,11 @@ static void compile_array_lit_into(Node *lit, Local *L){
             if(AL0 && AL0->is_struct){
                 L->arr_is_struct_ptr=1;
                 strncpy(L->arr_struct_type,AL0->struct_type,31); L->arr_struct_type[31]=0;
+            } else if(AL0 && AL0->is_array){
+                /* v2.47: `let arr = [a, b]` where a, b are themselves
+                   array locals — same "decide from the first element"
+                   rule as the struct-pointer case above. */
+                L->arr_is_array_ptr=1;
             }
         }
     }
@@ -1879,6 +1930,16 @@ static void compile_array_lit_into(Node *lit, Local *L){
         if(L->arr_is_struct_ptr && el && el->kind==ND_IDENT){
             Local *AL=local_find(el->name);
             if(AL && AL->is_struct){ compile_struct_arg_ptr(AL); x_mov_mem_rax(L->rbp_off - i*8); continue; }
+        }
+        if(L->arr_is_array_ptr && el && el->kind==ND_IDENT){
+            Local *AL=local_find(el->name);
+            if(AL && AL->is_array){
+                /* address of AL's element 0 (lea rax,[rbp+AL->rbp_off]) */
+                if(AL->rbp_off>=-128 && AL->rbp_off<=127){ emit3(0x48,0x8d,0x45); emit1((uint8_t)(int8_t)AL->rbp_off); }
+                else { emit3(0x48,0x8d,0x85); emit_i32(AL->rbp_off); }
+                x_mov_mem_rax(L->rbp_off - i*8);
+                continue;
+            }
         }
         compile_expr(el);
         x_mov_mem_rax(L->rbp_off - i*8);
@@ -2044,10 +2105,38 @@ static void compile_node(Node *n){
                 break;
             }
         }
+        /* v2.47: arr[i][j] = v — array-of-array-pointers write, same
+           exactly-two-levels scope as the ND_INDEX read case, and the
+           same r10-clobber precaution (save/restore across compiling
+           the inner index, since it could itself touch r10). Checked
+           before the single-level branch right below, since
+           n->left->left is itself an ND_INDEX here, not an ND_IDENT —
+           a different shape, not an extension of that branch. */
+        if(n->left && n->left->kind==ND_INDEX && n->left->left && n->left->left->kind==ND_INDEX
+           && n->left->left->left && n->left->left->left->kind==ND_IDENT){
+            Local *L=local_find(n->left->left->left->name);
+            if(L && L->is_array && L->arr_is_array_ptr){
+                compile_expr(n->right);           /* value -> rax */
+                x_push_rax();
+                compile_expr(n->left->left->right); /* outer index i -> rax */
+                x_imul_rax_8();
+                x_lea_r10_mem(L->rbp_off);
+                x_sub_r10_rax();                  /* r10 = &outer_elem[i] */
+                x_mov_r10_r10off(0);              /* r10 = inner array's address */
+                x_push_r10();
+                compile_expr(n->left->right);     /* inner index j -> rax */
+                x_imul_rax_8();
+                x_pop_r10();
+                x_sub_r10_rax();                  /* r10 = &inner[j] */
+                x_pop_rax();                       /* restore value */
+                x_mov_r10off_rax(0);
+                break;
+            }
+        }
         /* v2.45: arr[i] = v — array index write, same plain-local-only
            scope as every struct branch above (n->left->left must be a
-           direct ND_IDENT referring to an array local; arr[i][j] = v
-           or obj.field[i] = v aren't attempted this pass). */
+           direct ND_IDENT referring to an array local; obj.field[i]
+           isn't attempted this pass). */
         if(n->left && n->left->kind==ND_INDEX && n->left->left && n->left->left->kind==ND_IDENT){
             Local *L=local_find(n->left->left->name);
             if(L && L->is_array){
