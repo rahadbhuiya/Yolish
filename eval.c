@@ -1023,6 +1023,17 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     }
 
     case ND_BINOP:{
+        /* Short-circuit value-preserving evaluation for OR / AND */
+        if(n->op == TK_OR){
+            Val L = eval_node(n->left, env);
+            if(val_bool(L)) return L;
+            return eval_node(n->right, env);
+        }
+        if(n->op == TK_AND){
+            Val L = eval_node(n->left, env);
+            if(!val_bool(L)) return L;
+            return eval_node(n->right, env);
+        }
         Val L=eval_node(n->left,env);
         Val R=eval_node(n->right,env);
         int use_f=(L.type==YS_FLOAT||R.type==YS_FLOAT);

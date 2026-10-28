@@ -29,6 +29,8 @@ static int streq(const char *a, int n, const char *b){
 
 static Token make_kw_or_ident(const char *s, int n){
     Token t; t.start=s; t.len=n; t.ival=0; t.fval=0; t.column=0;
+    if(streq(s,n,"or"))      {t.kind=TK_OR;       return t;}
+    if(streq(s,n,"and"))     {t.kind=TK_AND;      return t;}
     if(streq(s,n,"fn"))      {t.kind=TK_FN;       return t;}
     if(streq(s,n,"let"))     {t.kind=TK_LET;      return t;}
     if(streq(s,n,"var"))     {t.kind=TK_VAR;      return t;}

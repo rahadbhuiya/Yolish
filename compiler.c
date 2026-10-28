@@ -1364,8 +1364,8 @@ static void emit_helpers(void){
     /* Linux/macOS syscall write(fd=1, buf, len): rax=nr, rdi=fd, rsi=buf, rdx=len */
     helper_print_str_off=code_len;
     sym_define("__ys_print_str",code_len);
-    if(g_target==TARGET_LINUX||g_target==TARGET_MACOS){
-        int sn=(g_target==TARGET_LINUX)?1:0x2000004;
+    if(g_target==TARGET_LINUX||g_target==TARGET_MACOS||g_target==TARGET_EXPLOIDUS){
+        int sn=(g_target==TARGET_LINUX)?1:(g_target==TARGET_EXPLOIDUS)?7:0x2000004;
         /* on entry: rdi=buf, rsi=len */
         emit3(0x48,0x89,0xf2); /* mov rdx, rsi  (len → rdx) */
         emit3(0x48,0x89,0xfe); /* mov rsi, rdi  (buf → rsi) */
@@ -1398,7 +1398,7 @@ static void emit_helpers(void){
         /* actually simpler: store '-' on stack */
         emit4(0xc6,0x04,0x24,0x2d); /* mov byte[rsp],'-' */
         /* write(1, rsp, 1) */
-        int sn=(g_target==TARGET_LINUX)?1:0x2000004;
+        int sn=(g_target==TARGET_LINUX)?1:(g_target==TARGET_EXPLOIDUS)?7:0x2000004;
         emit3(0x48,0x89,0xe6);   /* mov rsi,rsp */
         emit3(0x48,0xc7,0xc2); emit_i32(1); /* mov rdx,1 */
         x_mov_rax_imm32(1);
@@ -1455,7 +1455,7 @@ static void emit_helpers(void){
     {
         int nl_data=data_len; data_buf[data_len++]='\n';
         x_push_rbp(); x_mov_rbp_rsp();
-        int sn=(g_target==TARGET_LINUX)?1:0x2000004;
+        int sn=(g_target==TARGET_LINUX)?1:(g_target==TARGET_EXPLOIDUS)?7:0x2000004;
         emit3(0x48,0x8d,0x35); /* lea rsi,[rip+rel] */
         add_reloc(RELOC_DATA,code_len,nl_data); emit_i32(0);
         x_mov_rax_imm32(1); emit3(0x48,0x89,0xc7);
@@ -1468,7 +1468,7 @@ static void emit_helpers(void){
     helper_exit_off=code_len;
     sym_define("__ys_exit",code_len);
     {
-        int sn=(g_target==TARGET_LINUX)?60:0x2000001;
+        int sn=(g_target==TARGET_LINUX)?60:(g_target==TARGET_EXPLOIDUS)?0:0x2000001;
         x_mov_rax_imm32(sn);
         emit2(0x0f,0x05);
         x_ret();
@@ -2780,6 +2780,7 @@ int ys_compile(Node *prog, Target target, const char *outfile){
     int ret=0;
     switch(target){
     case TARGET_LINUX:
+    case TARGET_EXPLOIDUS:
         if(g_dyn_enabled){
             static const char *inames[MAX_DYN_IMPORTS];
             static int igots[MAX_DYN_IMPORTS];

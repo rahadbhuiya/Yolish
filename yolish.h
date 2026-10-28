@@ -192,7 +192,7 @@ void  parser_pool_save(void);
 void  parser_pool_restore(void);
 extern char g_src_dir[512];
 /* compiler target — defined in compiler.c */
-typedef enum { TARGET_LINUX, TARGET_WINDOWS, TARGET_MACOS } Target;
+typedef enum { TARGET_LINUX, TARGET_WINDOWS, TARGET_MACOS, TARGET_EXPLOIDUS } Target;
 int ys_compile(Node *prog, Target target, const char *outfile);
 /* v2.1: exposed for main.c test runner */
 extern int  g_throwing;

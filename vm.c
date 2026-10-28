@@ -183,8 +183,8 @@ static void vm_binop(OpCode op){
             if(a.type==YS_STR&&b.type==YS_STR) vm_push(make_bool(strcmp_u(a.sval,b.sval)>=0));
             else vm_push(make_bool(use_float?val_float(a)>=val_float(b):val_int(a)>=val_int(b)));
             return;
-        case OP_AND: vm_push(make_bool(is_truthy(a)&&is_truthy(b))); return;
-        case OP_OR:  vm_push(make_bool(is_truthy(a)||is_truthy(b))); return;
+        case OP_AND: vm_push(!is_truthy(a) ? a : b); return;
+        case OP_OR:  vm_push(is_truthy(a) ? a : b); return;
         case OP_BAND: vm_push(make_int(val_int(a) &  val_int(b))); return;
         case OP_BOR:  vm_push(make_int(val_int(a) |  val_int(b))); return;
         case OP_BXOR: vm_push(make_int(val_int(a) ^  val_int(b))); return;

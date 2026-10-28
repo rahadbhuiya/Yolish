@@ -25,7 +25,7 @@ int  ys_check(Node *prog, const char *filename);
 /*  REPL */
 
 static void run_repl(void){
-    fprintf(stdout,"  Yolish v2.47 (Exploidus Runtime)\n");
+    fprintf(stdout,"  Yolish v2.48 (Exploidus Runtime)\n");
     fprintf(stdout,"  Type \"help\" or \"exit\" to quit.\n\n");
 
     Env *env=env_new(NULL);
@@ -173,7 +173,7 @@ static void usage(void){
         "  ys <file.y>                interpret file\n"
         "  ys -c <file.y>             compile to native binary\n"
         "  ys -c <file.y> -o <out>    compile with custom output name\n"
-        "  ys -c <file.y> --target <t> compile for linux|windows|macos\n"
+        "  ys -c <file.y> --target <t> compile for linux|windows|macos|exploidus\n"
         "  ys test <file.y>           run test blocks\n"
         "  ys fmt  <file.y>           format source (prints to stdout)\n"
         "  ys check <file.y>          static check without running\n"
@@ -235,6 +235,7 @@ int main(int argc,char **argv){
             if(strcmp(argv[i],"linux")==0)        target=TARGET_LINUX;
             else if(strcmp(argv[i],"windows")==0)  target=TARGET_WINDOWS;
             else if(strcmp(argv[i],"macos")==0||strcmp(argv[i],"darwin")==0) target=TARGET_MACOS;
+            else if(strcmp(argv[i],"exploidus")==0) target=TARGET_EXPLOIDUS;
             else { fprintf(stderr,"ys: unknown target '%s'\n",argv[i]); return 1; }
         } else if(argv[i][0]!='-'){
             infile=argv[i];
