@@ -279,6 +279,7 @@ int main(int argc,char **argv){
             int ol=(int)strlen(out_buf);
             if(ol>2&&out_buf[ol-2]=='.'&&out_buf[ol-1]=='y') out_buf[ol-2]=0;
             if(target==TARGET_WINDOWS) strcat(out_buf,".exe");
+            if(target==TARGET_EXPLOIDUS) strcat(out_buf,".fozu");
             outfile=out_buf;
         }
         int rc=ys_compile(prog,target,outfile);
