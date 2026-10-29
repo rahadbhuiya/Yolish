@@ -1,0 +1,14 @@
+# Auto-detect text files and perform LF normalization
+* text=auto
+
+# Yolish Language (100% From Scratch)
+# Official native language of Exploidus OS
+*.y text linguist-language=Yolish
+
+# Binary and package formats
+*.fozu binary
+*.bin binary
+*.elf binary
+*.exe binary
+*.iso binary
+*.o binary
