@@ -44,11 +44,31 @@ Yolish features three execution tiers:
 
 ---
 
-## 3. The 4 Grand Milestones
+## 3. Production Readiness & Architecture Decoupling
+
+Before expanding language features, the underlying codebase must be decoupled from ad-hoc assembly injection into clean, production-grade modular systems:
+
+- [ ] **Phase P.1: Compiler & Networking Decoupling (`compiler_net.c` refactor)**:
+  - Extract the 5,700-line hand-assembled machine code in `compiler_net.c` (HTTP, TLS, DNS, wire protocols) into a standalone native C runtime library (`runtime/libyolish_net.c`).
+  - Compiler generates clean, standardized function calls to the runtime library rather than emitting raw inline assembly blocks for protocol logic.
+- [ ] **Phase P.2: Standard Foreign Function Interface (C FFI)**:
+  - Add native syntax `extern "C" fn name(args): type` to invoke arbitrary dynamic libraries without compiler hacks.
+  - Eliminate the hardcoded 4-slot connection limit (`YS_TLS_MAX_CONN 4`) and replace global buffers with dynamic instance structures.
+- [ ] **Phase P.3: Concurrency & Reentrancy Hardening**:
+  - Thread-safe runtime structures: remove global state in `net_runtime.c` and `eval.c`.
+  - Non-blocking I/O event polling (epoll on Linux, kqueue on macOS, IOCP on Windows).
+- [ ] **Phase P.4: Memory Safety & Crash Isolation**:
+  - Deterministic error propagation replacing hard `exit(-1)` aborts during runtime allocation failures.
+  - Mark-and-sweep GC tuning with cycle detection and explicit cleanup triggers.
+
+---
+
+## 4. The 4 Grand Milestones
 
 ```mermaid
 flowchart LR
-    M1["Milestone 1 (v2.50)<br/>Platform Parity & Exploidus Target"] --> M2["Milestone 2 (v2.60)<br/>Key Language Features: Actors & Errors"]
+    P0["Production Readiness<br/>Decoupling & C FFI"] --> M1["Milestone 1 (v2.50)<br/>Platform Parity & Exploidus Target"]
+    M1 --> M2["Milestone 2 (v2.60)<br/>Key Language Features: Actors & Errors"]
     M2 --> M3["Milestone 3 (v3.00)<br/>Deep Exploidus OS Integration"]
     M3 --> M4["Milestone 4 (v4.00)<br/>100% Self-Hosting"]
 ```
