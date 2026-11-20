@@ -25,7 +25,7 @@ VIAddVersionKey   "ProductVersion"   "v2.8"
 VIAddVersionKey   "CompanyName"      ".Bhuiya"
 VIAddVersionKey   "FileDescription"  "Yolish Installer"
 VIAddVersionKey   "FileVersion"      "2.8.0.0"
-VIAddVersionKey   "LegalCopyright"   "MIT License"
+VIAddVersionKey   "LegalCopyright"   "GNU AGPLv3 with Exception / Commercial"
 
 ;  MUI settings 
 !define MUI_ABORTWARNING

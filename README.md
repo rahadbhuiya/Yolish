@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/version-v2.47-00e5ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-7b2fff?style=flat-square"/>
   <img src="https://img.shields.io/badge/compiler-x86--64%20native-00e5ff?style=flat-square"/>
-  <img src="https://img.shields.io/badge/license-MIT-gray?style=flat-square"/>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL_v3_with_Exception-blue?style=flat-square"/></a>
 </p>
 
 ---
@@ -330,7 +330,19 @@ make test
 
 ---
 
-## License
+## License & Commercial Licensing
 
-MIT
+`Yolish` is licensed under the **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** with a **Runtime & User Application Code Exception**, alongside a **Commercial Embedding Dual-License**:
+
+### 1. The Yolish Engine (GNU AGPLv3)
+The Yolish compiler, bytecode virtual machine, runtime engine, and native code generators are licensed under **AGPL-3.0-or-later**. Modifications to the core Yolish engine must remain open source under compatible copyleft terms.
+
+### 2. User Programs & Application Code Exception (Free for any use)
+**As a special exception**, any programs, scripts, applications, and libraries written **IN** or compiled **BY** Yolish are **NOT** subject to copyleft restrictions. Developers, enterprises, and startups are completely free to license, distribute, sell, or keep their Yolish applications proprietary or open-source under any terms they choose.
+
+### 3. Commercial Embedding Dual-License
+For enterprises, game engine developers, database vendors, and embedded systems manufacturers who wish to embed the Yolish VM or compiler directly into closed-source commercial software without AGPLv3 copyleft obligations:
+- Commercial embedding licenses are available without copyleft terms.
+- Includes custom VM runtime tuning, C-FFI integrations, and dedicated support.
+- For commercial embedding inquiries and volume licensing, contact: **`rahadbhuiya2021@gmail.com`**.
 
