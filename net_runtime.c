@@ -46,6 +46,7 @@
    /* NOTE: building ys.exe on Windows with this file requires linking
       against ws2_32 (e.g. `gcc ... -lws2_32` or add ws2_32.lib in MSVC). */
 #  define YS_SOCK_INVALID INVALID_SOCKET
+#  define close(s) closesocket(s)
 #endif
 
 #ifdef YS_WITH_TLS
