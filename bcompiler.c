@@ -411,7 +411,7 @@ static int try_build_qname(Node *n, char *out, int outsz){
         "print","println","input","input_int","input_float","len",
         "push","pop","sort","range","filter","map","reduce","each",
         "exit","assert","assert_eq","assert_neq","assert_true",
-        "assert_false","assert_nil",NULL
+        "assert_false","assert_nil","or","default",NULL
     };
     for(int i=0;bare_builtins[i];i++)
         if(strcmp(n->name,bare_builtins[i])==0){ snprintf(out,outsz,"%s",n->name); return 1; }
@@ -522,6 +522,10 @@ static void compile_node(Node *n){
         break;
     }
     case ND_IDENT: {
+        if(strcmp(n->name,"nil")==0 || strcmp(n->name,"null")==0){
+            emit_byte(OP_NIL,line);
+            break;
+        }
         int slot=CUR->in_function?resolve_local(n->name):-1;
         if(slot>=0){ emit_byte(OP_GET_LOCAL,line); emit_u16(slot,line); }
         else {

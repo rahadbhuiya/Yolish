@@ -1412,6 +1412,33 @@ sections 33–38 below for full documentation.
 | `y.array.index_of(arr, val)` | Index of value | `y.array.index_of(arr, 4)` → `2` |
 | `y.array.contains(arr, val)` | Check membership | `y.array.contains(arr, 9)` → `true` |
 
+### y.bytes
+
+Raw binary byte buffer subsystem for low-level protocol encoding, packet parsing, hex conversion, binary file I/O, and compiler self-hosting.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `y.bytes.new(size)` | Allocate zero-initialized byte array of length `size` | `y.bytes.new(16)` → `[0, 0, ...]` |
+| `y.bytes.from_str(s)` | Convert string into byte array | `y.bytes.from_str("AB")` → `[65, 66]` |
+| `y.bytes.to_str(b)` | Convert byte array to string | `y.bytes.to_str([65, 66])` → `"AB"` |
+| `y.bytes.len(b)` | Byte length of buffer or string | `y.bytes.len(b)` |
+| `y.bytes.get(b, idx)` | Get unsigned byte value (0..255) at index | `y.bytes.get(b, 0)` |
+| `y.bytes.set(b, idx, val)` | Set byte at index (val masked with 0xFF) | `y.bytes.set(b, 0, 72)` |
+| `y.bytes.slice(b, s, e)` | Extract sub-slice from `s` to `e` | `y.bytes.slice(b, 0, 4)` |
+| `y.bytes.concat(b1, b2)` | Concatenate two byte buffers | `y.bytes.concat(b1, b2)` |
+| `y.bytes.to_hex(b)` | Format buffer into lowercase hex string | `y.bytes.to_hex(b)` → `"48656c6c6f"` |
+| `y.bytes.from_hex(hex)` | Decode hex string into byte array | `y.bytes.from_hex("4865")` → `[72, 101]` |
+| `y.bytes.read_file(path)` | Read binary file directly into byte array | `y.bytes.read_file("data.bin")` |
+| `y.bytes.write_file(path, b)` | Write byte buffer to binary file | `y.bytes.write_file("data.bin", b)` |
+
+### Safe Fallback & Guard Builtins
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `y.or(val, fallback)` | Returns `val` if not nil/error, else `fallback` | `y.or(v, "default")` |
+| `y.default(val, fallback)` | Alias for `y.or` | `y.default(v, 42)` |
+| `y.env.get_or(key, fallback)` | Read environment variable with safe fallback | `y.env.get_or("PORT", "8080")` |
+
 ---
 
 ## 26. Native Compiler

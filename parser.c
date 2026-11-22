@@ -237,7 +237,12 @@ static Node *parse_primary(Lexer *l){
             }
             if(check(l,TK_DOT)){
                 eat(l);
-                Token m=expect(l,TK_IDENT);
+                Token m;
+                if(check(l,TK_IDENT) || (l->cur.kind>=TK_FN && l->cur.kind<=TK_TEST) || l->cur.kind==TK_OR || l->cur.kind==TK_AND || l->cur.kind==TK_NOT || l->cur.kind==TK_AS){
+                    m=eat(l);
+                } else {
+                    m=expect(l,TK_IDENT);
+                }
                 Node *dot=alloc_node(ND_DOT);
                 dot->left=n;
                 int ml=m.len<63?m.len:63;

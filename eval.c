@@ -765,6 +765,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
     case ND_IDENT:{
         Val *v=env_get(env,n->name);
         if(v) return *v;
+        if(strcmp_u(n->name,"nil")==0 || strcmp_u(n->name,"null")==0) return make_nil();
         /* builtin namespace prefixes are not variables */
         { static const char *ns[]={"y","process","sys","cap","gc",NULL};
           for(int _k=0;ns[_k];_k++) if(strcmp(n->name,ns[_k])==0) return make_nil(); }
@@ -1342,6 +1343,7 @@ __attribute__((noinline)) Val eval_node(Node *n,Env *env){
             ||strcmp_u(n->name,"y.each")==0   ||strcmp_u(n->name,"each")==0
             ||strcmp_u(n->name,"y.min_arr")==0||strcmp_u(n->name,"y.max_arr")==0
             ||strcmp_u(n->name,"y.exit")==0   ||strcmp_u(n->name,"exit")==0
+            ||strcmp_u(n->name,"or")==0       ||strcmp_u(n->name,"default")==0
             /* v2.1 test assertions */
             ||strcmp_u(n->name,"assert")==0
             ||strcmp_u(n->name,"assert_eq")==0
@@ -3058,8 +3060,19 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
         int s=(argc>1)?1:0;
         Val k=eval_node(args[s],env);
         if(g_throwing) return make_nil();
-        const char *v=getenv(k.sval);
+        const char *v=(k.type==YS_STR&&k.sval)?getenv(k.sval):NULL;
         return v ? make_str(v) : make_nil();
+    }
+
+    /* y.env.get_or(key, fallback) → string */
+    if(strcmp_u(name,"y.env.get_or")==0){
+        int s=(argc>2)?1:0;
+        Val k=eval_node(args[s],env);
+        Val fallback=make_nil();
+        if(argc>s+1) fallback=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        const char *v=(k.type==YS_STR&&k.sval)?getenv(k.sval):NULL;
+        return (v && v[0]) ? make_str(v) : fallback;
     }
 
     /* y.env.set(key, val) → nil */
@@ -3896,6 +3909,311 @@ static Val call_builtin(const char *name,Node **args,int argc,Env *env){
             }
         }
         return result;
+    }
+
+    /*
+       y.bytes.* — Raw binary byte buffer subsystem
+       Enables low-level binary buffer manipulation, hex encoding/decoding,
+       binary file I/O, network packet packing, and compiler self-hosting.
+    */
+    if(strcmp_u(name,"y.bytes.new")==0){
+        int s=(argc>1)?1:0;
+        Val sz_v=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        int64_t sz=val_int(sz_v);
+        if(sz<=0) sz=0;
+        if(sz>1024*1024*16) sz=1024*1024*16; /* 16MB buffer guard */
+        Val r=make_nil();
+        r.type=YS_ARR;
+        r.arr_data=alloc_arr((int)sz>0?(int)sz:1);
+        r.arr_len=(int)sz;
+        r.arr_cap=(int)sz>0?(int)sz:1;
+        for(int i=0;i<(int)sz;i++) r.arr_data[i]=make_int(0);
+        return r;
+    }
+    if(strcmp_u(name,"y.bytes.from_str")==0){
+        int s=(argc>1)?1:0;
+        Val sv=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        if(sv.type!=YS_STR) return make_nil();
+        int len=sv.slen;
+        Val r=make_nil();
+        r.type=YS_ARR;
+        r.arr_data=alloc_arr(len>0?len:1);
+        r.arr_len=len;
+        r.arr_cap=len>0?len:1;
+        for(int i=0;i<len;i++) r.arr_data[i]=make_int((unsigned char)sv.sval[i]);
+        return r;
+    }
+    if(strcmp_u(name,"y.bytes.to_str")==0){
+        int s=(argc>1)?1:0;
+        Val bv=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        if(bv.type==YS_STR) return bv;
+        if(bv.type!=YS_ARR) return make_nil();
+        int len=bv.arr_len;
+        char *buf=gc_alloc_str(len+1);
+        for(int i=0;i<len;i++){
+            buf[i]=(char)(val_int(bv.arr_data[i]) & 0xFF);
+        }
+        buf[len]=0;
+        Val r=make_nil();
+        r.type=YS_STR;
+        r.sval=buf;
+        r.slen=len;
+        return r;
+    }
+    if(strcmp_u(name,"y.bytes.len")==0){
+        int s=(argc>1)?1:0;
+        Val bv=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        if(bv.type==YS_ARR) return make_int(bv.arr_len);
+        if(bv.type==YS_STR) return make_int(bv.slen);
+        return make_int(0);
+    }
+    if(strcmp_u(name,"y.bytes.get")==0){
+        int s=(argc>2)?1:0;
+        Val bv=eval_node(args[s],env);
+        Val iv=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        int64_t idx=val_int(iv);
+        if(bv.type==YS_ARR){
+            if(idx<0 || idx>=bv.arr_len) return make_nil();
+            return make_int(val_int(bv.arr_data[idx]) & 0xFF);
+        }
+        if(bv.type==YS_STR){
+            if(idx<0 || idx>=bv.slen) return make_nil();
+            return make_int((unsigned char)bv.sval[idx]);
+        }
+        return make_nil();
+    }
+    if(strcmp_u(name,"y.bytes.set")==0){
+        int s=(argc>3)?1:0;
+        Val bv=eval_node(args[s],env);
+        Val iv=eval_node(args[s+1],env);
+        Val vv=eval_node(args[s+2],env);
+        if(g_throwing) return make_nil();
+        int64_t idx=val_int(iv);
+        int64_t bval=val_int(vv) & 0xFF;
+        if(bv.type==YS_ARR){
+            if(idx>=0 && idx<bv.arr_len){
+                bv.arr_data[idx]=make_int(bval);
+                return bv;
+            }
+        }
+        if(bv.type==YS_STR){
+            if(idx>=0 && idx<bv.slen){
+                bv.sval[idx]=(char)bval;
+                return bv;
+            }
+        }
+        return make_nil();
+    }
+    if(strcmp_u(name,"y.bytes.slice")==0){
+        int s=(argc>3)?1:0;
+        Val bv=eval_node(args[s],env);
+        Val s_v=eval_node(args[s+1],env);
+        Val e_v=eval_node(args[s+2],env);
+        if(g_throwing) return make_nil();
+        int64_t st=val_int(s_v);
+        int64_t en=val_int(e_v);
+        int total=(bv.type==YS_ARR)?bv.arr_len:(bv.type==YS_STR?bv.slen:0);
+        if(st<0) st=0;
+        if(en>total) en=total;
+        if(st>en) st=en;
+        int count=(int)(en-st);
+        if(bv.type==YS_ARR){
+            Val r=make_nil();
+            r.type=YS_ARR;
+            r.arr_data=alloc_arr(count>0?count:1);
+            r.arr_len=count;
+            r.arr_cap=count>0?count:1;
+            for(int i=0;i<count;i++) r.arr_data[i]=bv.arr_data[st+i];
+            return r;
+        }
+        if(bv.type==YS_STR){
+            char *buf=gc_alloc_str(count+1);
+            if(count>0) memcpy(buf,bv.sval+st,(size_t)count);
+            buf[count]=0;
+            Val r=make_nil();
+            r.type=YS_STR;
+            r.sval=buf;
+            r.slen=count;
+            return r;
+        }
+        return make_nil();
+    }
+    if(strcmp_u(name,"y.bytes.concat")==0){
+        int s=(argc>2)?1:0;
+        Val b1=eval_node(args[s],env);
+        Val b2=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        if(b1.type==YS_ARR && b2.type==YS_ARR){
+            int nlen=b1.arr_len+b2.arr_len;
+            Val r=make_nil();
+            r.type=YS_ARR;
+            r.arr_data=alloc_arr(nlen>0?nlen:1);
+            r.arr_len=nlen;
+            r.arr_cap=nlen>0?nlen:1;
+            for(int i=0;i<b1.arr_len;i++) r.arr_data[i]=b1.arr_data[i];
+            for(int i=0;i<b2.arr_len;i++) r.arr_data[b1.arr_len+i]=b2.arr_data[i];
+            return r;
+        }
+        int l1=(b1.type==YS_STR)?b1.slen:(b1.type==YS_ARR?b1.arr_len:0);
+        int l2=(b2.type==YS_STR)?b2.slen:(b2.type==YS_ARR?b2.arr_len:0);
+        char *buf=gc_alloc_str(l1+l2+1);
+        int bi=0;
+        if(b1.type==YS_STR){ memcpy(buf+bi,b1.sval,(size_t)l1); bi+=l1; }
+        else if(b1.type==YS_ARR){ for(int i=0;i<l1;i++) buf[bi++]=(char)(val_int(b1.arr_data[i])&0xFF); }
+        if(b2.type==YS_STR){ memcpy(buf+bi,b2.sval,(size_t)l2); bi+=l2; }
+        else if(b2.type==YS_ARR){ for(int i=0;i<l2;i++) buf[bi++]=(char)(val_int(b2.arr_data[i])&0xFF); }
+        buf[bi]=0;
+        Val r=make_nil();
+        r.type=YS_STR;
+        r.sval=buf;
+        r.slen=bi;
+        return r;
+    }
+    if(strcmp_u(name,"y.bytes.to_hex")==0){
+        int s=(argc>1)?1:0;
+        Val bv=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        int len=(bv.type==YS_ARR)?bv.arr_len:(bv.type==YS_STR?bv.slen:0);
+        char *buf=gc_alloc_str(len*2+1);
+        static const char hexchars[]="0123456789abcdef";
+        for(int i=0;i<len;i++){
+            unsigned char byte=(bv.type==YS_ARR)?(unsigned char)(val_int(bv.arr_data[i])&0xFF):(unsigned char)bv.sval[i];
+            buf[i*2]   = hexchars[(byte>>4)&0x0F];
+            buf[i*2+1] = hexchars[byte&0x0F];
+        }
+        buf[len*2]=0;
+        Val r=make_nil();
+        r.type=YS_STR;
+        r.sval=buf;
+        r.slen=len*2;
+        return r;
+    }
+    if(strcmp_u(name,"y.bytes.from_hex")==0){
+        int s=(argc>1)?1:0;
+        Val hv=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        if(hv.type!=YS_STR) return make_nil();
+        const char *p=hv.sval;
+        int plen=hv.slen;
+        int valid_hex=0;
+        for(int i=0;i<plen;i++){
+            char c=p[i];
+            if((c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F')) valid_hex++;
+        }
+        int byte_count=valid_hex/2;
+        Val r=make_nil();
+        r.type=YS_ARR;
+        r.arr_data=alloc_arr(byte_count>0?byte_count:1);
+        r.arr_len=byte_count;
+        r.arr_cap=byte_count>0?byte_count:1;
+        int out_idx=0;
+        int hi=-1;
+        for(int i=0;i<plen;i++){
+            char c=p[i];
+            int nibble=-1;
+            if(c>='0'&&c<='9') nibble=c-'0';
+            else if(c>='a'&&c<='f') nibble=10+(c-'a');
+            else if(c>='A'&&c<='F') nibble=10+(c-'A');
+            if(nibble>=0){
+                if(hi<0){
+                    hi=nibble;
+                } else {
+                    r.arr_data[out_idx++]=make_int((int64_t)((hi<<4)|nibble));
+                    hi=-1;
+                }
+            }
+        }
+        return r;
+    }
+    if(strcmp_u(name,"y.bytes.read_file")==0){
+        int s=(argc>1)?1:0;
+        Val pv=eval_node(args[s],env);
+        if(g_throwing) return make_nil();
+        if(pv.type!=YS_STR) return make_nil();
+        FILE *fp=fopen(pv.sval,"rb");
+        if(!fp && g_src_dir[0]){
+            char rel[640]; snprintf(rel,sizeof(rel),"%s%s",g_src_dir,pv.sval);
+            fp=fopen(rel,"rb");
+        }
+        if(!fp) return make_nil();
+        fseek(fp,0,SEEK_END);
+        long sz=ftell(fp);
+        if(sz<0) sz=0;
+        fseek(fp,0,SEEK_SET);
+        Val r=make_nil();
+        r.type=YS_ARR;
+        r.arr_data=alloc_arr((int)sz>0?(int)sz:1);
+        r.arr_len=(int)sz;
+        r.arr_cap=(int)sz>0?(int)sz:1;
+        unsigned char chunk[4096];
+        int total=0;
+        while(total<(int)sz){
+            size_t to_read=(sizeof(chunk)<(size_t)(sz-total))?sizeof(chunk):(size_t)(sz-total);
+            size_t n=fread(chunk,1,to_read,fp);
+            if(n==0) break;
+            for(size_t i=0;i<n;i++){
+                r.arr_data[total++]=make_int(chunk[i]);
+            }
+        }
+        r.arr_len=total;
+        fclose(fp);
+        return r;
+    }
+    if(strcmp_u(name,"y.bytes.write_file")==0){
+        int s=(argc>2)?1:0;
+        Val pv=eval_node(args[s],env);
+        Val bv=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        if(pv.type!=YS_STR) return make_int(-1);
+        FILE *fp=fopen(pv.sval,"wb");
+        if(!fp && g_src_dir[0]){
+            char rel[640]; snprintf(rel,sizeof(rel),"%s%s",g_src_dir,pv.sval);
+            fp=fopen(rel,"wb");
+        }
+        if(!fp) return make_int(-1);
+        int written=0;
+        if(bv.type==YS_ARR){
+            unsigned char chunk[4096];
+            int ci=0;
+            for(int i=0;i<bv.arr_len;i++){
+                chunk[ci++]=(unsigned char)(val_int(bv.arr_data[i])&0xFF);
+                if(ci==(int)sizeof(chunk)){
+                    size_t w=fwrite(chunk,1,(size_t)ci,fp);
+                    written+=(int)w;
+                    ci=0;
+                }
+            }
+            if(ci>0){
+                size_t w=fwrite(chunk,1,(size_t)ci,fp);
+                written+=(int)w;
+            }
+        } else if(bv.type==YS_STR){
+            size_t w=fwrite(bv.sval,1,(size_t)bv.slen,fp);
+            written=(int)w;
+        }
+        fclose(fp);
+        return make_int(written);
+    }
+
+    /*
+       y.or(val, fallback) / y.default(val, fallback)
+       Ergonomic safe evaluation fallback: returns val if not nil or error;
+       otherwise evaluates and returns fallback.
+    */
+    if(strcmp_u(name,"y.or")==0||strcmp_u(name,"y.default")==0||strcmp_u(name,"or")==0||strcmp_u(name,"default")==0){
+        int s=(argc>2)?1:0;
+        Val val=eval_node(args[s],env);
+        Val fallback=make_nil();
+        if(argc>s+1) fallback=eval_node(args[s+1],env);
+        if(g_throwing) return make_nil();
+        int is_err = (val.type==YS_NIL) || (val.type==YS_ERR) ||
+                     (val.type==YS_STRUCT && strcmp_u(val.struct_name,"Error")==0);
+        return is_err ? fallback : val;
     }
 
     return make_nil();

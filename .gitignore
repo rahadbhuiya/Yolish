@@ -5,4 +5,7 @@ ys_debug
 .DS_Store
 ys_o2
 audit.log
-out.txtys.exe
+out.txt
+ys.exe
+*.exe
+
